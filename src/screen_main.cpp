@@ -16,6 +16,11 @@
 #include "screen_main.h"
 #include "event_bus.h"
 
+// SLOVENSKI FONTI (Montserrat + ČŠŽ) so v src/fonts/.
+// PlatformIO jih prevede samodejno kot ločene .c enote.
+// Extern deklaracije so v LV_FONT_CUSTOM_DECLARE v lv_conf.h.
+// ============================================================
+
 // ============================================================
 // LOGGING
 // ============================================================
@@ -114,7 +119,7 @@ static RadWidget   s_rad[4]            = {};
 static lv_timer_t* s_countdown_timer   = nullptr;
 static bool        s_created           = false;
 
-static const char* SSR_NAMES[4]   = { "Glavna\nveriga", "Pred\ngaražo", "Pred\nlopo", "Rezerva" };
+static const char* SSR_NAMES[4]   = { "Glavna\nveriga", "Glavna\ndodatno", "Pred\nlopo", "Pred\ngaražo" };
 static const char* RADAR_NAMES[4] = { "Vhod", "Cesta L", "Cesta D", "Garaža" };
 
 // ============================================================
@@ -281,7 +286,7 @@ static void ssr_create(uint8_t idx, lv_obj_t* parent, int x, int y) {
     w.lbl_name = lv_label_create(w.btn);
     lv_label_set_text(w.lbl_name, SSR_NAMES[idx]);
     lv_obj_set_style_text_color(w.lbl_name, C_OFF_TXT, LV_PART_MAIN);
-    lv_obj_set_style_text_font(w.lbl_name, &lv_font_montserrat_12, LV_PART_MAIN);
+    lv_obj_set_style_text_font(w.lbl_name, &font_montserrat_18_sl, LV_PART_MAIN);
     lv_obj_align(w.lbl_name, LV_ALIGN_TOP_LEFT, 8, 8);
     lv_label_set_long_mode(w.lbl_name, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(w.lbl_name, SSR_BTN_W / 2);
@@ -289,14 +294,14 @@ static void ssr_create(uint8_t idx, lv_obj_t* parent, int x, int y) {
     w.lbl_countdown = lv_label_create(w.btn);
     lv_label_set_text(w.lbl_countdown, "00:00");
     lv_obj_set_style_text_color(w.lbl_countdown, C_OFF_TXT, LV_PART_MAIN);
-    lv_obj_set_style_text_font(w.lbl_countdown, &lv_font_montserrat_24, LV_PART_MAIN);
+    lv_obj_set_style_text_font(w.lbl_countdown, &font_montserrat_24_sl, LV_PART_MAIN);
     lv_obj_align(w.lbl_countdown, LV_ALIGN_CENTER, 0, 6);
     lv_obj_add_flag(w.lbl_countdown, LV_OBJ_FLAG_HIDDEN);
 
     w.lbl_status = lv_label_create(w.btn);
     lv_label_set_text(w.lbl_status, "Izključeno");
     lv_obj_set_style_text_color(w.lbl_status, C_OFF_TXT, LV_PART_MAIN);
-    lv_obj_set_style_text_font(w.lbl_status, &lv_font_montserrat_12, LV_PART_MAIN);
+    lv_obj_set_style_text_font(w.lbl_status, &font_montserrat_14_sl, LV_PART_MAIN);
     lv_obj_align(w.lbl_status, LV_ALIGN_BOTTOM_LEFT, 8, -(SSR_BAR_H + 8));
 
     w.bar_hold = lv_bar_create(w.btn);
@@ -313,7 +318,7 @@ static void ssr_create(uint8_t idx, lv_obj_t* parent, int x, int y) {
     w.lbl_lock = lv_label_create(w.btn);
     lv_label_set_text(w.lbl_lock, LV_SYMBOL_CLOSE);
     lv_obj_set_style_text_color(w.lbl_lock, C_DIS_TXT, LV_PART_MAIN);
-    lv_obj_set_style_text_font(w.lbl_lock, &lv_font_montserrat_16, LV_PART_MAIN);
+    lv_obj_set_style_text_font(w.lbl_lock, &font_montserrat_18_sl, LV_PART_MAIN);
     lv_obj_align(w.lbl_lock, LV_ALIGN_TOP_RIGHT, -8, 8);
     lv_obj_add_flag(w.lbl_lock, LV_OBJ_FLAG_HIDDEN);
 }
@@ -408,13 +413,13 @@ static void pkg_create(uint8_t idx, lv_obj_t* parent, int x, int y) {
     w.lbl_title = lv_label_create(w.card);
     lv_label_set_text(w.lbl_title, idx == 0 ? "Mesto A" : "Mesto B");
     lv_obj_set_style_text_color(w.lbl_title, lv_color_hex(0x888888), LV_PART_MAIN);
-    lv_obj_set_style_text_font(w.lbl_title, &lv_font_montserrat_12, LV_PART_MAIN);
+    lv_obj_set_style_text_font(w.lbl_title, &font_montserrat_14_sl, LV_PART_MAIN);
     lv_obj_align(w.lbl_title, LV_ALIGN_TOP_LEFT, 8, 6);
 
     w.lbl_name = lv_label_create(w.card);
     lv_label_set_text(w.lbl_name, "Prazno");
     lv_obj_set_style_text_color(w.lbl_name, lv_color_hex(0x666666), LV_PART_MAIN);
-    lv_obj_set_style_text_font(w.lbl_name, &lv_font_montserrat_16, LV_PART_MAIN);
+    lv_obj_set_style_text_font(w.lbl_name, &font_montserrat_18_sl, LV_PART_MAIN);
     lv_obj_set_pos(w.lbl_name, 8, 28);
     lv_label_set_long_mode(w.lbl_name, LV_LABEL_LONG_DOT);
     lv_obj_set_width(w.lbl_name, PKG_W - 76);
@@ -422,7 +427,7 @@ static void pkg_create(uint8_t idx, lv_obj_t* parent, int x, int y) {
     w.lbl_stats = lv_label_create(w.card);
     lv_label_set_text(w.lbl_stats, "");
     lv_obj_set_style_text_color(w.lbl_stats, lv_color_hex(0x555555), LV_PART_MAIN);
-    lv_obj_set_style_text_font(w.lbl_stats, &lv_font_montserrat_12, LV_PART_MAIN);
+    lv_obj_set_style_text_font(w.lbl_stats, &font_montserrat_14_sl, LV_PART_MAIN);
     lv_obj_align(w.lbl_stats, LV_ALIGN_BOTTOM_LEFT, 8, -6);
 
     car_create(w, PKG_W - 68, 16, C_CAR_EMPTY);
@@ -465,7 +470,7 @@ static void rad_create(uint8_t idx, lv_obj_t* parent, int x, int y) {
     w.lbl_pct = lv_label_create(parent);
     lv_label_set_text(w.lbl_pct, "0%");
     lv_obj_set_style_text_color(w.lbl_pct, C_RAD_LOW, LV_PART_MAIN);
-    lv_obj_set_style_text_font(w.lbl_pct, &lv_font_montserrat_12, LV_PART_MAIN);
+    lv_obj_set_style_text_font(w.lbl_pct, &font_montserrat_14_sl, LV_PART_MAIN);
     lv_obj_set_pos(w.lbl_pct,
                    x + (RAD_W - RAD_ARC_SZ) / 2 + RAD_ARC_SZ / 2 - 10,
                    y + RAD_ARC_SZ / 2 - 8);
@@ -473,7 +478,7 @@ static void rad_create(uint8_t idx, lv_obj_t* parent, int x, int y) {
     w.lbl_name = lv_label_create(parent);
     lv_label_set_text(w.lbl_name, RADAR_NAMES[idx]);
     lv_obj_set_style_text_color(w.lbl_name, lv_color_hex(0x666666), LV_PART_MAIN);
-    lv_obj_set_style_text_font(w.lbl_name, &lv_font_montserrat_12, LV_PART_MAIN);
+    lv_obj_set_style_text_font(w.lbl_name, &font_montserrat_14_sl, LV_PART_MAIN);
     lv_obj_set_pos(w.lbl_name, x, y + RAD_ARC_SZ + 2);
     lv_obj_set_width(w.lbl_name, RAD_W);
     lv_obj_set_style_text_align(w.lbl_name, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);

@@ -138,7 +138,13 @@
 #define LV_FONT_SIMSUN_16_CJK            0
 #define LV_FONT_UNSCII_8  0
 #define LV_FONT_UNSCII_16 0
-#define LV_FONT_CUSTOM_DECLARE
+#define LV_FONT_CUSTOM_DECLARE \
+    extern const lv_font_t font_montserrat_14_sl; \
+    extern const lv_font_t font_montserrat_16_sl; \
+    extern const lv_font_t font_montserrat_18_sl; \
+    extern const lv_font_t font_montserrat_20_sl; \
+    extern const lv_font_t font_montserrat_24_sl; \
+    extern const lv_font_t font_montserrat_28_sl;
 #define LV_FONT_DEFAULT &lv_font_montserrat_14
 #define LV_FONT_FMT_TXT_LARGE    0
 #define LV_USE_FONT_COMPRESSED   0
