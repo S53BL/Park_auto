@@ -33,8 +33,13 @@ enum class EventType : uint16_t {
     BUTTON_SSR3         = 0x0042,
     BUTTON_SSR4         = 0x0043,
     BUTTON_SSR_DISABLE  = 0x0044,
-    BUTTON_PARTY_TOGGLE = 0x0045,
-    BUTTON_EDIT_VEHICLE_A = 0x0046,   // ← 
+    BUTTON_PARTY_TOGGLE     = 0x0045,
+    BUTTON_PARTY_EFFECT     = 0x0049,
+    BUTTON_PARTY_COLOR      = 0x004A,
+    BUTTON_PARTY_BRIGHTNESS = 0x004B,
+    BUTTON_PARTY_SPEED      = 0x004C,
+    BUTTON_PARTY_PRESET     = 0x004D,
+    BUTTON_EDIT_VEHICLE_A = 0x0046,   // ←
     BUTTON_EDIT_VEHICLE_B = 0x0047,   // ← 
     BUTTON_SSR          = 0x0048,     // ← (kratek dotik, payload=ssr_idx)    
     // SSR stanje (za LCD posodobitev)

@@ -57,10 +57,9 @@ public:
 };
 
 #include "screen_service.h"
+#include "screen_party.h"
 extern void screen_main_create(lv_obj_t* parent);
-extern void screen_party_create(lv_obj_t* parent);
 extern void screen_main_apply_updates();
-extern void screen_party_apply_updates();
 
 #define DISPI(fmt, ...) Serial.printf("[DISP] "    fmt "\n", ##__VA_ARGS__)
 #define DISPW(fmt, ...) Serial.printf("[DISP][W] " fmt "\n", ##__VA_ARGS__)
@@ -360,8 +359,13 @@ bool hal_display_init() {
         DISPI("LVGL heap po screen_service: free=%u B frag=%d%%",
               mon.free_size, mon.frag_pct);
     }
-    // screen_party_create(s_screen_party);
-    // { lv_mem_monitor_t mon; lv_mem_monitor(&mon); DISPI("LVGL heap po screen_party: free=%u B frag=%d%%", mon.free_size, mon.frag_pct); }
+    screen_party_create(s_screen_party);
+    {
+        lv_mem_monitor_t mon;
+        lv_mem_monitor(&mon);
+        DISPI("LVGL heap po screen_party: free=%u B frag=%d%%",
+              mon.free_size, mon.frag_pct);
+    }
     DISPI("Zasloni OK");
 
     // 9. Prikaži glavni zaslon
