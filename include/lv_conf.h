@@ -12,6 +12,10 @@
 #include "my_include.h"
 #endif
 
+
+#define LV_USE_OS   LV_OS_NONE
+#define LV_USE_FREERTOS_TASK_NOTIFY 0
+
 // COLOR
 #define LV_COLOR_DEPTH 16
 
@@ -27,7 +31,7 @@
 #define LV_STDARG_INCLUDE       <stdarg.h>
 
 #if LV_USE_STDLIB_MALLOC == LV_STDLIB_BUILTIN
-    #define LV_MEM_SIZE (64 * 1024U)
+    #define LV_MEM_SIZE (128 * 1024U)
     #define LV_MEM_POOL_EXPAND_SIZE 0
     #define LV_MEM_ADR 0
     #if LV_MEM_ADR == 0
@@ -39,9 +43,6 @@
 // HAL
 #define LV_DEF_REFR_PERIOD  33
 #define LV_DPI_DEF 130
-
-// OS — NONE (LVGL niet thread-safe in single-task mode — we handle it ourselves)
-#define LV_USE_OS   LV_OS_NONE
 
 // RENDERING
 #define LV_DRAW_BUF_STRIDE_ALIGN  1

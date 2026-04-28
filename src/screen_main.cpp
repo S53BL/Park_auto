@@ -473,7 +473,7 @@ static void rad_create(uint8_t idx, lv_obj_t* parent, int x, int y) {
     w.lbl_name = lv_label_create(parent);
     lv_label_set_text(w.lbl_name, RADAR_NAMES[idx]);
     lv_obj_set_style_text_color(w.lbl_name, lv_color_hex(0x666666), LV_PART_MAIN);
-    lv_obj_set_style_text_font(w.lbl_name, &lv_font_montserrat_10, LV_PART_MAIN);
+    lv_obj_set_style_text_font(w.lbl_name, &lv_font_montserrat_12, LV_PART_MAIN);
     lv_obj_set_pos(w.lbl_name, x, y + RAD_ARC_SZ + 2);
     lv_obj_set_width(w.lbl_name, RAD_W);
     lv_obj_set_style_text_align(w.lbl_name, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
@@ -507,6 +507,8 @@ void screen_main_create(lv_obj_t* parent) {
     s_created = true;
     SMNI("screen_main_create OK  SSR=%dx%d  PKG=%dx%d  RAD_ARC=%dpx",
          SSR_BTN_W, SSR_BTN_H, PKG_W, PKG_H, RAD_ARC_SZ);
+    SMNI("Layout: SSR_SEC_H=%d PKG_Y=%d RAD_Y=%d SCR_total=%d",
+         SSR_SEC_H, PKG_Y, RAD_Y, RAD_Y + RAD_ARC_SZ + 20);
 }
 
 void screen_main_apply_updates() {

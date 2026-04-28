@@ -41,6 +41,21 @@
 #include "TCA9554.h"
 #include "esp_lcd_touch_axs15231b.h"
 
+// AXS15231B QSPI bug: writeCommand(RAMWR via 0x02) resets the quad-path (0x32) write
+// position to absolute y=0, ignoring the current RASET window. With PARTIAL mode each
+// tile issues RAMWR before writePixels, overwriting y=0..39 repeatedly. Fix: use
+// LV_DISPLAY_RENDER_MODE_FULL so writeAddrWindow is called once (y=0..479), RAMWR
+// correctly resets to y=0, and writePixels writes the full frame in one pass.
+// _currentX=0xFFFF kept to force CASET resend each call (harmless, belt-and-suspenders).
+class Arduino_AXS15231B_Fixed : public Arduino_AXS15231B {
+public:
+    using Arduino_AXS15231B::Arduino_AXS15231B;
+    void writeAddrWindow(int16_t x, int16_t y, uint16_t w, uint16_t h) override {
+        _currentX = 0xFFFF;
+        Arduino_AXS15231B::writeAddrWindow(x, y, w, h);
+    }
+};
+
 extern void screen_main_create(lv_obj_t* parent);
 extern void screen_service_create(lv_obj_t* parent);
 extern void screen_party_create(lv_obj_t* parent);
@@ -67,8 +82,8 @@ static Arduino_GFX*     s_gfx = nullptr;
 
 static lv_display_t* s_lvgl_disp  = nullptr;
 static lv_indev_t*   s_lvgl_touch = nullptr;
-static lv_color_t*   s_buf1       = nullptr;
-static lv_color_t*   s_buf2       = nullptr;
+static uint8_t*      s_buf1       = nullptr;
+static uint8_t*      s_buf2       = nullptr;
 
 static lv_obj_t* s_screen_main    = nullptr;
 static lv_obj_t* s_screen_service = nullptr;
@@ -104,6 +119,13 @@ static SemaphoreHandle_t s_upd_mutex = nullptr;
 static uint32_t lvgl_tick_cb() { return millis(); }
 
 static void lvgl_flush_cb(lv_display_t* disp, const lv_area_t* area, uint8_t* px_map) {
+    static uint32_t s_flush_cnt = 0;
+    if (s_flush_cnt < 20) {
+        DISPI("flush #%lu x1=%d y1=%d x2=%d y2=%d",
+              (unsigned long)s_flush_cnt,
+              area->x1, area->y1, area->x2, area->y2);
+    }
+    s_flush_cnt++;
     if (!s_gfx) { lv_display_flush_ready(disp); return; }
     s_gfx->draw16bitRGBBitmap(
         area->x1, area->y1,
@@ -136,6 +158,11 @@ static void lvgl_touch_cb(lv_indev_t* indev, lv_indev_data_t* data) {
 
 static void swipe_cb(lv_event_t* e) {
     lv_dir_t dir = lv_indev_get_gesture_dir(lv_indev_active());
+    const char* dir_str = (dir == LV_DIR_LEFT)  ? "LEFT"  :
+                          (dir == LV_DIR_RIGHT) ? "RIGHT" :
+                          (dir == LV_DIR_TOP)   ? "UP"    :
+                          (dir == LV_DIR_BOTTOM)? "DOWN"  : "NONE";
+    DISPI("swipe: %s  screen=%d", dir_str, (int)s_current_screen);
     if (dir == LV_DIR_LEFT && s_current_screen == DisplayScreen::MAIN) {
         hal_display_showScreen(DisplayScreen::SERVICE);
     } else if (dir == LV_DIR_RIGHT) {
@@ -215,6 +242,7 @@ static bool tca9554_touch_reset() {
 
 bool hal_display_init() {
     DISPI("=== hal_display_init ===");
+    DISPI("sizeof lv_color_t=%d lv_color16_t=%d", (int)sizeof(lv_color_t), (int)sizeof(uint16_t));
 
     if (!s_upd_mutex) {
         s_upd_mutex = xSemaphoreCreateMutex();
@@ -232,7 +260,12 @@ bool hal_display_init() {
     s_bus = new Arduino_ESP32QSPI(
         PIN_LCD_CS, PIN_LCD_CLK,
         PIN_LCD_D0, PIN_LCD_D1, PIN_LCD_D2, PIN_LCD_D3);
-    s_gfx = new Arduino_AXS15231B(s_bus, -1, 0, false, LCD_HOR_RES, LCD_VER_RES);
+    s_gfx = new Arduino_AXS15231B_Fixed(
+        s_bus, -1, 0, false,
+        LCD_HOR_RES, LCD_VER_RES,
+        0, 0, 0, 0,
+        axs15231b_320480_type1_init_operations,
+        sizeof(axs15231b_320480_type1_init_operations));
     if (!s_gfx->begin()) {
         DISPE("GFX begin() NAPAKA!");
         delete s_gfx; delete s_bus;
@@ -253,37 +286,29 @@ bool hal_display_init() {
     DISPI("LVGL %d.%d.%d init OK",
           lv_version_major(), lv_version_minor(), lv_version_patch());
 
-    // 5. LVGL bufferji — INTERNI RAM (skladno z demo partial mode)
-    // Demo: bufSize = 320*40; heap_caps_malloc(bufSize*2, MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT)
-    // Naš buf_bytes = 320 * 40 * sizeof(lv_color_t) = 320*40*2 = 25600 B  (enako bufSize*2)
-    uint32_t buf_bytes = (uint32_t)LCD_HOR_RES * LVGL_BUF_LINES * sizeof(lv_color_t);
-    s_buf1 = (lv_color_t*)heap_caps_malloc(buf_bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    s_buf2 = (lv_color_t*)heap_caps_malloc(buf_bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    if (!s_buf1 || !s_buf2) {
-        // Fallback na PSRAM če interni RAM ni dovolj
-        DISPW("Interni RAM za LVGL buffer ni dovolj — fallback PSRAM");
-        if (s_buf1) { heap_caps_free(s_buf1); s_buf1 = nullptr; }
-        if (s_buf2) { heap_caps_free(s_buf2); s_buf2 = nullptr; }
-        s_buf1 = (lv_color_t*)heap_caps_malloc(buf_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        s_buf2 = (lv_color_t*)heap_caps_malloc(buf_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        if (!s_buf1 || !s_buf2) {
-            DISPE("LVGL buffer NAPAKA! Heap prosto: %lu B  PSRAM: %lu B",
-                  (unsigned long)ESP.getFreeHeap(), (unsigned long)ESP.getFreePsram());
-            if (s_buf1) heap_caps_free(s_buf1);
-            if (s_buf2) heap_caps_free(s_buf2);
-            return false;
-        }
-        DISPI("LVGL bufferji OK (2 × %lu B PSRAM — fallback)", (unsigned long)buf_bytes);
-    } else {
-        DISPI("LVGL bufferji OK (2 × %lu B interni RAM)", (unsigned long)buf_bytes);
+    // 5. LVGL buffer — FULL-SCREEN mode v PSRAM
+    // AXS15231B QSPI: writeCommand(RAMWR via 0x02) resetira pozicijo quad-write poti na y=0.
+    // Pri PARTIAL mode se RAMWR pošlje pred vsakim tilom → vsak tile prepiše y=0..39.
+    // FULL mode: en sam writeAddrWindow(0,0,320,480) + en writePixels za celoten zaslon →
+    // RAMWR resetira na y=0 kar je točno pravilno izhodišče, brez nadaljnjih resetov.
+    // buf_bytes = 320 * 480 * 2 = 307200 B → v PSRAM (interni RAM premajhen)
+    uint32_t buf_bytes = (uint32_t)LCD_HOR_RES * LCD_VER_RES * sizeof(uint16_t);
+    s_buf1 = (uint8_t*)heap_caps_malloc(buf_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!s_buf1) {
+        DISPE("LVGL full-screen buffer NAPAKA! PSRAM prosto: %lu B",
+              (unsigned long)ESP.getFreePsram());
+        return false;
     }
+    DISPI("LVGL buffer OK (%lu B PSRAM full-screen)", (unsigned long)buf_bytes);
 
     // 6. LVGL display konfiguracija
     s_lvgl_disp = lv_display_create(LCD_HOR_RES, LCD_VER_RES);
     if (!s_lvgl_disp) { DISPE("lv_display_create napaka!"); return false; }
+    lv_display_set_color_format(s_lvgl_disp, LV_COLOR_FORMAT_RGB565);
     lv_display_set_flush_cb(s_lvgl_disp, lvgl_flush_cb);
-    lv_display_set_buffers(s_lvgl_disp, s_buf1, s_buf2, buf_bytes,
-                           LV_DISPLAY_RENDER_MODE_PARTIAL);
+    lv_display_set_buffers(s_lvgl_disp, s_buf1, nullptr, buf_bytes,
+                           LV_DISPLAY_RENDER_MODE_FULL);
+    DISPI("LVGL buf_bytes=%lu buf1=%p (FULL mode)", (unsigned long)buf_bytes, (void*)s_buf1);
 
     // 7. Touch indev
     s_lvgl_touch = lv_indev_create();
@@ -308,8 +333,15 @@ bool hal_display_init() {
         return false;
     }
     screen_main_create(s_screen_main);
-    screen_service_create(s_screen_service);
-    screen_party_create(s_screen_party);
+    {
+        lv_mem_monitor_t mon;
+        lv_mem_monitor(&mon);
+        DISPI("LVGL heap po screen_main: free=%u B frag=%d%%", mon.free_size, mon.frag_pct);
+    }
+    // screen_service_create(s_screen_service);
+    // { lv_mem_monitor_t mon; lv_mem_monitor(&mon); DISPI("LVGL heap po screen_service: free=%u B frag=%d%%", mon.free_size, mon.frag_pct); }
+    // screen_party_create(s_screen_party);
+    // { lv_mem_monitor_t mon; lv_mem_monitor(&mon); DISPI("LVGL heap po screen_party: free=%u B frag=%d%%", mon.free_size, mon.frag_pct); }
     DISPI("Zasloni OK");
 
     // 9. Prikaži glavni zaslon

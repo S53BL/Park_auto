@@ -127,7 +127,13 @@ void wifiTask(void* p) {
 
 static void bsp_serial_init() {
     Serial.begin(115200);
-    delay(200);
+    // Čakaj max 3 sekunde da se Serial odpre (USB CDC)
+    uint32_t t = millis();
+    while (!Serial && (millis() - t) < 3000) {
+        delay(10);
+    }
+    delay(500);  // dodatnih 500ms buffer
+    Serial.println("\n\n===== BOOT =====");
     LOGI("=== BSP init %s ===", FW_VERSION_STRING);
     LOGI("CPU: %d MHz | PSRAM: %lu KB | Flash: %lu KB",
          getCpuFrequencyMhz(),

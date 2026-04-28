@@ -9,6 +9,12 @@
 #include "bsp.h"
 
 void setup() {
+    // Vidni boot signal — backlight utripa 6× da potrdimo da ESP živi
+    pinMode(6, OUTPUT);
+    for (int i = 0; i < 6; i++) {
+        digitalWrite(6, HIGH); delay(200);
+        digitalWrite(6, LOW);  delay(200);
+    }
     bsp_init();
     esp_task_wdt_add(xTaskGetCurrentTaskHandle());
 }
