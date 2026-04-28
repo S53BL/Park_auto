@@ -101,7 +101,7 @@ static void stat_box_create(uint8_t idx, lv_obj_t* parent, int x, int y,
     b.lbl_unit = lv_label_create(b.card);
     lv_label_set_text(b.lbl_unit, unit_text);
     lv_obj_set_style_text_color(b.lbl_unit, C_TEXT_DIM, LV_PART_MAIN);
-    lv_obj_set_style_text_font(b.lbl_unit, &lv_font_montserrat_10, LV_PART_MAIN);
+    lv_obj_set_style_text_font(b.lbl_unit, &lv_font_montserrat_12, LV_PART_MAIN);
     lv_obj_align(b.lbl_unit, LV_ALIGN_BOTTOM_MID, 0, -4);
 }
 
@@ -226,7 +226,7 @@ static lv_obj_t* make_section_header(lv_obj_t* parent, int y, const char* title)
     lv_obj_t* lbl = lv_label_create(hdr);
     lv_label_set_text(lbl, title);
     lv_obj_set_style_text_color(lbl, C_HEADER_TEXT, LV_PART_MAIN);
-    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, LV_PART_MAIN);
+    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, LV_PART_MAIN);
     lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 6, 0);
 
     return hdr;
@@ -252,13 +252,13 @@ static lv_obj_t* make_row(lv_obj_t* parent, int y,
     lv_obj_t* ln = lv_label_create(row);
     lv_label_set_text(ln, name);
     lv_obj_set_style_text_color(ln, C_TEXT_DIM, LV_PART_MAIN);
-    lv_obj_set_style_text_font(ln, &lv_font_montserrat_12, LV_PART_MAIN);
+    lv_obj_set_style_text_font(ln, &lv_font_montserrat_14, LV_PART_MAIN);
     lv_obj_align(ln, LV_ALIGN_LEFT_MID, 6, 0);
 
     lv_obj_t* lv2 = lv_label_create(row);
     lv_label_set_text(lv2, val_init);
     lv_obj_set_style_text_color(lv2, val_color, LV_PART_MAIN);
-    lv_obj_set_style_text_font(lv2, &lv_font_montserrat_12, LV_PART_MAIN);
+    lv_obj_set_style_text_font(lv2, &lv_font_montserrat_14, LV_PART_MAIN);
     lv_obj_align(lv2, LV_ALIGN_RIGHT_MID, -6, 0);
 
     if (lbl_name_out) *lbl_name_out = ln;
@@ -514,14 +514,14 @@ void screen_service_create(lv_obj_t* parent) {
         s_chip[i].lbl_name = lv_label_create(row);
         lv_label_set_text(s_chip[i].lbl_name, CHIP_NAMES[i]);
         lv_obj_set_style_text_color(s_chip[i].lbl_name, C_TEXT_DIM, LV_PART_MAIN);
-        lv_obj_set_style_text_font(s_chip[i].lbl_name, &lv_font_montserrat_12, LV_PART_MAIN);
+        lv_obj_set_style_text_font(s_chip[i].lbl_name, &lv_font_montserrat_14, LV_PART_MAIN);
         lv_obj_align(s_chip[i].lbl_name, LV_ALIGN_LEFT_MID, 6 + CHIP_DOT_SIZE + 6, 0);
 
         // Status text
         s_chip[i].lbl_status = lv_label_create(row);
         lv_label_set_text(s_chip[i].lbl_status, "N/A");
         lv_obj_set_style_text_color(s_chip[i].lbl_status, C_TEXT_DIM, LV_PART_MAIN);
-        lv_obj_set_style_text_font(s_chip[i].lbl_status, &lv_font_montserrat_12, LV_PART_MAIN);
+        lv_obj_set_style_text_font(s_chip[i].lbl_status, &lv_font_montserrat_14, LV_PART_MAIN);
         lv_obj_align(s_chip[i].lbl_status, LV_ALIGN_RIGHT_MID, -6, 0);
 
         cy += ROW_H;
