@@ -56,11 +56,10 @@ public:
     }
 };
 
+#include "screen_service.h"
 extern void screen_main_create(lv_obj_t* parent);
-extern void screen_service_create(lv_obj_t* parent);
 extern void screen_party_create(lv_obj_t* parent);
 extern void screen_main_apply_updates();
-extern void screen_service_apply_updates();
 extern void screen_party_apply_updates();
 
 #define DISPI(fmt, ...) Serial.printf("[DISP] "    fmt "\n", ##__VA_ARGS__)
@@ -205,9 +204,25 @@ static void apply_pending() {
     for (int i = 0; i < 4; i++) if (s_pending.ssr_dirty[i])     { need_main = true; s_pending.ssr_dirty[i]     = false; }
     for (int i = 0; i < 2; i++) if (s_pending.parking_dirty[i]) { need_main = true; s_pending.parking_dirty[i] = false; }
     for (int i = 0; i < 4; i++) if (s_pending.radar_dirty[i])   { need_main = true; s_pending.radar_dirty[i]   = false; }
-    if (s_pending.lux_dirty)     { need_svc = true; s_pending.lux_dirty     = false; }
-    if (s_pending.tof_dirty)     { need_svc = true; s_pending.tof_dirty     = false; }
-    if (s_pending.sysstat_dirty) { need_svc = true; s_pending.sysstat_dirty = false; }
+    if (s_pending.lux_dirty)     { need_svc = true; }
+    if (s_pending.tof_dirty)     { need_svc = true; }
+    if (s_pending.sysstat_dirty) { need_svc = true; }
+
+    // Posodobi screen_service lokalni buffer (pod mutex, pred clear dirty flagov)
+    if (s_pending.lux_dirty)
+        screen_service_update_lux(s_pending.lux, s_pending.is_night);
+    if (s_pending.tof_dirty)
+        screen_service_update_tof(s_pending.tof_mm);
+    if (s_pending.sysstat_dirty)
+        screen_service_update_sys(s_pending.free_heap, s_pending.free_psram,
+                                   s_pending.core0_pct, s_pending.core1_pct,
+                                   s_pending.uptime_s);
+
+    // Zdaj počistimo dirty flage
+    if (s_pending.lux_dirty)     s_pending.lux_dirty     = false;
+    if (s_pending.tof_dirty)     s_pending.tof_dirty     = false;
+    if (s_pending.sysstat_dirty) s_pending.sysstat_dirty = false;
+
     xSemaphoreGive(s_upd_mutex);
 
     if (need_main) screen_main_apply_updates();
@@ -338,8 +353,13 @@ bool hal_display_init() {
         lv_mem_monitor(&mon);
         DISPI("LVGL heap po screen_main: free=%u B frag=%d%%", mon.free_size, mon.frag_pct);
     }
-    // screen_service_create(s_screen_service);
-    // { lv_mem_monitor_t mon; lv_mem_monitor(&mon); DISPI("LVGL heap po screen_service: free=%u B frag=%d%%", mon.free_size, mon.frag_pct); }
+    screen_service_create(s_screen_service);
+    {
+        lv_mem_monitor_t mon;
+        lv_mem_monitor(&mon);
+        DISPI("LVGL heap po screen_service: free=%u B frag=%d%%",
+              mon.free_size, mon.frag_pct);
+    }
     // screen_party_create(s_screen_party);
     // { lv_mem_monitor_t mon; lv_mem_monitor(&mon); DISPI("LVGL heap po screen_party: free=%u B frag=%d%%", mon.free_size, mon.frag_pct); }
     DISPI("Zasloni OK");
