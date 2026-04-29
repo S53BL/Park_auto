@@ -55,6 +55,7 @@ __pycache__/
 *.old2
 .DS_Store
 Thumbs.db
+.png
 
 # Občutljive datoteke 
 secrets*
