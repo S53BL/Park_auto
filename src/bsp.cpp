@@ -33,10 +33,14 @@
 #include "bsp.h"
 #include <esp_task_wdt.h>
 
-#define LOG(fmt, ...)  Serial.printf("[BSP] " fmt "\n", ##__VA_ARGS__)
-#define LOGI(fmt, ...) LOG(fmt, ##__VA_ARGS__)
-#define LOGW(fmt, ...) Serial.printf("[BSP][W] " fmt "\n", ##__VA_ARGS__)
-#define LOGE(fmt, ...) Serial.printf("[BSP][E] " fmt "\n", ##__VA_ARGS__)
+// BSP log makroji so preusmerjeni na centralni logger.
+// IZJEMA: Serial.println("\n\n===== BOOT =====") in klic logger_init()
+// v bsp_serial_init() tečeta PRED logger_init() — direkten Serial.
+// Po logger_init() vsi LOGI/LOGW/LOGE klici gredo skozi logger_log().
+#define LOGI(fmt, ...) LOG_INFO ("BSP", fmt, ##__VA_ARGS__)
+#define LOGW(fmt, ...) LOG_WARN ("BSP", fmt, ##__VA_ARGS__)
+#define LOGE(fmt, ...) LOG_ERROR("BSP", fmt, ##__VA_ARGS__)
+#define LOGD(fmt, ...) LOG_DEBUG("BSP", fmt, ##__VA_ARGS__)
 
 // ============================================================
 // GLOBALNE SPREMENLJIVKE
@@ -134,6 +138,9 @@ static void bsp_serial_init() {
     }
     delay(500);  // dodatnih 500ms buffer
     Serial.println("\n\n===== BOOT =====");
+    // logger_init() takoj po Serial — Faza 1: Serial + RAM buffer.
+    // SD pride pozneje (logger_sd_attach v bsp_sd_init_internal).
+    logger_init();
     LOGI("=== BSP init %s ===", FW_VERSION_STRING);
     LOGI("CPU: %d MHz | PSRAM: %lu KB | Flash: %lu KB",
          getCpuFrequencyMhz(),
@@ -214,6 +221,9 @@ static void bsp_sd_init_internal() {
         LOGW("SD_MMC NAPAKA — sistem dela naprej brez SD (logi samo na Serial)");
         LOGW("  Preveriti: kartica vstavljena? Format FAT32?");
     }
+    // Logger Faza 2 — poveži SD. Kreira mutex (scheduler še ne teče).
+    // Od tu naprej logger piše: Serial + RAM + SD.
+    logger_sd_attach();
 }
 
 static void bsp_wdt_init() {

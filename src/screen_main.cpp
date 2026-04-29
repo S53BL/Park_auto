@@ -24,8 +24,9 @@
 // ============================================================
 // LOGGING
 // ============================================================
-#define SMNI(fmt, ...) Serial.printf("[SMAIN] "    fmt "\n", ##__VA_ARGS__)
-#define SMND(fmt, ...) Serial.printf("[SMAIN][D] " fmt "\n", ##__VA_ARGS__)
+#include "logger.h"
+#define SMNI(fmt, ...) LOG_INFO ("SMAIN", fmt, ##__VA_ARGS__)
+#define SMND(fmt, ...) LOG_DEBUG("SMAIN", fmt, ##__VA_ARGS__)
 
 // ============================================================
 // BARVE

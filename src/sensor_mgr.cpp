@@ -20,8 +20,9 @@
 // #include "hal_light.h"
 // #include "hal_gpio.h"
 
-#define SMGI(fmt, ...) Serial.printf("[SENSOR] " fmt "\n", ##__VA_ARGS__)
-#define SMGW(fmt, ...) Serial.printf("[SENSOR][W] " fmt "\n", ##__VA_ARGS__)
+#include "logger.h"
+#define SMGI(fmt, ...) LOG_INFO ("SENSOR", fmt, ##__VA_ARGS__)
+#define SMGW(fmt, ...) LOG_WARN ("SENSOR", fmt, ##__VA_ARGS__)
 
 static bool s_init_ok = false;
 

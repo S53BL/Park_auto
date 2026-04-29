@@ -46,6 +46,13 @@ enum class EventType : uint16_t {
     SSR_STATE_CHANGED   = 0x0050,
     // Alarm
     ALARM_TRIGGERED     = 0x0060,
+    // Sistem
+    SYSTEM_READY          = 0x00FF,
+
+    // WiFi
+    WIFI_CONNECTED        = 0x0100,   // payload = IP naslov kot uint32_t
+    WIFI_DISCONNECTED     = 0x0101,   // payload = 0 (razlog ni znan)
+    NTP_SYNCED            = 0x0102,   // payload = Unix timestamp ob sinhronizaciji
 };
 
 struct Event {

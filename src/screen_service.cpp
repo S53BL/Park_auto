@@ -35,8 +35,9 @@
 // LOGGING
 // ============================================================
 
-#define SSVC_I(fmt, ...) Serial.printf("[SERVICE][I] " fmt "\n", ##__VA_ARGS__)
-#define SSVC_W(fmt, ...) Serial.printf("[SERVICE][W] " fmt "\n", ##__VA_ARGS__)
+#include "logger.h"
+#define SSVC_I(fmt, ...) LOG_INFO ("SSVC", fmt, ##__VA_ARGS__)
+#define SSVC_W(fmt, ...) LOG_WARN ("SSVC", fmt, ##__VA_ARGS__)
 
 // ============================================================
 // BARVE

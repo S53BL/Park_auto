@@ -63,8 +63,9 @@
 // LOGGING
 // ============================================================
 
-#define PARTY_I(fmt, ...) Serial.printf("[PARTY][I] " fmt "\n", ##__VA_ARGS__)
-#define PARTY_D(fmt, ...) Serial.printf("[PARTY][D] " fmt "\n", ##__VA_ARGS__)
+#include "logger.h"
+#define PARTY_I(fmt, ...) LOG_INFO ("PARTY", fmt, ##__VA_ARGS__)
+#define PARTY_D(fmt, ...) LOG_DEBUG("PARTY", fmt, ##__VA_ARGS__)
 
 // ============================================================
 // BARVE

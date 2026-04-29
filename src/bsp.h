@@ -11,6 +11,7 @@
 #include <freertos/semphr.h>
 #include "config.h"
 #include "sd_mgr.h"
+#include "logger.h"
 
 // FreeRTOS task handle-i
 extern TaskHandle_t hTaskEventBus;

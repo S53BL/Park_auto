@@ -7,6 +7,7 @@
 .ico
 .delete
 .pio_old/
+.claude
 
 
 # VS Code
@@ -80,4 +81,5 @@ vent_SEW_temp/
 vent_REW_fail/
 nove_ico/
 nide.zip
-src_txt/
+src_txt/*
+Doc/*

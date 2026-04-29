@@ -19,9 +19,11 @@
 // #include "hal_gpio.h"
 // #include "hal_radar.h"
 
-#define EBI(fmt, ...) Serial.printf("[EVBUS] " fmt "\n", ##__VA_ARGS__)
-#define EBW(fmt, ...) Serial.printf("[EVBUS][W] " fmt "\n", ##__VA_ARGS__)
-#define EBE(fmt, ...) Serial.printf("[EVBUS][E] " fmt "\n", ##__VA_ARGS__)
+#include "logger.h"
+#define EBI(fmt, ...) LOG_INFO ("EVBUS", fmt, ##__VA_ARGS__)
+#define EBW(fmt, ...) LOG_WARN ("EVBUS", fmt, ##__VA_ARGS__)
+#define EBE(fmt, ...) LOG_ERROR("EVBUS", fmt, ##__VA_ARGS__)
+#define EBD(fmt, ...) LOG_DEBUG("EVBUS", fmt, ##__VA_ARGS__)
 
 struct HandlerSlot {
     EventType    type     = EventType::RAMP_UP;

@@ -61,9 +61,11 @@ public:
 extern void screen_main_create(lv_obj_t* parent);
 extern void screen_main_apply_updates();
 
-#define DISPI(fmt, ...) Serial.printf("[DISP] "    fmt "\n", ##__VA_ARGS__)
-#define DISPW(fmt, ...) Serial.printf("[DISP][W] " fmt "\n", ##__VA_ARGS__)
-#define DISPE(fmt, ...) Serial.printf("[DISP][E] " fmt "\n", ##__VA_ARGS__)
+#include "logger.h"
+#define DISPI(fmt, ...) LOG_INFO ("DISP", fmt, ##__VA_ARGS__)
+#define DISPW(fmt, ...) LOG_WARN ("DISP", fmt, ##__VA_ARGS__)
+#define DISPE(fmt, ...) LOG_ERROR("DISP", fmt, ##__VA_ARGS__)
+#define DISPD(fmt, ...) LOG_DEBUG("DISP", fmt, ##__VA_ARGS__)
 
 #define DISPLAY_TIMEOUT_MS  (5UL * 60UL * 1000UL)
 
