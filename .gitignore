@@ -6,6 +6,7 @@
 .pio/libdeps/
 .ico
 .delete
+.pio_old/
 
 
 # VS Code

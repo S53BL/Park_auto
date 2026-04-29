@@ -204,6 +204,18 @@ static void bsp_gpio_init() {
     LOGI("GPIO init OK");
 }
 
+static void bsp_sd_init_internal() {
+    LOGI("SD_MMC init...");
+    bool ok = sd_mgr_init();
+    if (ok) {
+        LOGI("SD_MMC OK — %llu MB prosto",
+             sd_mgr_free_bytes() / (1024ULL * 1024ULL));
+    } else {
+        LOGW("SD_MMC NAPAKA — sistem dela naprej brez SD (logi samo na Serial)");
+        LOGW("  Preveriti: kartica vstavljena? Format FAT32?");
+    }
+}
+
 static void bsp_wdt_init() {
     LOGI("TWDT init (timeout: %ds)...", WDT_TIMEOUT_SEC);
     const esp_task_wdt_config_t cfg = {
@@ -250,6 +262,7 @@ void bsp_init() {
     bsp_serial_init();
     bsp_i2c_init();
     bsp_gpio_init();
+    bsp_sd_init_internal();   // SD_MMC — pred task kreacijo, za GPIO
     bsp_wdt_init();
     bsp_tasks_create();
     s_boot_time = millis() - t0;
@@ -260,6 +273,11 @@ bool bsp_wire1_ok()           { return s_wire1_ok; }
 bool bsp_mcp_ok()             { return s_mcp_ok; }
 SemaphoreHandle_t bsp_get_wire1_mutex() { return s_wire1_mutex; }
 uint32_t bsp_boot_time_ms()   { return s_boot_time; }
+
+void bsp_sd_init() {
+    // Javni wrapper — omogoča re-init po SD zamenjavi (prihodnja razširitev)
+    bsp_sd_init_internal();
+}
 
 void bsp_tca_reset() {
     // IO46 je čisti GPIO — dela tudi brez Wire1

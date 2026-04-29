@@ -10,6 +10,7 @@
 #include <Wire.h>
 #include <freertos/semphr.h>
 #include "config.h"
+#include "sd_mgr.h"
 
 // FreeRTOS task handle-i
 extern TaskHandle_t hTaskEventBus;
@@ -21,6 +22,11 @@ extern TaskHandle_t hTaskWifi;
 
 // Inicializacija
 void bsp_init();
+
+// SD kartica init — kliče sd_mgr_init() pred task kreacijo.
+// Ločena funkcija za jasnost vrstnega reda inicializacije.
+// Po klicu je sd_mgr_ready() = true če je kartica prisotna.
+void bsp_sd_init();
 
 // Status
 bool bsp_wire1_ok();    // Wire1 (senzorski bus) — Faza 0: vedno false
