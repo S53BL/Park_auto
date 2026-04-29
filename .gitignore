@@ -11,6 +11,7 @@ data/assets/*.gz
 .delete
 .pio_old/
 .claude
+.set_baud
 
 
 # VS Code
@@ -87,3 +88,4 @@ nove_ico/
 nide.zip
 src_txt/*
 Doc/*
+scripts/

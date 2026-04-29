@@ -29,22 +29,34 @@
 #define SMND(fmt, ...) LOG_DEBUG("SMAIN", fmt, ##__VA_ARGS__)
 
 // ============================================================
-// BARVE
+// BARVE — posodobljeno 2026-04 (Tailwind-inspired dark theme)
 // ============================================================
-#define C_OFF_BG        lv_color_hex(0x1A3A1A)
-#define C_OFF_TXT       lv_color_hex(0x4CAF50)
-#define C_ON_BG         lv_color_hex(0x3A2A0A)
-#define C_ON_TXT        lv_color_hex(0xFF9800)
+#define C_OFF_BG        lv_color_hex(0x1E2A2F)
+#define C_OFF_TXT       lv_color_hex(0x91FF66)
+#define C_ON_BG         lv_color_hex(0x27241F)
+#define C_ON_TXT        lv_color_hex(0xFFD466)
 #define C_DIS_BG        lv_color_hex(0x1A1A1A)
-#define C_DIS_TXT       lv_color_hex(0x444444)
-#define C_PKG_EMPTY_BG  lv_color_hex(0x1A1A2A)
-#define C_PKG_OCC_BG    lv_color_hex(0x0A2A0A)
-#define C_RAD_LOW       lv_color_hex(0x333333)
-#define C_RAD_MID       lv_color_hex(0xFF9800)
-#define C_RAD_HIGH      lv_color_hex(0x4CAF50)
-#define C_SCREEN_BG     lv_color_hex(0x0D0D0D)
-#define C_CAR_OCC       lv_color_hex(0x4CAF50)
-#define C_CAR_EMPTY     lv_color_hex(0x444444)
+#define C_DIS_TXT       lv_color_hex(0x64748B)
+#define C_PKG_EMPTY_BG  lv_color_hex(0x1F2937)
+#define C_PKG_OCC_BG    lv_color_hex(0x1C2A25)
+#define C_RAD_LOW       lv_color_hex(0x334155)
+#define C_RAD_MID       lv_color_hex(0xFBBF24)
+#define C_RAD_HIGH      lv_color_hex(0x34D399)
+#define C_SCREEN_BG     lv_color_hex(0x111827)
+#define C_CAR_OCC       lv_color_hex(0x34D399)
+#define C_CAR_EMPTY     lv_color_hex(0x64748B)
+
+// Prej inline — zdaj makroti
+#define C_SSR_BORDER        lv_color_hex(0x334155)
+#define C_HOLD_BAR_BG       lv_color_hex(0x1F2937)
+#define C_PKG_OCC_BORDER    lv_color_hex(0xFBBF24)
+#define C_PKG_OCC_NAME      lv_color_hex(0xF1F5F9)
+#define C_PKG_EMPTY_BORDER  lv_color_hex(0x334155)
+#define C_PKG_EMPTY_NAME    lv_color_hex(0xCBD5E1)
+#define C_PKG_TITLE         lv_color_hex(0x94A3B8)
+#define C_PKG_STATS         lv_color_hex(0xCBD5E1)
+#define C_RAD_ARC_BG        lv_color_hex(0x1F2937)
+#define C_RAD_LABEL         lv_color_hex(0xCBD5E1)
 
 // ============================================================
 // DIMENZIJE
@@ -278,7 +290,7 @@ static void ssr_create(uint8_t idx, lv_obj_t* parent, int x, int y) {
     lv_obj_set_style_bg_color(w.btn, C_OFF_BG, LV_PART_MAIN);
     lv_obj_set_style_radius(w.btn, 8, LV_PART_MAIN);
     lv_obj_set_style_border_width(w.btn, 1, LV_PART_MAIN);
-    lv_obj_set_style_border_color(w.btn, lv_color_hex(0x2A3A2A), LV_PART_MAIN);
+    lv_obj_set_style_border_color(w.btn, C_SSR_BORDER, LV_PART_MAIN);
     lv_obj_set_style_pad_all(w.btn, 0, LV_PART_MAIN);
     lv_obj_clear_flag(w.btn, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(w.btn, LV_OBJ_FLAG_CLICKABLE);
@@ -310,7 +322,7 @@ static void ssr_create(uint8_t idx, lv_obj_t* parent, int x, int y) {
     lv_obj_align(w.bar_hold, LV_ALIGN_BOTTOM_MID, 0, -1);
     lv_bar_set_range(w.bar_hold, 0, 100);
     lv_bar_set_value(w.bar_hold, 0, LV_ANIM_OFF);
-    lv_obj_set_style_bg_color(w.bar_hold, lv_color_hex(0x222222), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(w.bar_hold, C_HOLD_BAR_BG, LV_PART_MAIN);
     lv_obj_set_style_bg_color(w.bar_hold, C_OFF_TXT, LV_PART_INDICATOR);
     lv_obj_set_style_radius(w.bar_hold, 0, LV_PART_MAIN);
     lv_obj_set_style_radius(w.bar_hold, 0, LV_PART_INDICATOR);
@@ -375,9 +387,9 @@ static void pkg_event_cb(lv_event_t* e) {
 static void pkg_apply(PkgWidget& w) {
     if (w.data.occupied) {
         lv_obj_set_style_bg_color(w.card, C_PKG_OCC_BG, LV_PART_MAIN);
-        lv_obj_set_style_border_color(w.card, lv_color_hex(0x2A4A2A), LV_PART_MAIN);
+        lv_obj_set_style_border_color(w.card, C_PKG_OCC_BORDER, LV_PART_MAIN);
         lv_label_set_text(w.lbl_name, w.data.vehicle_name[0] ? w.data.vehicle_name : "?");
-        lv_obj_set_style_text_color(w.lbl_name, lv_color_hex(0xCCCCCC), LV_PART_MAIN);
+        lv_obj_set_style_text_color(w.lbl_name, C_PKG_OCC_NAME, LV_PART_MAIN);
         char stats[40];
         snprintf(stats, sizeof(stats), "%lu\xC3\x97  DTW %.1f",
                  (unsigned long)w.data.parking_count, (double)w.data.dtw_distance);
@@ -385,9 +397,9 @@ static void pkg_apply(PkgWidget& w) {
         car_set_color(w.car, C_CAR_OCC);
     } else {
         lv_obj_set_style_bg_color(w.card, C_PKG_EMPTY_BG, LV_PART_MAIN);
-        lv_obj_set_style_border_color(w.card, lv_color_hex(0x2A2A3A), LV_PART_MAIN);
+        lv_obj_set_style_border_color(w.card, C_PKG_EMPTY_BORDER, LV_PART_MAIN);
         lv_label_set_text(w.lbl_name, "Prazno");
-        lv_obj_set_style_text_color(w.lbl_name, lv_color_hex(0x666666), LV_PART_MAIN);
+        lv_obj_set_style_text_color(w.lbl_name, C_PKG_EMPTY_NAME, LV_PART_MAIN);
         lv_label_set_text(w.lbl_stats, "");
         car_set_color(w.car, C_CAR_EMPTY);
     }
@@ -405,7 +417,7 @@ static void pkg_create(uint8_t idx, lv_obj_t* parent, int x, int y) {
     lv_obj_set_style_bg_color(w.card, C_PKG_EMPTY_BG, LV_PART_MAIN);
     lv_obj_set_style_radius(w.card, 8, LV_PART_MAIN);
     lv_obj_set_style_border_width(w.card, 1, LV_PART_MAIN);
-    lv_obj_set_style_border_color(w.card, lv_color_hex(0x2A2A3A), LV_PART_MAIN);
+    lv_obj_set_style_border_color(w.card, C_PKG_EMPTY_BORDER, LV_PART_MAIN);
     lv_obj_set_style_pad_all(w.card, 0, LV_PART_MAIN);
     lv_obj_clear_flag(w.card, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(w.card, LV_OBJ_FLAG_CLICKABLE);
@@ -413,13 +425,13 @@ static void pkg_create(uint8_t idx, lv_obj_t* parent, int x, int y) {
 
     w.lbl_title = lv_label_create(w.card);
     lv_label_set_text(w.lbl_title, idx == 0 ? "Mesto A" : "Mesto B");
-    lv_obj_set_style_text_color(w.lbl_title, lv_color_hex(0x888888), LV_PART_MAIN);
+    lv_obj_set_style_text_color(w.lbl_title, C_PKG_TITLE, LV_PART_MAIN);
     lv_obj_set_style_text_font(w.lbl_title, &font_montserrat_14_sl, LV_PART_MAIN);
     lv_obj_align(w.lbl_title, LV_ALIGN_TOP_LEFT, 8, 6);
 
     w.lbl_name = lv_label_create(w.card);
     lv_label_set_text(w.lbl_name, "Prazno");
-    lv_obj_set_style_text_color(w.lbl_name, lv_color_hex(0x666666), LV_PART_MAIN);
+    lv_obj_set_style_text_color(w.lbl_name, C_PKG_EMPTY_NAME, LV_PART_MAIN);
     lv_obj_set_style_text_font(w.lbl_name, &font_montserrat_18_sl, LV_PART_MAIN);
     lv_obj_set_pos(w.lbl_name, 8, 28);
     lv_label_set_long_mode(w.lbl_name, LV_LABEL_LONG_DOT);
@@ -427,7 +439,7 @@ static void pkg_create(uint8_t idx, lv_obj_t* parent, int x, int y) {
 
     w.lbl_stats = lv_label_create(w.card);
     lv_label_set_text(w.lbl_stats, "");
-    lv_obj_set_style_text_color(w.lbl_stats, lv_color_hex(0x555555), LV_PART_MAIN);
+    lv_obj_set_style_text_color(w.lbl_stats, C_PKG_STATS, LV_PART_MAIN);
     lv_obj_set_style_text_font(w.lbl_stats, &font_montserrat_14_sl, LV_PART_MAIN);
     lv_obj_align(w.lbl_stats, LV_ALIGN_BOTTOM_LEFT, 8, -6);
 
@@ -461,7 +473,7 @@ static void rad_create(uint8_t idx, lv_obj_t* parent, int x, int y) {
     lv_arc_set_value(w.arc, 0);
     lv_arc_set_range(w.arc, 0, 100);
     lv_obj_remove_flag(w.arc, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_set_style_arc_color(w.arc, lv_color_hex(0x2A2A2A), LV_PART_MAIN);
+    lv_obj_set_style_arc_color(w.arc, C_RAD_ARC_BG, LV_PART_MAIN);
     lv_obj_set_style_arc_width(w.arc, 6, LV_PART_MAIN);
     lv_obj_set_style_arc_color(w.arc, C_RAD_LOW, LV_PART_INDICATOR);
     lv_obj_set_style_arc_width(w.arc, 6, LV_PART_INDICATOR);
@@ -478,7 +490,7 @@ static void rad_create(uint8_t idx, lv_obj_t* parent, int x, int y) {
 
     w.lbl_name = lv_label_create(parent);
     lv_label_set_text(w.lbl_name, RADAR_NAMES[idx]);
-    lv_obj_set_style_text_color(w.lbl_name, lv_color_hex(0x666666), LV_PART_MAIN);
+    lv_obj_set_style_text_color(w.lbl_name, C_RAD_LABEL, LV_PART_MAIN);
     lv_obj_set_style_text_font(w.lbl_name, &font_montserrat_14_sl, LV_PART_MAIN);
     lv_obj_set_pos(w.lbl_name, x, y + RAD_ARC_SZ + 2);
     lv_obj_set_width(w.lbl_name, RAD_W);

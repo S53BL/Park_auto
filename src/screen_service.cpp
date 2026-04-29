@@ -40,20 +40,20 @@
 #define SSVC_W(fmt, ...) LOG_WARN ("SSVC", fmt, ##__VA_ARGS__)
 
 // ============================================================
-// BARVE
+// BARVE — posodobljeno 2026-04 (Tailwind-inspired dark theme)
 // ============================================================
 
-#define C_BG            lv_color_hex(0x0D0D0D)
-#define C_SECTION_BG    lv_color_hex(0x141414)
-#define C_CARD_BG       lv_color_hex(0x1A1A1A)
-#define C_BORDER        lv_color_hex(0x2A2A2A)
-#define C_OK            lv_color_hex(0x4CAF50)
-#define C_WARN          lv_color_hex(0xFF9800)
-#define C_ERR           lv_color_hex(0xF44336)
-#define C_TEXT          lv_color_hex(0xCCCCCC)
-#define C_TEXT_DIM      lv_color_hex(0x666666)
-#define C_TEXT_BRIGHT   lv_color_hex(0xEEEEEE)
-#define C_HEADER_TEXT   lv_color_hex(0x888888)
+#define C_BG            lv_color_hex(0x111827)
+#define C_SECTION_BG    lv_color_hex(0x1A2332)   // temnejši od kartic
+#define C_CARD_BG       lv_color_hex(0x1F2937)
+#define C_BORDER        lv_color_hex(0x334155)
+#define C_OK            lv_color_hex(0x34D399)
+#define C_WARN          lv_color_hex(0xFBBF24)
+#define C_ERR           lv_color_hex(0xEF4444)
+#define C_TEXT          lv_color_hex(0xF1F5F9)
+#define C_TEXT_DIM      lv_color_hex(0xCBD5E1)
+#define C_TEXT_BRIGHT   lv_color_hex(0xF8FAFC)
+#define C_HEADER_TEXT   lv_color_hex(0x94A3B8)
 
 // ============================================================
 // DIMENZIJE

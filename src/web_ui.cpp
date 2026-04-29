@@ -106,12 +106,12 @@ static void _sendError(AsyncWebServerRequest* req, int code, const char* msg) {
     req->send(code, "application/json", body);
 }
 
-// Pošlje JSON odgovor iz JsonDocument
+// Pošlje JSON odgovor iz JsonDocument — stream direktno, brez intermediarne String kopije
 static void _sendJson(AsyncWebServerRequest* req, int code, JsonDocument& doc) {
-    String body;
-    serializeJson(doc, body);
-    AsyncWebServerResponse* resp = req->beginResponse(code, "application/json", body);
+    AsyncResponseStream* resp = req->beginResponseStream("application/json");
     resp->addHeader("Cache-Control", "no-cache");
+    if (code != 200) resp->setCode(code);
+    serializeJson(doc, *resp);
     req->send(resp);
 }
 
@@ -175,6 +175,17 @@ static void _handleStatus(AsyncWebServerRequest* req) {
         fw["build_date"]= app->date;
         fw["build_time"]= app->time;
     }
+
+    // --- Web UI statistika ---
+    JsonObject wu = doc["webui"].to<JsonObject>();
+    wu["req_total"]    = _stats.req_total;
+    wu["req_api"]      = _stats.req_api;
+    wu["req_files"]    = _stats.req_files;
+    wu["req_errors"]   = _stats.req_errors;
+    wu["ota_attempts"] = _stats.ota_attempts;
+    wu["ota_success"]  = _stats.ota_success;
+    wu["littlefs_ok"]  = _littlefs_ok;
+    wu["assets_ok"]    = _assets_ok;
 
     // --- Stubs (Faza 3) ---
     // SSR, senzorji, parking — prazni array-i da frontend ne crashne

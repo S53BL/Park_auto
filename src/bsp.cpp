@@ -164,13 +164,11 @@ static void bsp_i2c_init() {
     // niso priklopljeni na IO17/IO18.
     // Odkomentiraj v Fazi 1 ko priklopljiš naprave.
     //
-    // LOGI("Wire1 senzorski bus init (SDA=IO17, SCL=IO18, 100kHz)...");
-    // Wire1.begin(I2C_SDA, I2C_SCL, I2C_FREQ_HZ);
-    // s_wire1_ok = true;
-    // LOGI("Wire1 OK");
-    //
-    s_wire1_ok = false;
-    LOGW("FAZA0: Wire1 zakomentirano (IO17/IO18 — nič ni priklopljeno)");
+    // FAZA 1: Wire1 aktiven — SC16IS752 #2 priključen na IO17/IO18
+    LOGI("Wire1 senzorski bus init (SDA=IO17, SCL=IO18, 100kHz)...");
+    Wire1.begin(I2C_SDA, I2C_SCL, I2C_FREQ_HZ);
+    s_wire1_ok = true;
+    LOGI("Wire1 OK");
 
     // Wire1 mutex — kreiran tudi če Wire1 ni aktiven.
     // hal_gpio in hal_light ga pričakujeta. Faza 0: ni Wire1 klicev.

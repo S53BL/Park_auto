@@ -132,7 +132,9 @@
 // 8. RADAR (za kasnejše faze)
 // ============================================================
 #define RADAR_COUNT         4
-#define RADAR_BAUD_RATE     256000
+// XTAL na CJMCU-SC16IS752 modulu je 1.8432 MHz (potrjeno).
+// Divisor = 1.8432MHz / (16 × 115200) = 1.000 → točno, 0% napaka.
+#define RADAR_BAUD_RATE     115200
 
 // ============================================================
 // 9. LED KONFIGURACIJA

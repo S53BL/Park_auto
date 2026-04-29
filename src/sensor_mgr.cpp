@@ -20,6 +20,9 @@
 // #include "hal_light.h"
 // #include "hal_gpio.h"
 
+// FAZA 1: Hardware test (SC16IS752 #1 in #2)
+#include "hal_radar_test.h"
+
 #include "logger.h"
 #define SMGI(fmt, ...) LOG_INFO ("SENSOR", fmt, ##__VA_ARGS__)
 #define SMGW(fmt, ...) LOG_WARN ("SENSOR", fmt, ##__VA_ARGS__)
@@ -42,8 +45,16 @@ bool sensor_mgr_init() {
     //   4. hal_radar_init()
 
     SMGW("FAZA0: hal_tof / hal_radar / hal_light preskočeni");
+
+    // FAZA 1: SC16IS752 hardware test
+    // Blokira ~15s (3s timeout × 4 kanali + overhead).
+    // Po testu: rezultati vidni na Serial Monitor.
+    SMGI("Zaganjam SC16IS752 hardware test...");
+    hal_radar_test_run();
+    SMGI("SC16IS752 test zaključen — glej [RT] izpis zgoraj");
+
     s_init_ok = true;
-    SMGI("sensor_mgr_init OK (prazno)");
+    SMGI("sensor_mgr_init OK");
     return true;
 }
 
@@ -61,7 +72,7 @@ void sensorTask(void* pvParams) {
 
         // FAZA0: vsi HAL ticki zakomentirani
         // hal_tof_tick();
-        // hal_radar_tick();
+        // hal_radar_tick();   ← bo aktiven po hal_radar_test (Faza 2)
         // hal_light_tick();
 
         vTaskDelay(pdMS_TO_TICKS(500));

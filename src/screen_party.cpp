@@ -68,22 +68,26 @@
 #define PARTY_D(fmt, ...) LOG_DEBUG("PARTY", fmt, ##__VA_ARGS__)
 
 // ============================================================
-// BARVE
+// BARVE — posodobljeno 2026-04 (Tailwind-inspired dark + cyan party)
 // ============================================================
 
-#define C_BG              lv_color_hex(0x0D000F)   // zelo temna vijolična ozadje
-#define C_SECTION_BG      lv_color_hex(0x150015)
-#define C_CARD_BG         lv_color_hex(0x1A001A)
-#define C_BORDER_OFF      lv_color_hex(0x2A002A)
-#define C_BORDER_ON       lv_color_hex(0x8800AA)
-#define C_PARTY_PRIMARY   lv_color_hex(0xAA00CC)   // vijolična — party barva
-#define C_PARTY_ACTIVE    lv_color_hex(0xCC44FF)   // svetla vijolična — aktiven element
-#define C_PARTY_DIM       lv_color_hex(0x440055)   // dimmed vijolična
-#define C_TEXT            lv_color_hex(0xCCCCCC)
-#define C_TEXT_DIM        lv_color_hex(0x666666)
+#define C_BG              lv_color_hex(0x111827)   // ozadje celotnega party zaslona
+#define C_SECTION_BG      lv_color_hex(0x1A2332)   // ozadje sekcijskega headerja (temnejši od kartic)
+#define C_CARD_BG         lv_color_hex(0x1F2937)   // ozadje kartic / gumbov
+#define C_BORDER_OFF      lv_color_hex(0x334155)
+#define C_BORDER_ON       lv_color_hex(0x06B6D4)
+#define C_PARTY_PRIMARY   lv_color_hex(0x06B6D4)   // cyan — primarna party barva (slider indicator)
+#define C_PARTY_ACTIVE    lv_color_hex(0x22D3EE)   // svetel cyan — aktiven element
+#define C_PARTY_DIM_TEXT  lv_color_hex(0x94A3B8)   // tekst sekcijskih headerjev (ločen od ozadja)
+#define C_PARTY_DIM_BG    lv_color_hex(0x2D3A4F)   // ozadje aktivnih gumbov (svetlejši odtenek)
+#define C_TEXT            lv_color_hex(0xF1F5F9)
+#define C_TEXT_DIM        lv_color_hex(0xCBD5E1)
 #define C_TEXT_BRIGHT     lv_color_hex(0xFFFFFF)
-#define C_TOGGLE_OFF      lv_color_hex(0x2A2A2A)
-#define C_TOGGLE_ON       lv_color_hex(0x8800AA)
+#define C_TOGGLE_OFF      lv_color_hex(0x1F2937)
+#define C_TOGGLE_ON       lv_color_hex(0x06B6D4)
+
+// Prej inline — zdaj makrota
+#define C_COLOR_DOT_BORDER_OFF  lv_color_hex(0x334155)
 
 // ============================================================
 // DIMENZIJE
@@ -131,7 +135,7 @@ static const char*   EFF_NAMES[6]  = {
 
 // ============================================================
 // BARVE PALETA (skladno z LCD_UI_Arhitektura.docx sekcija 5.3)
-// 7 barv: bela, rdeča, oranžna, rumena, zelena, modra, vijolična
+// 7 barv — posodobljeno 2026-04
 // ============================================================
 
 static const uint32_t CLR_PALETTE[CLR_COUNT] = {
@@ -159,8 +163,8 @@ struct Preset {
 static const Preset PRESETS[4] = {
     { "Novo leto", 30, 0xFFFFFF, 220, 200 },   // Strobe, bela
     { "Zabava",    9,  0x000000, 191, 128 },   // Rainbow, auto
-    { "Ambient",   2,  0xFF9944, 80,  60  },   // Breathe, toplo bela
-    { "Božič",     28, 0xFF0000, 180, 150 },   // Chase, rdeča (zeleno doda WLED)
+    { "Ambient",   2,  0xFBBF24, 80,  60  },   // Breathe, amber (prej toplo oranžna)
+    { "Božič",     28, 0xEF4444, 180, 150 },   // Chase, rdeča (zelena doda WLED)
 };
 
 // ============================================================
@@ -231,7 +235,7 @@ static PartyState s_state = {
 static lv_obj_t* make_section_header(lv_obj_t* parent, int y, const char* title) {
     lv_obj_t* lbl = lv_label_create(parent);
     lv_label_set_text(lbl, title);
-    lv_obj_set_style_text_color(lbl, C_PARTY_DIM, LV_PART_MAIN);
+    lv_obj_set_style_text_color(lbl, C_PARTY_DIM_TEXT, LV_PART_MAIN);
     lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, LV_PART_MAIN);
     lv_obj_set_pos(lbl, PAD + 2, y);
     return lbl;
@@ -307,7 +311,7 @@ static void effect_update_visual(uint8_t active_fx_id) {
         bool act = (EFF_FX_IDS[i] == active_fx_id) && s_state.party_on;
         s_eff[i].active = act;
         lv_obj_set_style_bg_color(s_eff[i].btn,
-            act ? C_PARTY_DIM    : C_CARD_BG,   LV_PART_MAIN);
+            act ? C_PARTY_DIM_BG : C_CARD_BG,   LV_PART_MAIN);
         lv_obj_set_style_border_color(s_eff[i].btn,
             act ? C_PARTY_ACTIVE : C_BORDER_OFF, LV_PART_MAIN);
         lv_obj_set_style_text_color(s_eff[i].lbl,
@@ -349,7 +353,7 @@ static void color_update_visual(uint32_t selected_rgb) {
         // Obroba: bela obroba = selected, brez = neselected
         lv_obj_set_style_border_width(s_clr[i].dot, sel ? 3 : 1, LV_PART_MAIN);
         lv_obj_set_style_border_color(s_clr[i].dot,
-            sel ? lv_color_white() : lv_color_hex(0x333333), LV_PART_MAIN);
+            sel ? lv_color_white() : C_COLOR_DOT_BORDER_OFF, LV_PART_MAIN);
         // Dimmed ko party OFF
         lv_obj_set_style_opa(s_clr[i].dot,
             s_state.party_on ? LV_OPA_COVER : LV_OPA_40, LV_PART_MAIN);
@@ -434,7 +438,7 @@ static void preset_update_visual(uint8_t active_preset) {
     for (int i = 0; i < 4; i++) {
         bool act = (i == active_preset) && s_state.party_on;
         lv_obj_set_style_bg_color(s_pre[i].btn,
-            act ? C_PARTY_DIM    : C_CARD_BG,   LV_PART_MAIN);
+            act ? C_PARTY_DIM_BG : C_CARD_BG,   LV_PART_MAIN);
         lv_obj_set_style_border_color(s_pre[i].btn,
             act ? C_PARTY_ACTIVE : C_BORDER_OFF, LV_PART_MAIN);
         lv_obj_set_style_text_color(s_pre[i].lbl,
@@ -604,7 +608,7 @@ void screen_party_create(lv_obj_t* parent) {
         lv_obj_set_style_bg_color(s_clr[i].dot, rgb_to_lv(CLR_PALETTE[i]), LV_PART_MAIN);
         lv_obj_set_style_radius(s_clr[i].dot, CLR_DOT_SIZE / 2, LV_PART_MAIN);
         lv_obj_set_style_border_width(s_clr[i].dot, 1, LV_PART_MAIN);
-        lv_obj_set_style_border_color(s_clr[i].dot, lv_color_hex(0x333333), LV_PART_MAIN);
+        lv_obj_set_style_border_color(s_clr[i].dot, C_COLOR_DOT_BORDER_OFF, LV_PART_MAIN);
         lv_obj_set_style_opa(s_clr[i].dot, LV_OPA_40, LV_PART_MAIN);
         lv_obj_clear_flag(s_clr[i].dot, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_add_flag(s_clr[i].dot, LV_OBJ_FLAG_CLICKABLE);
@@ -637,7 +641,7 @@ void screen_party_create(lv_obj_t* parent) {
         lv_obj_align(s_slider_bri, LV_ALIGN_LEFT_MID, 0, 0);
         lv_slider_set_range(s_slider_bri, 0, 255);
         lv_slider_set_value(s_slider_bri, s_state.brightness, LV_ANIM_OFF);
-        lv_obj_set_style_bg_color(s_slider_bri, C_PARTY_DIM,    LV_PART_MAIN);
+        lv_obj_set_style_bg_color(s_slider_bri, C_PARTY_DIM_BG, LV_PART_MAIN);
         lv_obj_set_style_bg_color(s_slider_bri, C_PARTY_PRIMARY, LV_PART_INDICATOR);
         lv_obj_set_style_bg_color(s_slider_bri, C_PARTY_ACTIVE,  LV_PART_KNOB);
         lv_obj_add_event_cb(s_slider_bri, slider_bri_event_cb, LV_EVENT_RELEASED, nullptr);
@@ -671,7 +675,7 @@ void screen_party_create(lv_obj_t* parent) {
         lv_obj_align(s_slider_spd, LV_ALIGN_LEFT_MID, 0, 0);
         lv_slider_set_range(s_slider_spd, 0, 255);
         lv_slider_set_value(s_slider_spd, s_state.speed, LV_ANIM_OFF);
-        lv_obj_set_style_bg_color(s_slider_spd, C_PARTY_DIM,    LV_PART_MAIN);
+        lv_obj_set_style_bg_color(s_slider_spd, C_PARTY_DIM_BG, LV_PART_MAIN);
         lv_obj_set_style_bg_color(s_slider_spd, C_PARTY_PRIMARY, LV_PART_INDICATOR);
         lv_obj_set_style_bg_color(s_slider_spd, C_PARTY_ACTIVE,  LV_PART_KNOB);
         lv_obj_add_event_cb(s_slider_spd, slider_spd_event_cb, LV_EVENT_RELEASED, nullptr);
