@@ -16,6 +16,8 @@
 // ============================================================
 
 #include "wifi_manager.h"
+#include "web_ui.h"
+#include <esp_heap_caps.h>
 #include "wifi_config.h"
 #include "config.h"
 #include "logger.h"
@@ -467,25 +469,27 @@ void wifiTask(void* pvParams) {
         WF_I("EventBus: WIFI_CONNECTED IP=%s", WiFi.localIP().toString().c_str());
 
         // --------------------------------------------------------
-        // FAZA 2 — NTP sinhronizacija
+        // FAZA 2 — Web UI start (pred NTP — heap je še neframentiran)
+        // xTaskCreate za async_tcp zahteva 8 KB zaporednega SRAM.
+        // NTP + mDNS alocirata SRAM bufferje ki fragmentirajo heap.
+        // --------------------------------------------------------
+        WF_I("SRAM pred web_ui_begin: %u B free",
+             heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+        if (!web_ui_running()) {
+            web_ui_begin();
+        }
+        WF_I("SRAM po  web_ui_begin: %u B free",
+             heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+
+        // --------------------------------------------------------
+        // FAZA 3 — NTP sinhronizacija
         // --------------------------------------------------------
         wifi_ntp_sync();
 
         // --------------------------------------------------------
-        // FAZA 3 — mDNS
+        // FAZA 4 — mDNS
         // --------------------------------------------------------
         wifi_mdns_start();
-
-        // --------------------------------------------------------
-        // FAZA 4 — Web UI start
-        // TODO: web_ui_start() ko bo web_ui.cpp implementiran
-        // web_ui_start() mora biti klicana TUKAJ, v wifiTask na Core0.
-        // ESPAsyncWebServer mora biti inicializiran na istem coreu kot WiFi.
-        // Primer:
-        //   #include "web_ui.h"
-        //   web_ui_start();
-        // --------------------------------------------------------
-        WF_I("TODO: web_ui_start() — web_ui.cpp še ni implementiran");
 
         update_status(WifiState::NTP_SYNCED);
 
@@ -520,6 +524,9 @@ void wifiTask(void* pvParams) {
         // --------------------------------------------------------
         if ((now_ms - last_watchdog_ms) >= WATCHDOG_INTERVAL_MS) {
             last_watchdog_ms = now_ms;
+            WF_D("SRAM free: %u B  min-ever: %u B",
+                 heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                 heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
 
             if (!wifi_watchdog_check()) {
                 WF_W("Watchdog: izgubljena WiFi povezava — reconnect");

@@ -31,7 +31,10 @@
 // ============================================================
 
 #include "bsp.h"
+#include "web_ui.h"
 #include <esp_task_wdt.h>
+#include <esp_heap_caps.h>
+#include <freertos/idf_additions.h>
 
 // BSP log makroji so preusmerjeni na centralni logger.
 // IZJEMA: Serial.println("\n\n===== BOOT =====") in klic logger_init()
@@ -224,6 +227,8 @@ static void bsp_sd_init_internal() {
     // Logger Faza 2 — poveži SD. Kreira mutex (scheduler še ne teče).
     // Od tu naprej logger piše: Serial + RAM + SD.
     logger_sd_attach();
+    // Web UI — preveri LittleFS assets, ne zažene strežnika (to naredi wifiTask)
+    web_ui_init();
 }
 
 static void bsp_wdt_init() {
@@ -250,15 +255,26 @@ static void bsp_tasks_create() {
             LOGE(nm " task napaka (%d) — restart!", (int)r);                    \
             delay(3000); ESP.restart();                                          \
         }                                                                        \
-        LOGI(nm " OK (stack:%d prio:%d Core%d)", stk, pri, core);
+        LOGI(nm " OK (stack:%d prio:%d Core%d SRAM)", stk, pri, core);
 
-    MAKE_TASK(eventBusTask, "EventBus", TASK_EVENTBUS_STACK, TASK_EVENTBUS_PRIO, hTaskEventBus, CORE_APP)
-    MAKE_TASK(sensorTask,   "Sensor",   TASK_SENSOR_STACK,   TASK_SENSOR_PRIO,   hTaskSensor,   CORE_APP)
-    MAKE_TASK(ledTask,      "LED",      TASK_LED_STACK,      TASK_LED_PRIO,      hTaskLed,      CORE_APP)
-    MAKE_TASK(lvglTask,     "LVGL",     TASK_LVGL_STACK,     TASK_LVGL_PRIO,     hTaskLvgl,     CORE_APP)
-    MAKE_TASK(appTask,      "App",      TASK_APP_STACK,      TASK_APP_PRIO,      hTaskApp,      CORE_APP)
-    MAKE_TASK(wifiTask,     "WiFi",     TASK_WIFI_STACK,     TASK_WIFI_PRIO,     hTaskWifi,     CORE_WIFI)
+    // Stack v PSRAM — prihranimo ~18KB internega SRAM za WiFi/TCP/SD DMA
+    #define MAKE_PSRAM_TASK(fn, nm, stk, pri, hdl, core)                             \
+        r = xTaskCreatePinnedToCoreWithCaps(fn, nm, stk, nullptr, pri, &hdl, core,  \
+                                            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);   \
+        if (r != pdPASS) {                                                           \
+            LOGE(nm " PSRAM task napaka (%d) — restart!", (int)r);                  \
+            delay(3000); ESP.restart();                                              \
+        }                                                                            \
+        LOGI(nm " OK (stack:%d prio:%d Core%d PSRAM)", stk, pri, core);
 
+    MAKE_PSRAM_TASK(eventBusTask, "EventBus", TASK_EVENTBUS_STACK, TASK_EVENTBUS_PRIO, hTaskEventBus, CORE_APP)
+    MAKE_PSRAM_TASK(sensorTask,   "Sensor",   TASK_SENSOR_STACK,   TASK_SENSOR_PRIO,   hTaskSensor,   CORE_APP)
+    MAKE_PSRAM_TASK(ledTask,      "LED",      TASK_LED_STACK,      TASK_LED_PRIO,      hTaskLed,      CORE_APP)
+    MAKE_TASK      (lvglTask,     "LVGL",     TASK_LVGL_STACK,     TASK_LVGL_PRIO,     hTaskLvgl,     CORE_APP)
+    MAKE_PSRAM_TASK(appTask,      "App",      TASK_APP_STACK,      TASK_APP_PRIO,      hTaskApp,      CORE_APP)
+    MAKE_TASK      (wifiTask,     "WiFi",     TASK_WIFI_STACK,     TASK_WIFI_PRIO,     hTaskWifi,     CORE_WIFI)
+
+    #undef MAKE_PSRAM_TASK
     #undef MAKE_TASK
     LOGI("Vsi taski OK");
 }
@@ -276,6 +292,9 @@ void bsp_init() {
     bsp_wdt_init();
     bsp_tasks_create();
     s_boot_time = millis() - t0;
+    LOGI("Internal SRAM free: %u B  min-ever: %u B",
+         heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+         heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
     LOGI("=== BSP init OK v %lu ms ===", (unsigned long)s_boot_time);
 }
 

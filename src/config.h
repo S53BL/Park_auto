@@ -232,8 +232,12 @@
 // ============================================================
 // 16. WEB UI
 // ============================================================
+#ifndef WIFI_HOSTNAME
 #define WIFI_HOSTNAME           "parking-esp32"
+#endif
+#ifndef WEB_PORT
 #define WEB_PORT                80
+#endif
 #define WEB_POLL_INTERVAL_MS    2000
 
 // ============================================================

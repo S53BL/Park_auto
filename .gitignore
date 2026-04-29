@@ -1,3 +1,6 @@
+# LittleFS upload vsebina (generirano iz src/assets/)
+data/assets/*.gz
+
 # PlatformIO
 .pio/
 .pioenvs/
