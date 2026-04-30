@@ -5,6 +5,7 @@
 // ============================================================
 #pragma once
 #include <Arduino.h>
+#include "hal_tof.h"
 
 bool sensor_mgr_init();
 bool sensor_mgr_ok();

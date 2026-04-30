@@ -35,6 +35,7 @@
 #include <esp_task_wdt.h>
 #include <esp_heap_caps.h>
 #include <freertos/idf_additions.h>
+#include <driver/gpio.h>
 
 // BSP log makroji so preusmerjeni na centralni logger.
 // IZJEMA: Serial.println("\n\n===== BOOT =====") in klic logger_init()
@@ -208,6 +209,15 @@ static void bsp_gpio_init() {
     pinMode(PIN_TCA_RESET, OUTPUT);
     digitalWrite(PIN_TCA_RESET, HIGH);
     // FAZA0: ne kličemo bsp_tca_reset() — nepotrebno brez Wire1
+
+    // GPIO ISR servis — nameščen enkrat tukaj iz setup() konteksta (8KB stack).
+    // Prepreči IPC task stack overflow: brez tega prvi attachInterrupt() v
+    // radarTask pokliče gpio_install_isr_service() prek ipc1 (1KB stack) →
+    // heap_caps_malloc preseže stack → crash "Stack canary watchpoint (ipc1)".
+    // Ko je servis nameščen, attachInterrupt() samo pokliče gpio_isr_handler_add()
+    // kar ne zahteva IPC in ne alokira prekinitev.
+    gpio_install_isr_service(0);
+    LOGI("GPIO ISR servis OK");
 
     LOGI("GPIO init OK");
 }

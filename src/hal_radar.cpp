@@ -860,18 +860,23 @@ static void radarTask(void* pvParams) {
         uint8_t chip_id = 0;
         // Čakaj na IRQ — max 1 sekundo (za WDT reset)
         if (xQueueReceive(s_radar.irq_queue, &chip_id, pdMS_TO_TICKS(1000)) == pdTRUE) {
-
-            // Pridobi Wire1 mutex
             SemaphoreHandle_t mtx = bsp_get_wire1_mutex();
             if (xSemaphoreTake(mtx, pdMS_TO_TICKS(50)) == pdTRUE) {
                 process_chip_irq(chip_id);
                 xSemaphoreGive(mtx);
             } else {
-                RADW("radarTask: Wire1 mutex timeout (chip%d)", chip_id + 1);
+                RADW("radarTask: Wire1 mutex timeout (chip%d) — IRQ bo obdelan v recovery",
+                     chip_id + 1);
                 s_radar.ch[chip_id * 2].status.i2c_errors++;
             }
         }
-        // Če ni IRQ v 1 sekundi → samo reset WDT in čakaj naprej
+
+        // Recovery watchdog je bil tukaj (v3) — premaknjen v sensorTask
+        // kjer se izvaja sinhrono s TOF watchdog-om vsakih 10 minut.
+        // Razlog: agresivni 2s recovery je povzročal OE zanko ker je
+        // process_chip_irq() drain zanka zasedla mutex do 160ms.
+        // IRQ pin LOW med normalnim delovanjem ni napaka — je normalno
+        // stanje med ISR → queue → drain sekvence.
 
         // Periodični status log — 10s po zagonu, nato vsako minuto
         uint32_t now      = millis();
@@ -1113,5 +1118,52 @@ void hal_radar_log_stats() {
             (unsigned long)s.i2c_errors,
             (unsigned long)s.irq_count,
             (unsigned long)ago);
+    }
+}
+
+void hal_radar_recovery_check() {
+    // ----------------------------------------------------------------
+    // RADAR RECOVERY CHECK — kliči iz sensorTask, ne iz radarTask.
+    // Namen: počisti IRQ pin če je ostal LOW po zamujeni ISR sekvenci.
+    //
+    // Kliče se vsakih TOF_WATCHDOG_INTERVAL_MS (10 minut) iz sensorTask,
+    // takoj po TOF watchdog meritvi. Wire1 je v tistem trenutku že
+    // "v uporabi" za TOF — dodaten overhead je zanemarljiv.
+    //
+    // Zakaj NE v radarTask:
+    //   radarTask je IRQ-driven — čaka na queue in procesira takoj.
+    //   Dodaten periodični recovery v radarTask povzroča mutex konflikte
+    //   z lastno ISR → queue → drain sekvenco.
+    //
+    // Zakaj je IRQ pin LOW legitimna napaka samo po 10 minutah:
+    //   Med normalnim delovanjem IRQ gre LOW → ISR → queue → drain → HIGH.
+    //   Ta sekvenca traja <5ms. Če pin ostane LOW 10 minut brez novih
+    //   frames v logu — je to dejanska napaka (zamrznjen IIR, I2C napaka).
+    //
+    // TODO: primerjaj s frames_ok counter — če frames rastejo normalno,
+    //   pin LOW ni napaka in recovery preskoči. Implementirati ko bo
+    //   EventBus integriran in bomo imeli dostop do frame statistike.
+    // ----------------------------------------------------------------
+
+    if (!s_radar.initialized) return;
+
+    for (uint8_t ci = 0; ci < 2; ci++) {
+        bool chip_ok = (ci == 0) ? s_radar.chip1_ok : s_radar.chip2_ok;
+        int  irq_pin = (ci == 0) ? RADAR_IRQ_CHIP1  : RADAR_IRQ_CHIP2;
+        if (!chip_ok) continue;
+
+        if (digitalRead(irq_pin) == LOW) {
+            RADW("Recovery check (10min): IO%d LOW — ročno čiščenje chip%d",
+                 irq_pin, ci + 1);
+            SemaphoreHandle_t mtx = bsp_get_wire1_mutex();
+            if (xSemaphoreTake(mtx, pdMS_TO_TICKS(200)) == pdTRUE) {
+                process_chip_irq(ci);
+                xSemaphoreGive(mtx);
+            } else {
+                RADW("Recovery check: Wire1 mutex timeout za chip%d", ci + 1);
+            }
+        } else {
+            RADD("Recovery check (10min): IO%d HIGH — chip%d OK", irq_pin, ci + 1);
+        }
     }
 }

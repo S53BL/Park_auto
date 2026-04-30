@@ -122,7 +122,9 @@
 #define TCA_CH_TOF_P2_B     5
 
 #define TOF_POLL_IDLE_MS    100
-#define TOF_POLL_DETECT_MS  40
+#define TOF_POLL_DETECT_MS  50
+// TOF IDLE watchdog interval — health-check meritev H_A + H_B vsakih 10 minut
+#define TOF_WATCHDOG_INTERVAL_MS    600000
 #define TOF_POLL_SCAN_MS    90
 #define TOF_I2C_TIMEOUT_MS  50
 #define TOF_RECOVERY_RETRIES 3

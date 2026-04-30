@@ -145,3 +145,9 @@ void hal_radar_reset_chip(uint8_t chip_addr);
 
 // Dump statistike na Serial/Logger — za diagnostiko.
 void hal_radar_log_stats();
+
+// Periodični recovery check — kliči iz sensorTask vsakih 10 minut,
+// takoj po hal_tof_tick() watchdog meritvi.
+// Preveri IRQ pine in počisti FIFO če je pin ostal LOW.
+// NE kliči iz radarTask — povzroča mutex konflikte.
+void hal_radar_recovery_check();
