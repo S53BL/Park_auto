@@ -173,7 +173,7 @@
 #define TASK_WIFI_PRIO      1
 #define TASK_EVENTBUS_STACK 4096
 #define TASK_EVENTBUS_PRIO  5
-#define TASK_SENSOR_STACK   4096
+#define TASK_SENSOR_STACK   6144
 #define TASK_SENSOR_PRIO    4
 #define TASK_LED_STACK      4096
 #define TASK_LED_PRIO       3

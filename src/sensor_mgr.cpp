@@ -2,7 +2,7 @@
 // sensor_mgr.cpp — Sensor Manager
 // Projekt : Avtomatizacija Pokritega Parkirišča
 // Verzija : 2.0.0-dev  |  Datum: 2026-04
-// Faza    : 0 — vsi HAL sensory zakomentirani (Wire1 neaktiven)
+// Faza    : 2 — hal_radar aktiven (IRQ-driven, Wire1 aktiven)
 // ============================================================
 //
 // FAZA0: hal_tof, hal_radar, hal_light so zakomentirani.
@@ -16,12 +16,13 @@
 
 // FAZA0: Wire1 HAL includev zakomentirani
 // #include "hal_tof.h"
-// #include "hal_radar.h"
 // #include "hal_light.h"
 // #include "hal_gpio.h"
 
-// FAZA 1: Hardware test (SC16IS752 #1 in #2)
-#include "hal_radar_test.h"
+// hal_radar_test.h — odstranjeno, test zaključen 2026-04
+
+// FAZA 2: hal_radar aktiven
+#include "hal_radar.h"
 
 #include "logger.h"
 #define SMGI(fmt, ...) LOG_INFO ("SENSOR", fmt, ##__VA_ARGS__)
@@ -30,28 +31,26 @@
 static bool s_init_ok = false;
 
 bool sensor_mgr_init() {
-    SMGI("=== sensor_mgr_init — FAZA0 (vsi senzorji zakomentirani) ===");
+    SMGI("=== sensor_mgr_init — FAZA2 (hal_radar aktiven) ===");
 
-    // FAZA0: Wire1 senzorji zakomentirani
+    // FAZA0: še zakomentirani
     //   hal_tof_init()   — TCA9548A + 6× VL53L0X  (Wire1)
-    //   hal_radar_init() — SC16IS752 + 4× LD2410C  (Wire1)
     //   hal_light_init() — BH1750                  (Wire1)
     //   hal_gpio_init()  — MCP23017                (Wire1) — v eventBusTask
-    //
-    // Odkomentiraj po eno v Fazi 1 ko Wire1 postane aktiven:
-    //   1. hal_light_init() — samo en čip, najlažji test
-    //   2. hal_gpio_init()
-    //   3. hal_tof_init()
-    //   4. hal_radar_init()
 
-    SMGW("FAZA0: hal_tof / hal_radar / hal_light preskočeni");
+    SMGW("FAZA0: hal_tof / hal_light preskočeni");
 
-    // FAZA 1: SC16IS752 hardware test
-    // Blokira ~15s (3s timeout × 4 kanali + overhead).
-    // Po testu: rezultati vidni na Serial Monitor.
-    SMGI("Zaganjam SC16IS752 hardware test...");
-    hal_radar_test_run();
-    SMGI("SC16IS752 test zaključen — glej [RT] izpis zgoraj");
+    SMGI("hal_radar_init...");
+    bool radar_ok = hal_radar_init([](const RadarFrame& f) {
+        // TODO: EventBus publish RADAR_DATA
+        // event_bus_publish(EVT_RADAR_DATA, &f, sizeof(f));
+        (void)f; // frame sprejet — EventBus publish pride v naslednji fazi
+    });
+    if (!radar_ok) {
+        SMGW("hal_radar_init NAPAKA — sistem dela naprej brez radarja");
+    } else {
+        SMGI("hal_radar_init OK");
+    }
 
     s_init_ok = true;
     SMGI("sensor_mgr_init OK");
@@ -66,14 +65,22 @@ void sensorTask(void* pvParams) {
 
     sensor_mgr_init();
 
-    SMGI("sensorTask v zanki (FAZA0 — nič ne dela)");
+    SMGI("sensorTask v zanki (FAZA2 — hal_radar IRQ-driven)");
     while (true) {
         esp_task_wdt_reset();
 
-        // FAZA0: vsi HAL ticki zakomentirani
+        // FAZA0: še zakomentirani
         // hal_tof_tick();
-        // hal_radar_tick();   ← bo aktiven po hal_radar_test (Faza 2)
         // hal_light_tick();
+
+        // hal_radar nima tick — IRQ-driven, radarTask bere sam
+
+        // Periodična radar statistika (vsake 5 minut)
+        static uint32_t last_radar_log = 0;
+        if (millis() - last_radar_log > 300000) {
+            last_radar_log = millis();
+            hal_radar_log_stats();
+        }
 
         vTaskDelay(pdMS_TO_TICKS(500));
     }
