@@ -31,6 +31,7 @@
 // ============================================================
 
 #include "bsp.h"
+#include "hal_gpio.h"
 #include "web_ui.h"
 #include <esp_task_wdt.h>
 #include <esp_heap_caps.h>
@@ -59,7 +60,6 @@ TaskHandle_t hTaskWifi     = nullptr;
 
 static SemaphoreHandle_t s_wire1_mutex = nullptr;
 static bool     s_wire1_ok  = false;
-static bool     s_mcp_ok    = false;
 static uint32_t s_boot_time = 0;
 
 // ============================================================
@@ -307,7 +307,7 @@ void bsp_init() {
 }
 
 bool bsp_wire1_ok()           { return s_wire1_ok; }
-bool bsp_mcp_ok()             { return s_mcp_ok; }
+bool bsp_mcp_ok()             { return hal_gpio_ok(); }
 SemaphoreHandle_t bsp_get_wire1_mutex() { return s_wire1_mutex; }
 uint32_t bsp_boot_time_ms()   { return s_boot_time; }
 

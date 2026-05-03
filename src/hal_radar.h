@@ -103,6 +103,7 @@ typedef struct {
     uint32_t frames_ok;         // veljavni frame-i od zagona
     uint32_t frames_err;        // neveljavi frame-i
     uint32_t parse_errors;      // napake parserja
+    uint32_t boot_parse_errors; // parse_err nastale med init/boot (odštejemo pri prikazu)
     uint32_t i2c_errors;        // napake I2C transakcij
     uint32_t irq_count;         // skupaj IRQ sprožitev za ta čip
     uint32_t last_frame_ms;     // millis() zadnjega veljavnega frame-a

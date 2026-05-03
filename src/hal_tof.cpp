@@ -132,8 +132,10 @@ static uint32_t s_cycle_ms_count = 0;
 static TofProfileCallback s_profile_cb = nullptr;
 
 // Watchdog timer — zadnji čas IDLE health-check meritve
-// Inicializirano na 0 → prva meritev pride takoj ob zagonu (po ~0ms)
-static uint32_t s_last_watchdog_ms = 0;
+// Offset +60s: TOF watchdog pride 1 minuto za radarjem (ki je na 0).
+// Prepreči Wire1 mutex contention ko bi radar, TOF in GPIO
+// vsi hkrati zahtevali Wire1 ob 600s meji.
+static uint32_t s_last_watchdog_ms = 60000;
 
 // Inicializiran flag
 static bool s_initialized = false;

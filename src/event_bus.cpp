@@ -1,22 +1,13 @@
 // ============================================================
 // event_bus.cpp — EventBus implementacija
 // Projekt : Avtomatizacija Pokritega Parkirišča
-// Verzija : 2.0.0-dev  |  Datum: 2026-04
-// Faza    : 0 — hal_gpio_init in radar queue zakomentirani
-// ============================================================
-//
-// FAZA0 SPREMEMBE:
-//   - hal_gpio_init() ZAKOMENTIRANO — Wire1 ni aktiven
-//   - processGpioQueue() / processRadarQueue() ZAKOMENTIRANI
-//   - EventBus init in publish/subscribe deluje normalno
-//
+// Verzija : 2.0.0-dev  |  Datum: 2026-05
 // ============================================================
 
 #include "event_bus.h"
 #include <esp_task_wdt.h>
 
-// FAZA0: hal_gpio in hal_radar includev zakomentirani
-// #include "hal_gpio.h"
+#include "hal_gpio.h"
 // #include "hal_radar.h"
 
 #include "logger.h"
@@ -124,9 +115,8 @@ void EventBus::publish(EventType type, uint32_t payload) {
     }
 }
 
-// FAZA0: GPIO in radar queue zakomentirani — Wire1 ni aktiven
 void EventBus::processGpioQueue() {
-    // hal_gpio_process_queue();
+    hal_gpio_process_queue();
 }
 void EventBus::processRadarQueue() {
     // hal_radar_process_irq_queue();
@@ -143,20 +133,21 @@ void eventBusTask(void* pvParams) {
         EBE("EventBus::init NAPAKA!");
     }
 
-    // FAZA0: hal_gpio_init ZAKOMENTIRANO — Wire1 ni aktiven
-    // if (!hal_gpio_init()) {
-    //     EBE("hal_gpio_init NAPAKA!");
-    // }
-    EBI("FAZA0: hal_gpio_init preskočen");
+    if (!hal_gpio_init()) {
+        EBE("hal_gpio_init NAPAKA — GPIO modul onemogočen (SSR, rampa, vrata)!");
+        // Ne restartamo — sistem teče naprej brez GPIO (degraded mode)
+    } else {
+        EBI("hal_gpio_init OK");
+    }
 
     EBI("eventBusTask v zanki");
     uint32_t last_stats = 0;
     while (true) {
         esp_task_wdt_reset();
 
-        // FAZA0: queue procesiranje zakomentirano
-        // EventBus::processGpioQueue();
-        // EventBus::processRadarQueue();
+        EventBus::processGpioQueue();   // MCP23017 INT queue — non-blocking
+        EventBus::processRadarQueue();  // SC16IS752 IRQ queue — non-blocking (zakomentirano dokler ni hal_radar aktiven)
+        hal_gpio_tick();                // rampaluc timeout + health-check timer
 
         uint32_t now = millis();
         if ((now - last_stats) >= 60000) {

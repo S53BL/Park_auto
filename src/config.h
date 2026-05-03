@@ -190,6 +190,11 @@
 // 12. OSVETLITEV
 // ============================================================
 #define LIGHT_LUX_THRESHOLD     50
+// BH1750 polling in povprečenje
+#define LIGHT_POLL_SENSOR_MS        30000   // interval med branjem senzorja (ms)
+#define LIGHT_AVG_SAMPLES           5       // vzorci v drsečem povprečju
+#define LIGHT_LUX_NIGHT             40      // prag pod katerim preklopi v NOČ
+#define LIGHT_LUX_DAY               70      // prag nad katerim preklopi v DAN
 #define LIGHT_POLL_MS           1000
 #define LIGHT_FADE_SLOW_MS      7000
 #define LIGHT_FADE_FAST_MS      2500

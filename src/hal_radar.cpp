@@ -850,6 +850,17 @@ static void radarTask(void* pvParams) {
         }
     }
 
+    // Snapshot parse_errors po boot čiščenju — te so nastale med init,
+    // ne med normalnim delovanjem. Odštejemo jih pri prikazu statistike.
+    for (uint8_t i = 0; i < RADAR_SENSOR_COUNT; i++) {
+        s_radar.ch[i].status.boot_parse_errors = s_radar.ch[i].status.parse_errors;
+    }
+    RADI("Boot parse_err snapshot: ch0=%lu ch1=%lu ch2=%lu ch3=%lu",
+        (unsigned long)s_radar.ch[0].status.boot_parse_errors,
+        (unsigned long)s_radar.ch[1].status.boot_parse_errors,
+        (unsigned long)s_radar.ch[2].status.boot_parse_errors,
+        (unsigned long)s_radar.ch[3].status.boot_parse_errors);
+
     static const char* names[4] = {"Vhod", "Cesta_L", "Cesta_D", "Garaza"};
     uint32_t last_status_ms = 0;
     bool     first_status   = true;
@@ -889,7 +900,9 @@ static void radarTask(void* pvParams) {
             for (uint8_t i = 0; i < RADAR_SENSOR_COUNT; i++) {
                 total_frames += s_radar.ch[i].status.frames_ok;
                 total_irq    += s_radar.ch[i].status.irq_count;
-                total_errors += s_radar.ch[i].status.parse_errors
+                // Odštejemo boot_parse_errors — prikazujemo samo runtime napake
+                total_errors += (s_radar.ch[i].status.parse_errors
+                                - s_radar.ch[i].status.boot_parse_errors)
                               + s_radar.ch[i].status.i2c_errors;
             }
 
@@ -1114,7 +1127,7 @@ void hal_radar_log_stats() {
             names[i],
             (unsigned long)s.frames_ok,
             (unsigned long)s.frames_err,
-            (unsigned long)s.parse_errors,
+            (unsigned long)(s.parse_errors - s.boot_parse_errors),
             (unsigned long)s.i2c_errors,
             (unsigned long)s.irq_count,
             (unsigned long)ago);

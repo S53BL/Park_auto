@@ -16,7 +16,7 @@
 #include <esp_task_wdt.h>
 
 #include "hal_tof.h"
-// #include "hal_light.h"
+#include "hal_light.h"
 // #include "hal_gpio.h"
 
 // hal_radar_test.h — odstranjeno, test zaključen 2026-04
@@ -33,9 +33,16 @@ static bool s_init_ok = false;
 bool sensor_mgr_init() {
     SMGI("=== sensor_mgr_init — FAZA3 (hal_radar + hal_tof) ===");
 
-    // FAZA0: še zakomentirani
-    //   hal_light_init() — BH1750                  (Wire1)
     //   hal_gpio_init()  — MCP23017                (Wire1) — v eventBusTask
+
+    // hal_light init — BH1750 senzor svetlobe na Wire1
+    SMGI("hal_light_init...");
+    bool light_ok = hal_light_init();
+    if (!light_ok) {
+        SMGW("hal_light_init NAPAKA — sistem dela naprej brez senzorja svetlobe (is_night=false)");
+    } else {
+        SMGI("hal_light_init OK");
+    }
 
     SMGI("hal_radar_init...");
     bool radar_ok = hal_radar_init([](const RadarFrame& f) {
@@ -81,6 +88,7 @@ void sensorTask(void* pvParams) {
 
     SMGI("sensorTask v zanki (FAZA3 — hal_radar + hal_tof)");
     static uint32_t last_tof_tick_ms = 0;
+    static uint32_t last_light_tick_ms = 0;
 
     while (true) {
         esp_task_wdt_reset();
@@ -113,6 +121,16 @@ void sensorTask(void* pvParams) {
             //   napaka in recovery preskoči (glej komentar v hal_radar_recovery_check).
             if (hal_tof_getPhase() == TOF_PHASE_IDLE) {
                 hal_radar_recovery_check();
+            }
+        }
+
+        // --- hal_light tick (BH1750 svetloba) ---
+        // Ne med TOF_PHASE_SCANNING — Wire1 je takrat zaseden s TCA9548A.
+        TofPhase cur_phase = hal_tof_getPhase();
+        if (cur_phase != TOF_PHASE_SCANNING && cur_phase != TOF_PHASE_DTW_WAIT) {
+            if ((millis() - last_light_tick_ms) >= LIGHT_POLL_SENSOR_MS) {
+                last_light_tick_ms = millis();
+                hal_light_tick();
             }
         }
 
