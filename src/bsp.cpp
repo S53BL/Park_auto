@@ -34,6 +34,7 @@
 #include "hal_gpio.h"
 #include "web_ui.h"
 #include "config_mgr.h"
+#include "led_manager.h"
 #include <esp_task_wdt.h>
 #include <esp_heap_caps.h>
 #include <freertos/idf_additions.h>
@@ -84,16 +85,6 @@ void eventBusTask(void* p) {
 __attribute__((weak))
 void sensorTask(void* p) {
     LOGI("sensorTask stub — Core%d", xPortGetCoreID());
-    esp_task_wdt_add(xTaskGetCurrentTaskHandle());
-    while (true) {
-        esp_task_wdt_reset();
-        vTaskDelay(pdMS_TO_TICKS(500));
-    }
-}
-
-__attribute__((weak))
-void ledTask(void* p) {
-    LOGI("ledTask stub — Core%d", xPortGetCoreID());
     esp_task_wdt_add(xTaskGetCurrentTaskHandle());
     while (true) {
         esp_task_wdt_reset();
