@@ -18,6 +18,7 @@
 #include "hal_tof.h"
 #include "hal_light.h"
 // #include "hal_gpio.h"
+#include "config_mgr.h"
 
 // hal_radar_test.h — odstranjeno, test zaključen 2026-04
 
@@ -46,9 +47,15 @@ bool sensor_mgr_init() {
 
     SMGI("hal_radar_init...");
     bool radar_ok = hal_radar_init([](const RadarFrame& f) {
-        // TODO: EventBus publish RADAR_DATA
-        // event_bus_publish(EVT_RADAR_DATA, &f, sizeof(f));
-        (void)f; // frame sprejet — EventBus publish pride v naslednji fazi
+        // Objavi radar event — subscribers (light_logic, alarm) reagirajo
+        // Payload: zakodiramo channel (0-3) in motion flag v uint32_t
+        //   bit 0-7:  channel index (f.channel)
+        //   bit 8:    motion detected (f.motion)
+        //   bit 9:    stationary detected (f.stationary)
+        uint32_t payload = ((uint32_t)f.sensor_id & 0xFF)
+                         | ((f.detection & 1) ? (1u << 8) : 0u)   // bit 8: premik
+                         | ((f.detection & 2) ? (1u << 9) : 0u);  // bit 9: statično
+        EventBus::publish(EventType::RADAR_MOTION, payload);
     });
     if (!radar_ok) {
         SMGW("hal_radar_init NAPAKA — sistem dela naprej brez radarja");
@@ -59,12 +66,17 @@ bool sensor_mgr_init() {
     // hal_tof init — TCA9548A + 6× VL53L1X na Wire1
     SMGI("hal_tof_init...");
     hal_tof_setProfileCallback([](const TofProfileResult& profile) {
-        // TODO: event_bus_publish(EVT_TOF_PROFILE_READY, &profile, sizeof(profile));
         SMGI("TOF_PROFILE_READY — mesto:%c točke:%d trajanje:%lu ms",
              (profile.place == TOF_PLACE_A) ? 'A' : 'B',
              profile.count,
              (unsigned long)profile.scan_duration_ms);
-        (void)profile;
+        // Payload: TOF_PLACE_A=0, TOF_PLACE_B=1
+        // Pointer na profil NI varen za async prenos prek EventBusa
+        // ker je profil na stacku sensor taska. Subscribers ki rabijo
+        // dejanske točke (vehicle_recog) se registrirajo na hal_tof
+        // profil callback direktno — ne prek EventBus payloada.
+        uint32_t payload = (profile.place == TOF_PLACE_A) ? 0u : 1u;
+        EventBus::publish(EventType::TOF_PROFILE_READY, payload);
     });
     bool tof_ok = hal_tof_init();
     if (!tof_ok) {

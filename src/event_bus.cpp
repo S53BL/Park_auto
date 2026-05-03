@@ -8,7 +8,7 @@
 #include <esp_task_wdt.h>
 
 #include "hal_gpio.h"
-// #include "hal_radar.h"
+#include "hal_radar.h"
 
 #include "logger.h"
 #define EBI(fmt, ...) LOG_INFO ("EVBUS", fmt, ##__VA_ARGS__)
@@ -119,7 +119,7 @@ void EventBus::processGpioQueue() {
     hal_gpio_process_queue();
 }
 void EventBus::processRadarQueue() {
-    // hal_radar_process_irq_queue();
+    // Radar IRQ queue se procesira interno v radarTask — ni javne funkcije.
 }
 
 // ============================================================
@@ -146,7 +146,7 @@ void eventBusTask(void* pvParams) {
         esp_task_wdt_reset();
 
         EventBus::processGpioQueue();   // MCP23017 INT queue — non-blocking
-        EventBus::processRadarQueue();  // SC16IS752 IRQ queue — non-blocking (zakomentirano dokler ni hal_radar aktiven)
+        EventBus::processRadarQueue();  // SC16IS752 IRQ queue — non-blocking
         hal_gpio_tick();                // rampaluc timeout + health-check timer
 
         uint32_t now = millis();

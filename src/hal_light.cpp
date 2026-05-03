@@ -47,6 +47,7 @@
 
 #include "hal_light.h"
 #include "config.h"
+#include "config_mgr.h"
 #include "event_bus.h"
 #include "logger.h"
 #include <Wire.h>
@@ -155,14 +156,15 @@ static void _check_threshold() {
 
     bool new_is_night = s_is_night;  // privzeto: ohrani stanje
 
+    const Config cfg = config_get();
     if (s_is_night) {
-        // Trenutno NOČ → preklopi v DAN samo če avg > LIGHT_LUX_DAY
-        if (s_lux_avg > (float)LIGHT_LUX_DAY) {
+        // Trenutno NOČ → preklopi v DAN samo če avg > lux_day
+        if (s_lux_avg > (float)cfg.lux_day) {
             new_is_night = false;
         }
     } else {
-        // Trenutno DAN → preklopi v NOČ samo če avg < LIGHT_LUX_NIGHT
-        if (s_lux_avg < (float)LIGHT_LUX_NIGHT) {
+        // Trenutno DAN → preklopi v NOČ samo če avg < lux_night
+        if (s_lux_avg < (float)cfg.lux_night) {
             new_is_night = true;
         }
     }

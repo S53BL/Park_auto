@@ -33,6 +33,7 @@
 #include "bsp.h"
 #include "hal_gpio.h"
 #include "web_ui.h"
+#include "config_mgr.h"
 #include <esp_task_wdt.h>
 #include <esp_heap_caps.h>
 #include <freertos/idf_additions.h>
@@ -297,6 +298,16 @@ void bsp_init() {
     bsp_i2c_init();
     bsp_gpio_init();
     bsp_sd_init_internal();   // SD_MMC — pred task kreacijo, za GPIO
+
+    // Config Manager — mora biti pred vsemi moduli ki berejo nastavitve
+    config_mgr_init();
+    if (config_mgr_replaced_count() > 0) {
+        LOGI("ConfigMgr: %d vrednosti zamenjanih z defaultom",
+             config_mgr_replaced_count());
+    } else {
+        LOGI("ConfigMgr OK — vse vrednosti veljavne");
+    }
+
     bsp_wdt_init();
     bsp_tasks_create();
     s_boot_time = millis() - t0;

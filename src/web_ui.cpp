@@ -27,6 +27,7 @@
 #include "sd_mgr.h"
 #include "wifi_manager.h"
 #include "config.h"
+#include "config_mgr.h"
 
 #include <LittleFS.h>
 #include <ESPAsyncWebServer.h>
@@ -48,49 +49,6 @@ static bool            _assets_ok       = false;
 
 // Statistika zahtevkov (atomarni inkrementi — handler-ji tečejo v istem tasku)
 static WebUiStats      _stats = {};
-
-// ============================================================
-// CONFIG STUB — Faza 1
-// ============================================================
-// Vse vrednosti so v RAM. Faza 3 zamenja s config_mgr (NVS + LittleFS).
-// Struktura odraža WebUI_Arhitektura.md sekcija 4.2.
-
-struct ConfigStub {
-    // Tab: Osvetlitev
-    uint32_t timeout_ssr1_s       = 180;
-    uint32_t manual_extend_min    = 30;
-    uint32_t antiforgot_ssr2_min  = 5;
-    uint32_t antiforgot_ssr3_min  = 5;
-    bool     ssr2_auto_night      = true;
-    uint32_t lux_threshold        = 50;
-    uint8_t  brightness_night     = 120;
-
-    // Tab: LED animacije
-    uint32_t fill_speed_ms        = 6000;
-    uint32_t unfill_speed_ms      = 3000;
-    uint32_t fade_duration_ms     = 800;
-    uint8_t  target_brightness    = 200;
-    uint32_t ssr2_delay_ms        = 500;
-    uint32_t pa_thresh1_mm        = 1500;
-    uint32_t pa_thresh2_mm        = 1000;
-    uint32_t pa_thresh3_mm        = 500;
-    uint32_t pa_stability_s       = 4;
-    uint32_t photocell_timer_min  = 5;
-    uint32_t clock_duration_s     = 10;
-
-    // Tab: Identifikacija vozil
-    float    dtw_threshold        = 18.0f;
-    uint8_t  sakoe_radius         = 15;
-    uint8_t  min_profile_points   = 25;
-    uint8_t  normalize_points     = 80;
-    uint16_t delta_filter_mm      = 15;
-    uint16_t phase_confirm_cm     = 350;
-    float    stability_s          = 1.5f;
-    uint32_t poll_idle_ms         = 100;
-    uint32_t poll_active_ms       = 40;
-};
-
-static ConfigStub _cfg;
 
 // ============================================================
 // SECTION 2 — POMOŽNE FUNKCIJE
@@ -288,47 +246,46 @@ static void _handleLogsFlush(AsyncWebServerRequest* req) {
 static void _handleConfigGet(AsyncWebServerRequest* req) {
     _stats.req_total++;
     _stats.req_api++;
-    LOG_DEBUG(TAG, "GET /api/config (stub)");
+    LOG_DEBUG(TAG, "GET /api/config");
 
     JsonDocument doc;
 
+    const Config cfg = config_get();
+
     // Tab: Osvetlitev
     JsonObject light = doc["light"].to<JsonObject>();
-    light["timeout_ssr1_s"]      = _cfg.timeout_ssr1_s;
-    light["manual_extend_min"]   = _cfg.manual_extend_min;
-    light["antiforgot_ssr2_min"] = _cfg.antiforgot_ssr2_min;
-    light["antiforgot_ssr3_min"] = _cfg.antiforgot_ssr3_min;
-    light["ssr2_auto_night"]     = _cfg.ssr2_auto_night;
-    light["lux_threshold"]       = _cfg.lux_threshold;
-    light["brightness_night"]    = _cfg.brightness_night;
+    light["timeout_ssr1_s"]      = cfg.timeout_ssr1_s;
+    light["manual_extend_min"]   = cfg.manual_extend_min;
+    light["antiforgot_ssr2_min"] = cfg.antiforgot_ssr2_min;
+    light["antiforgot_ssr3_min"] = cfg.antiforgot_ssr3_min;
+    light["ssr2_auto_night"]     = cfg.ssr2_auto_night;
+    light["lux_threshold"]       = cfg.lux_night;    // lux_night kot "lux_threshold" za UI kompatibilnost
+    light["lux_day"]             = cfg.lux_day;
+    light["brightness_night"]    = cfg.brightness_night;
 
     // Tab: LED animacije
     JsonObject led = doc["led"].to<JsonObject>();
-    led["fill_speed_ms"]       = _cfg.fill_speed_ms;
-    led["unfill_speed_ms"]     = _cfg.unfill_speed_ms;
-    led["fade_duration_ms"]    = _cfg.fade_duration_ms;
-    led["target_brightness"]   = _cfg.target_brightness;
-    led["ssr2_delay_ms"]       = _cfg.ssr2_delay_ms;
-    led["pa_thresh1_mm"]       = _cfg.pa_thresh1_mm;
-    led["pa_thresh2_mm"]       = _cfg.pa_thresh2_mm;
-    led["pa_thresh3_mm"]       = _cfg.pa_thresh3_mm;
-    led["pa_stability_s"]      = _cfg.pa_stability_s;
-    led["photocell_timer_min"] = _cfg.photocell_timer_min;
-    led["clock_duration_s"]    = _cfg.clock_duration_s;
+    led["fill_speed_ms"]       = cfg.fill_speed_ms;
+    led["unfill_speed_ms"]     = cfg.unfill_speed_ms;
+    led["fade_duration_ms"]    = cfg.fade_duration_ms;
+    led["target_brightness"]   = cfg.target_brightness;
+    led["ssr2_delay_ms"]       = cfg.ssr2_delay_ms;
+    led["pa_thresh1_mm"]       = cfg.pa_thresh_green_mm;
+    led["pa_thresh2_mm"]       = cfg.pa_thresh_orange_mm;
+    led["pa_thresh3_mm"]       = cfg.pa_thresh_red_mm;
+    led["pa_stability_s"]      = cfg.pa_stability_s;
+    led["photocell_timer_min"] = cfg.photocell_timer_min;
+    led["clock_duration_s"]    = cfg.clock_duration_s;
 
     // Tab: Identifikacija
     JsonObject ident = doc["ident"].to<JsonObject>();
-    ident["dtw_threshold"]      = _cfg.dtw_threshold;
-    ident["sakoe_radius"]       = _cfg.sakoe_radius;
-    ident["min_profile_points"] = _cfg.min_profile_points;
-    ident["normalize_points"]   = _cfg.normalize_points;
-    ident["delta_filter_mm"]    = _cfg.delta_filter_mm;
-    ident["phase_confirm_cm"]   = _cfg.phase_confirm_cm;
-    ident["stability_s"]        = _cfg.stability_s;
-    ident["poll_idle_ms"]       = _cfg.poll_idle_ms;
-    ident["poll_active_ms"]     = _cfg.poll_active_ms;
-
-    doc["_stub"] = true;  // opomba da je to RAM stub, ne persistirano
+    ident["dtw_threshold"]      = cfg.dtw_threshold;
+    ident["sakoe_radius"]       = cfg.sakoe_radius;
+    ident["min_profile_points"] = cfg.min_profile_points;
+    ident["normalize_points"]   = cfg.normalize_points;
+    ident["delta_filter_mm"]    = cfg.delta_filter_mm;
+    ident["phase_confirm_cm"]   = cfg.phase_confirm_cm;
+    ident["stability_s"]        = cfg.stability_s;
 
     _sendJson(req, 200, doc);
 }
@@ -354,50 +311,52 @@ static void _handleConfigPost(AsyncWebServerRequest* req, uint8_t* data,
         return;
     }
 
-    // Parsiraj vse znane ključe — neznane tiho ignoriramo
+    // Preberi trenutni config, posodobi polja iz JSON-a, shrani
+    Config cfg = config_get();  // kopija
+
     if (doc["light"].is<JsonObject>()) {
         JsonObject l = doc["light"];
-        if (l["timeout_ssr1_s"].is<uint32_t>())      _cfg.timeout_ssr1_s      = l["timeout_ssr1_s"];
-        if (l["manual_extend_min"].is<uint32_t>())    _cfg.manual_extend_min   = l["manual_extend_min"];
-        if (l["antiforgot_ssr2_min"].is<uint32_t>())  _cfg.antiforgot_ssr2_min = l["antiforgot_ssr2_min"];
-        if (l["antiforgot_ssr3_min"].is<uint32_t>())  _cfg.antiforgot_ssr3_min = l["antiforgot_ssr3_min"];
-        if (l["ssr2_auto_night"].is<bool>())           _cfg.ssr2_auto_night     = l["ssr2_auto_night"];
-        if (l["lux_threshold"].is<uint32_t>())         _cfg.lux_threshold       = l["lux_threshold"];
-        if (l["brightness_night"].is<uint8_t>())       _cfg.brightness_night    = l["brightness_night"];
+        if (l["timeout_ssr1_s"].is<uint32_t>())      cfg.timeout_ssr1_s      = l["timeout_ssr1_s"];
+        if (l["manual_extend_min"].is<uint32_t>())    cfg.manual_extend_min   = l["manual_extend_min"];
+        if (l["antiforgot_ssr2_min"].is<uint32_t>())  cfg.antiforgot_ssr2_min = l["antiforgot_ssr2_min"];
+        if (l["antiforgot_ssr3_min"].is<uint32_t>())  cfg.antiforgot_ssr3_min = l["antiforgot_ssr3_min"];
+        if (l["ssr2_auto_night"].is<bool>())           cfg.ssr2_auto_night     = l["ssr2_auto_night"];
+        if (l["lux_threshold"].is<uint32_t>())         cfg.lux_night           = l["lux_threshold"];
+        if (l["lux_day"].is<uint32_t>())               cfg.lux_day             = l["lux_day"];
+        if (l["brightness_night"].is<uint8_t>())       cfg.brightness_night    = l["brightness_night"];
     }
     if (doc["led"].is<JsonObject>()) {
         JsonObject a = doc["led"];
-        if (a["fill_speed_ms"].is<uint32_t>())        _cfg.fill_speed_ms        = a["fill_speed_ms"];
-        if (a["unfill_speed_ms"].is<uint32_t>())      _cfg.unfill_speed_ms      = a["unfill_speed_ms"];
-        if (a["fade_duration_ms"].is<uint32_t>())     _cfg.fade_duration_ms     = a["fade_duration_ms"];
-        if (a["target_brightness"].is<uint8_t>())     _cfg.target_brightness    = a["target_brightness"];
-        if (a["ssr2_delay_ms"].is<uint32_t>())        _cfg.ssr2_delay_ms        = a["ssr2_delay_ms"];
-        if (a["pa_thresh1_mm"].is<uint32_t>())        _cfg.pa_thresh1_mm        = a["pa_thresh1_mm"];
-        if (a["pa_thresh2_mm"].is<uint32_t>())        _cfg.pa_thresh2_mm        = a["pa_thresh2_mm"];
-        if (a["pa_thresh3_mm"].is<uint32_t>())        _cfg.pa_thresh3_mm        = a["pa_thresh3_mm"];
-        if (a["pa_stability_s"].is<uint32_t>())       _cfg.pa_stability_s       = a["pa_stability_s"];
-        if (a["photocell_timer_min"].is<uint32_t>())  _cfg.photocell_timer_min  = a["photocell_timer_min"];
-        if (a["clock_duration_s"].is<uint32_t>())     _cfg.clock_duration_s     = a["clock_duration_s"];
+        if (a["fill_speed_ms"].is<uint32_t>())        cfg.fill_speed_ms        = a["fill_speed_ms"];
+        if (a["unfill_speed_ms"].is<uint32_t>())      cfg.unfill_speed_ms      = a["unfill_speed_ms"];
+        if (a["fade_duration_ms"].is<uint32_t>())     cfg.fade_duration_ms     = a["fade_duration_ms"];
+        if (a["target_brightness"].is<uint8_t>())     cfg.target_brightness    = a["target_brightness"];
+        if (a["ssr2_delay_ms"].is<uint32_t>())        cfg.ssr2_delay_ms        = a["ssr2_delay_ms"];
+        if (a["pa_thresh1_mm"].is<uint32_t>())        cfg.pa_thresh_green_mm   = a["pa_thresh1_mm"];
+        if (a["pa_thresh2_mm"].is<uint32_t>())        cfg.pa_thresh_orange_mm  = a["pa_thresh2_mm"];
+        if (a["pa_thresh3_mm"].is<uint32_t>())        cfg.pa_thresh_red_mm     = a["pa_thresh3_mm"];
+        if (a["pa_stability_s"].is<uint32_t>())       cfg.pa_stability_s       = a["pa_stability_s"];
+        if (a["photocell_timer_min"].is<uint32_t>())  cfg.photocell_timer_min  = a["photocell_timer_min"];
+        if (a["clock_duration_s"].is<uint32_t>())     cfg.clock_duration_s     = a["clock_duration_s"];
     }
     if (doc["ident"].is<JsonObject>()) {
         JsonObject i = doc["ident"];
-        if (i["dtw_threshold"].is<float>())           _cfg.dtw_threshold       = i["dtw_threshold"];
-        if (i["sakoe_radius"].is<uint8_t>())          _cfg.sakoe_radius        = i["sakoe_radius"];
-        if (i["min_profile_points"].is<uint8_t>())    _cfg.min_profile_points  = i["min_profile_points"];
-        if (i["normalize_points"].is<uint8_t>())      _cfg.normalize_points    = i["normalize_points"];
-        if (i["delta_filter_mm"].is<uint16_t>())      _cfg.delta_filter_mm     = i["delta_filter_mm"];
-        if (i["phase_confirm_cm"].is<uint16_t>())     _cfg.phase_confirm_cm    = i["phase_confirm_cm"];
-        if (i["stability_s"].is<float>())             _cfg.stability_s         = i["stability_s"];
-        if (i["poll_idle_ms"].is<uint32_t>())         _cfg.poll_idle_ms        = i["poll_idle_ms"];
-        if (i["poll_active_ms"].is<uint32_t>())       _cfg.poll_active_ms      = i["poll_active_ms"];
+        if (i["dtw_threshold"].is<float>())           cfg.dtw_threshold        = i["dtw_threshold"];
+        if (i["sakoe_radius"].is<uint8_t>())          cfg.sakoe_radius         = i["sakoe_radius"];
+        if (i["min_profile_points"].is<uint8_t>())    cfg.min_profile_points   = i["min_profile_points"];
+        if (i["normalize_points"].is<uint8_t>())      cfg.normalize_points     = i["normalize_points"];
+        if (i["delta_filter_mm"].is<uint32_t>())      cfg.delta_filter_mm      = i["delta_filter_mm"];
+        if (i["phase_confirm_cm"].is<uint32_t>())     cfg.phase_confirm_cm     = i["phase_confirm_cm"];
+        if (i["stability_s"].is<float>())             cfg.stability_s          = i["stability_s"];
     }
 
-    LOG_INFO(TAG, "Config updated in RAM (stub — not persisted to NVS/LittleFS)");
+    config_set(cfg);
+    bool saved = config_save();
+    LOG_INFO(TAG, "Config posodobljen in shranjen v NVS (ok=%d)", (int)saved);
 
     JsonDocument resp;
-    resp["ok"]    = true;
-    resp["msg"]   = "saved to RAM (stub)";
-    resp["_stub"] = true;
+    resp["ok"]  = true;
+    resp["msg"] = saved ? "saved to NVS" : "saved to RAM only (NVS error)";
     _sendJson(req, 200, resp);
 }
 
@@ -405,11 +364,10 @@ static void _handleConfigReset(AsyncWebServerRequest* req) {
     _stats.req_total++;
     _stats.req_api++;
     LOG_INFO(TAG, "POST /api/config/reset (stub) — reset to defaults");
-    _cfg = ConfigStub{};   // reset na privzete vrednosti (konstruktorji)
+    config_reset_defaults();
     JsonDocument doc;
-    doc["ok"]    = true;
-    doc["msg"]   = "config reset to defaults (stub)";
-    doc["_stub"] = true;
+    doc["ok"]  = true;
+    doc["msg"] = "config reset to defaults";
     _sendJson(req, 200, doc);
 }
 
