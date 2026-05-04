@@ -738,6 +738,15 @@ bool hal_gpio_set_ssr(uint8_t ssr_idx, bool on) {
 
     SemaphoreHandle_t mtx = bsp_get_wire1_mutex();
     if (xSemaphoreTake(mtx, pdMS_TO_TICKS(GPIO_WIRE1_MUTEX_TIMEOUT_MS)) != pdTRUE) {
+        // Wire1 mutex timeout pri SSR operaciji.
+        // Možni vzroki (po prioriteti):
+        //   1. radarTask drži Wire1 med process_chip_irq() drain zanko (~160ms max)
+        //   2. sensorTask drži Wire1 med TOF SCANNING fazou (~90ms)
+        //   3. Deadlock (ne bi smelo biti — vsi mutex klici imajo timeout)
+        // Po refaktoringu light_logic.cpp (SsrCmd queue, 2026-05):
+        //   SSR klici tečejo samo iz appTask → ne more biti contention z eventBusTask.
+        //   Contention z radarTask (~160ms) ostaja možna — timer 200ms je dovolj.
+        //   Če se timeout dogaja pogosto → razmisliti o ločenem Wire1 za SSR (ni priporočeno).
         GPIOW("set_ssr(%d): Wire1 mutex timeout", ssr_idx);
         return false;
     }

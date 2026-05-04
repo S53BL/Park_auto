@@ -323,8 +323,7 @@
 #define UART_CH_A           0
 #define UART_CH_B           1
 
-// FreeRTOS task parametri
-#define RADAR_TASK_STACK    4096
+// FreeRTOS task parametri (RADAR_TASK_STACK je definiran v config.h)
 #define RADAR_TASK_PRIO     4       // enako kot sensorTask
 #define RADAR_TASK_CORE     1       // Core1 — skupaj z ostalimi taski
 
@@ -762,18 +761,19 @@ static void process_chip_irq(uint8_t chip_idx) {
 }
 
 // ============================================================
-// ISR — GPIO interrupt handler
-// Kliče se ob FALLING edge na IO41 ali IO42.
-// KRITIČNO: v ISR ne smemo:
-//   - klicati Wire1 (I2C)
-//   - klicati delay() ali millis()
-//   - klicati logger funkcij
-//   - vzeti mutexov (xSemaphoreTake)
-// Samo: xQueueSendFromISR in vTaskNotifyGiveFromISR
+// DEAD CODE — ISR funkciji (ohranjeni za referenčno dokumentacijo)
+// ============================================================
+// attachInterrupt() NI v uporabi — IDF 5.3 pioarduino limitation.
+// gpio_isr_register() vedno gre prek esp_ipc_call_blocking() →
+// ipc_task (1KB stack) → heap_caps_malloc overflow → crash.
+// Dokumentirano v crash_report_solution.md (2026-05).
 //
-// Datasheet: IRQ je open-drain, active LOW.
-// FALLING edge pomeni interrupt pending.
-// IRQ ostane LOW dokler ni interrupt počiščen z branjem IIR/LSR/MSR.
+// PRIHODNOST: Ko pioarduino posodobi CONFIG_ESP_IPC_TASK_STACK_SIZE > 1024,
+// lahko zamenjamo polling z ISR arhitekturo za nižjo latenco:
+//   attachInterrupt(digitalPinToInterrupt(RADAR_IRQ_CHIP1), isr_chip1, FALLING);
+//   attachInterrupt(digitalPinToInterrupt(RADAR_IRQ_CHIP2), isr_chip2, FALLING);
+// Preveriti: ~/.platformio/packages/framework-arduinoespressif32-libs/
+//            esp32s3/sdkconfig → CONFIG_ESP_IPC_TASK_STACK_SIZE
 // ============================================================
 
 static void IRAM_ATTR isr_chip1() {
@@ -799,6 +799,12 @@ static void IRAM_ATTR isr_chip2() {
 static void radarTask(void* pvParams) {
     RADI("radarTask start — Core%d", xPortGetCoreID());
     esp_task_wdt_add(xTaskGetCurrentTaskHandle());
+    // Izmeri dejanski stack ob zagonu za debug — primerja z RADAR_TASK_STACK
+    // Pričakovano: vsaj 3000B free pri RADAR_TASK_STACK=8192
+    // Če je < 2000B → povečaj RADAR_TASK_STACK v config.h
+    RADI("radarTask stack ob zagonu: %lu B free / %d B total",
+         (unsigned long)uxTaskGetStackHighWaterMark(nullptr) * sizeof(StackType_t),
+         RADAR_TASK_STACK);
 
     // Preberi IRQ pin stanje pred polling zagonom — diagnostika
     int irq1_before = digitalRead(RADAR_IRQ_CHIP1);
@@ -869,9 +875,16 @@ static void radarTask(void* pvParams) {
                 xSemaphoreGive(mtx);
                 any_irq = true;
             } else {
-                RADW("radarTask: Wire1 mutex timeout (chip1) — IRQ bo obdelan naslednji poll");
+                // Wire1 mutex timeout pomeni: drug task (appTask/sensorTask) drži Wire1.
+                // IRQ bo obdelan pri naslednjem 5ms poll ciklu — to je normalno in sprejemljivo.
+                // Če se to dogaja pogosto (>10× na minuto) → preveriti Wire1 mutex contention
+                // med sensorTask (TOF scan ~90ms) in appTask (SSR sekvence).
+                // Po refaktoringu light_logic.cpp (SsrCmd queue) se to ne sme več dogajati
+                // med SSR operacijami. Če ostane → povečaj Wire1 I2C frekvenco (config.h).
                 s_radar.ch[0].status.i2c_errors++;
                 s_radar.ch[1].status.i2c_errors++;
+                RADW("Wire1 mutex timeout (chip1) — poll #%lu — preveriti contention če je pogosto",
+                     (unsigned long)(s_radar.ch[0].status.irq_count + s_radar.ch[1].status.irq_count));
             }
         }
         if (s_radar.chip2_ok && digitalRead(RADAR_IRQ_CHIP2) == LOW) {
@@ -881,9 +894,16 @@ static void radarTask(void* pvParams) {
                 xSemaphoreGive(mtx);
                 any_irq = true;
             } else {
-                RADW("radarTask: Wire1 mutex timeout (chip2) — IRQ bo obdelan naslednji poll");
+                // Wire1 mutex timeout pomeni: drug task (appTask/sensorTask) drži Wire1.
+                // IRQ bo obdelan pri naslednjem 5ms poll ciklu — to je normalno in sprejemljivo.
+                // Če se to dogaja pogosto (>10× na minuto) → preveriti Wire1 mutex contention
+                // med sensorTask (TOF scan ~90ms) in appTask (SSR sekvence).
+                // Po refaktoringu light_logic.cpp (SsrCmd queue) se to ne sme več dogajati
+                // med SSR operacijami. Če ostane → povečaj Wire1 I2C frekvenco (config.h).
                 s_radar.ch[2].status.i2c_errors++;
                 s_radar.ch[3].status.i2c_errors++;
+                RADW("Wire1 mutex timeout (chip2) — poll #%lu — preveriti contention če je pogosto",
+                     (unsigned long)(s_radar.ch[2].status.irq_count + s_radar.ch[3].status.irq_count));
             }
         }
         if (!any_irq) {

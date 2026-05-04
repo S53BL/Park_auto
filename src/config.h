@@ -173,7 +173,12 @@
 
 #define TASK_WIFI_STACK     8192
 #define TASK_WIFI_PRIO      1
-#define TASK_EVENTBUS_STACK 4096
+// TASK_EVENTBUS_STACK: povečano iz 4096 na 6144 (2026-05, preventivno)
+// Razlog: eventBusTask izvaja EventBus handlerje iz light_logic.cpp
+// (on_button_ssr, on_radar_motion, itd.) ki kličejo hal_gpio_set_ssr()
+// → Wire1 mutex → mcp_write_reg() → LOG_INFO (~512B). Skupaj ~1800B.
+// 6144B z PSRAM overhead daje faktor varnosti ~2×.
+#define TASK_EVENTBUS_STACK 6144
 #define TASK_EVENTBUS_PRIO  5
 #define TASK_SENSOR_STACK   6144
 #define TASK_SENSOR_PRIO    4
@@ -181,8 +186,20 @@
 #define TASK_LED_PRIO       3
 #define TASK_LVGL_STACK     8192
 #define TASK_LVGL_PRIO      2
-#define TASK_APP_STACK      6144
+// TASK_APP_STACK: povečano iz 6144 na 8192 (2026-05, preventivno)
+// Razlog: appTask po refaktoringu (SsrCmd queue) izvaja celotno
+// SSR sekvenco vključno z vTaskDelay(500ms) za unfill pavzo.
+// hal_gpio_set_ssr() + led_mgr_fill() + config_get() + LOG = ~2000B.
+// 8192B v PSRAM zagotavlja stabilno delovanje.
+#define TASK_APP_STACK      8192
 #define TASK_APP_PRIO       3
+// RADAR_TASK_STACK: povečano iz 4096 na 8192 (2026-05, stabilizacija)
+// Razlog: radarTask teče v PSRAM (MALLOC_CAP_SPIRAM). FreeRTOS PSRAM stack
+// ima ~1.5-2× overhead na frame. IDF 5.3 i2c_master_transmit() porabi ~800B,
+// LOG_WARN format buffer ~512B, process_chip_irq() drain zanka ~300B.
+// Worst-case z PSRAM overhead: ~4140B → preseže 4096 → stack canary crash.
+// 8192B daje faktor varnosti 2× brez opaznega vpliva na PSRAM porabo.
+#define RADAR_TASK_STACK    8192
 
 #define EVENTBUS_QUEUE_SIZE 16
 

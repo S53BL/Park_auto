@@ -105,6 +105,39 @@ struct LightLogicState {
 };
 
 // ============================================================
+// SSR COMMAND QUEUE — za non-blocking EventBus handler arhitekturo
+// ============================================================
+// ARHITEKTURNA ODLOČITEV (2026-05):
+//   EventBus handlerji (on_button_ssr, on_radar_motion itd.) tečejo
+//   v eventBusTask kontekstu. Ne smejo klicati vTaskDelay() ker bi
+//   blokirali celoten event bus za čas pavze (500ms).
+//   Rešitev: handler samo shrani SsrCmd v s_ssr_queue, appTask
+//   ga prebere in izvede dejansko sekvenco z vsemi pavzami.
+//   Prednosti:
+//     - eventBusTask nikoli ne blokira
+//     - Wire1 mutex contention odpravljen
+//     - SSR sekvence so deterministične (appTask ima lasten Wire1 mutex kontekst)
+//
+// IMPLEMENTACIJA:
+//   - FreeRTOS queue velikosti SSR_CMD_QUEUE_SIZE (8 ukazov)
+//   - light_logic_tick() bere ukaze in jih izvede
+//   - Handlerji kličejo ssr_cmd_enqueue() namesto direktnih funkcij
+
+enum class SsrCmdType : uint8_t {
+    TRIGGER_ON_AUTO,    // prižgi SSR1 avtomatsko (payload = fill_speed_ms)
+    TRIGGER_OFF,        // ugasni SSR1 sekvenco (payload = 0)
+    BUTTON_TOGGLE,      // ročni toggle SSR (payload = ssr_idx 1-4)
+    BUTTON_DISABLE,     // disable/enable toggle (payload = ssr_idx 1-4)
+};
+
+struct SsrCmd {
+    SsrCmdType type;
+    uint32_t   payload;
+};
+
+#define SSR_CMD_QUEUE_SIZE  8
+
+// ============================================================
 // JAVNI API
 // ============================================================
 
