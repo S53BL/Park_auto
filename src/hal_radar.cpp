@@ -800,35 +800,27 @@ static void radarTask(void* pvParams) {
     RADI("radarTask start — Core%d", xPortGetCoreID());
     esp_task_wdt_add(xTaskGetCurrentTaskHandle());
 
-    // Preberi IRQ pin stanje PRED attachInterrupt — diagnostika
+    // Preberi IRQ pin stanje pred polling zagonom — diagnostika
     int irq1_before = digitalRead(RADAR_IRQ_CHIP1);
     int irq2_before = digitalRead(RADAR_IRQ_CHIP2);
-    RADI("IRQ pin stanje pred attachInterrupt: IO%d=%s IO%d=%s",
+    RADI("IRQ pin stanje ob zagonu: IO%d=%s IO%d=%s",
         RADAR_IRQ_CHIP1, irq1_before == HIGH ? "HIGH(idle)" : "LOW(!)",
         RADAR_IRQ_CHIP2, irq2_before == HIGH ? "HIGH(idle)" : "LOW(!)");
 
-    // attachInterrupt tukaj — po zagonu FreeRTOS schedulerja,
-    // iz task konteksta (ne iz PSRAM init funkcije)
-    // FALLING edge — SC16IS752 IRQ gre HIGH→LOW ob novem interrupt viru.
-    // Ko počistimo vse vire (IIR=0x01) → IRQ gre nazaj HIGH → next FALLING ob novih podatkih.
-    // Predpogoj: sc16_init_channel mora počistiti THR pending interrupt pred tem klicem!
-    if (s_radar.chip1_ok) {
-        attachInterrupt(digitalPinToInterrupt(RADAR_IRQ_CHIP1), isr_chip1, FALLING);
-        RADI("ISR chip1 IO%d (FALLING) priključen", RADAR_IRQ_CHIP1);
-    }
-    if (s_radar.chip2_ok) {
-        attachInterrupt(digitalPinToInterrupt(RADAR_IRQ_CHIP2), isr_chip2, FALLING);
-        RADI("ISR chip2 IO%d (FALLING) priključen", RADAR_IRQ_CHIP2);
-    }
+    // IRQ polling — gpio_install_isr_service() ni možen z IDF 5.3 pioarduino:
+    // gpio_isr_register() vedno gre prek esp_ipc_call_blocking(xPortGetCoreID(), ...)
+    // → ipc_task izvede registracijo na 1KB stacku → heap_caps_malloc overflow.
+    // Polling z 5ms intervalom zadostuje za SC16IS752 FIFO (64B pri 9600baud ≈ 640ms).
+    RADI("IRQ polling aktiven na IO%d/IO%d (ni attachInterrupt — IDF 5.3 IPC omejitev)",
+         RADAR_IRQ_CHIP1, RADAR_IRQ_CHIP2);
 
     // Kratek delay — počakaj da SC16IS752 morda že ima data v FIFO
-    // in sproži IRQ ki smo ga zamudili med init
     vTaskDelay(pdMS_TO_TICKS(200));
 
-    // Preveri IRQ pin stanje PO attachInterrupt
+    // Preveri IRQ pin stanje po init
     int irq1_after = digitalRead(RADAR_IRQ_CHIP1);
     int irq2_after = digitalRead(RADAR_IRQ_CHIP2);
-    RADI("IRQ pin stanje po attachInterrupt: IO%d=%s IO%d=%s",
+    RADI("IRQ pin stanje po init: IO%d=%s IO%d=%s",
         RADAR_IRQ_CHIP1, irq1_after == HIGH ? "HIGH(idle)" : "LOW(data!)",
         RADAR_IRQ_CHIP2, irq2_after == HIGH ? "HIGH(idle)" : "LOW(data!)");
 
@@ -868,18 +860,34 @@ static void radarTask(void* pvParams) {
     while (true) {
         esp_task_wdt_reset();
 
-        uint8_t chip_id = 0;
-        // Čakaj na IRQ — max 1 sekundo (za WDT reset)
-        if (xQueueReceive(s_radar.irq_queue, &chip_id, pdMS_TO_TICKS(1000)) == pdTRUE) {
+        // Polling IRQ pinov — 5ms interval ko ni aktivnih IRQ
+        bool any_irq = false;
+        if (s_radar.chip1_ok && digitalRead(RADAR_IRQ_CHIP1) == LOW) {
             SemaphoreHandle_t mtx = bsp_get_wire1_mutex();
             if (xSemaphoreTake(mtx, pdMS_TO_TICKS(50)) == pdTRUE) {
-                process_chip_irq(chip_id);
+                process_chip_irq(0);
                 xSemaphoreGive(mtx);
+                any_irq = true;
             } else {
-                RADW("radarTask: Wire1 mutex timeout (chip%d) — IRQ bo obdelan v recovery",
-                     chip_id + 1);
-                s_radar.ch[chip_id * 2].status.i2c_errors++;
+                RADW("radarTask: Wire1 mutex timeout (chip1) — IRQ bo obdelan naslednji poll");
+                s_radar.ch[0].status.i2c_errors++;
+                s_radar.ch[1].status.i2c_errors++;
             }
+        }
+        if (s_radar.chip2_ok && digitalRead(RADAR_IRQ_CHIP2) == LOW) {
+            SemaphoreHandle_t mtx = bsp_get_wire1_mutex();
+            if (xSemaphoreTake(mtx, pdMS_TO_TICKS(50)) == pdTRUE) {
+                process_chip_irq(1);
+                xSemaphoreGive(mtx);
+                any_irq = true;
+            } else {
+                RADW("radarTask: Wire1 mutex timeout (chip2) — IRQ bo obdelan naslednji poll");
+                s_radar.ch[2].status.i2c_errors++;
+                s_radar.ch[3].status.i2c_errors++;
+            }
+        }
+        if (!any_irq) {
+            vTaskDelay(pdMS_TO_TICKS(5));
         }
 
         // Recovery watchdog je bil tukaj (v3) — premaknjen v sensorTask
@@ -887,7 +895,7 @@ static void radarTask(void* pvParams) {
         // Razlog: agresivni 2s recovery je povzročal OE zanko ker je
         // process_chip_irq() drain zanka zasedla mutex do 160ms.
         // IRQ pin LOW med normalnim delovanjem ni napaka — je normalno
-        // stanje med ISR → queue → drain sekvence.
+        // stanje med polling → process_chip_irq() drain sekvence.
 
         // Periodični status log — 10s po zagonu, nato vsako minuto
         uint32_t now      = millis();
@@ -952,7 +960,7 @@ static void radarTask(void* pvParams) {
             if (total_irq == 0 && now > 10000) {
                 RADW("!! IRQ=0 po %lus — možni vzroki:", (unsigned long)(now/1000));
                 RADW("!!   1. SC16IS752 IER ni nastavljen (preveriti init sekvenco)");
-                RADW("!!   2. attachInterrupt ni uspel");
+                RADW("!!   2. IRQ pin ni v LOW — preveriti hardware (polling aktiven)");
                 RADW("!!   3. Hardware: IRQ pin ni povezan ali pull-up manjka");
                 RADW("!!   4. LD2410C ne pošilja (preveri 5V napajanje)");
                 SemaphoreHandle_t mtx = bsp_get_wire1_mutex();

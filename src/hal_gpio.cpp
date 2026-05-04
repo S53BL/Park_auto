@@ -10,11 +10,11 @@
 //
 // KLJUČNE IMPLEMENTACIJSKE ODLOČITVE:
 //
-//   ISR disciplina:
-//     GPIO ISR (IO47, FALLING) samo pokliče xQueueSendFromISR() z
-//     dummy byte 0x01. Nobenega I2C v ISR — to bi povzročilo deadlock
-//     z Wire1 mutex (FreeRTOS mutex je non-reentrant in nedostopen iz ISR).
-//     hal_gpio_process_queue() v EventBus tasku opravi vso I2C logiko.
+//   Polling namesto ISR:
+//     gpio_install_isr_service() → gpio_isr_register() v IDF 5.3 vedno gre
+//     prek esp_ipc_call_blocking(xPortGetCoreID(), ...) → ipc_task (1KB stack)
+//     → heap_caps_malloc preseže stack → crash. Rešitev: polling PIN_MCP_INT.
+//     hal_gpio_process_queue() preverja digitalRead(PIN_MCP_INT) neposredno.
 //
 //   INT počistitev — VRSTNI RED JE KRITIČEN (Microchip DS20001952C §3.7):
 //     1. Beri INTFA (0x0E) NAJPREJ — kateri pin je sprožil INT.
@@ -63,8 +63,6 @@
 #include "logger.h"
 #include "config.h"
 #include <Wire.h>
-#include <freertos/queue.h>
-#include <driver/gpio.h>
 
 // ============================================================
 // LOGGING MAKROJI
@@ -134,10 +132,6 @@
 // INTERNO STANJE
 // ============================================================
 
-// FreeRTOS queue za ISR → task komunikacijo.
-// ISR pošlje dummy byte 0x01 za vsak interrupt. Task jih pobira in procesira.
-static QueueHandle_t s_gpio_queue = nullptr;
-
 // Shadow register za izhode — ne beremo MCP nazaj pri vsakem set.
 // Bit=1 pomeni SSR vklopljen (HIGH na MCP pinu).
 // Inicializirano na 0 ob init() — vsi SSR izklopljeni.
@@ -168,7 +162,7 @@ static uint32_t s_last_celica2_ms  = 0;
 static uint32_t s_last_watchdog_ms = 0;
 
 // Diagnostični števci
-static volatile uint32_t s_interrupt_count       = 0;
+static uint32_t s_interrupt_count = 0;  // število polling zaznav INT LOW
 static uint32_t          s_debounce_reject_count  = 0;
 static uint32_t          s_i2c_error_count        = 0;
 
@@ -179,24 +173,6 @@ static uint8_t s_raw_gpiob = 0xFF;
 // Inicializacijski flag
 static bool s_initialized  = false;
 static bool s_mcp_detected = false;
-
-// ============================================================
-// ISR — GPIO interrupt handler
-// ============================================================
-// KRITIČNO: absolutno minimalna logika. Samo xQueueSendFromISR().
-// I2C klici v ISR povzročijo crash (Wire mutex + FreeRTOS scheduler).
-// IRAM_ATTR zagotovi da ISR koda ostane v interni RAM (ne flash cache).
-
-static void IRAM_ATTR mcp_gpio_isr() {
-    s_interrupt_count++;
-    uint8_t dummy = 0x01;
-    BaseType_t higher_prio_woken = pdFALSE;
-    // Pošlji signal v queue — če je polna (overflow), INT se zavrže.
-    // overflow je dober pokazatelj preobremenitve ali napake.
-    xQueueSendFromISR(s_gpio_queue, &dummy, &higher_prio_woken);
-    // Prebudi EventBus task če ima višjo prioriteto od trenutnega taska.
-    portYIELD_FROM_ISR(higher_prio_woken);
-}
 
 // ============================================================
 // I2C PRIMITIVNE FUNKCIJE — kliči SAMO pod Wire1 mutex
@@ -484,16 +460,6 @@ bool hal_gpio_init() {
         return false;
     }
 
-    // Ustvari FreeRTOS queue za ISR → task komunikacijo
-    if (!s_gpio_queue) {
-        s_gpio_queue = xQueueCreate(GPIO_ISR_QUEUE_SIZE, sizeof(uint8_t));
-        if (!s_gpio_queue) {
-            GPIOE("xQueueCreate napaka — ni pomnilnika!");
-            return false;
-        }
-        GPIOD("ISR queue kreirana (size=%d)", GPIO_ISR_QUEUE_SIZE);
-    }
-
     SemaphoreHandle_t mtx = bsp_get_wire1_mutex();
     if (xSemaphoreTake(mtx, pdMS_TO_TICKS(GPIO_WIRE1_MUTEX_TIMEOUT_MS)) != pdTRUE) {
         GPIOE("Wire1 mutex timeout pri init — napaka BSP?");
@@ -634,23 +600,10 @@ bool hal_gpio_init() {
           s_celica1  ? "AKTIVEN" : "neakt.",
           s_celica2  ? "AKTIVEN" : "neakt.");
 
-    // --- Priklopi ISR na IO47 (INTA, padajoča fronta) ---
-    // FALLING = INTA gre LOW ko MCP zazna spremembo (INTPOL=0 v IOCON).
-    // gpio_install_isr_service je že klican v bsp_gpio_init().
-    // Kličemo ga varno — ESP_ERR_INVALID_STATE (already installed) je OK.
-    // Direkten klic brez tega check-a povzroči ESP-IDF opozorilo v logu.
-    {
-        esp_err_t isr_err = gpio_install_isr_service(0);
-        if (isr_err == ESP_OK) {
-            GPIOD("gpio_install_isr_service OK (novi install)");
-        } else if (isr_err == ESP_ERR_INVALID_STATE) {
-            GPIOD("gpio_install_isr_service: already installed — OK");
-        } else {
-            GPIOW("gpio_install_isr_service napaka: %d", (int)isr_err);
-        }
-    }
-    attachInterrupt(digitalPinToInterrupt(PIN_MCP_INT), mcp_gpio_isr, FALLING);
-    GPIOI("ISR priklopljen na IO%d (FALLING)", PIN_MCP_INT);
+    // INT pin (IO%d) je INPUT_PULLUP — hal_gpio_process_queue() ga polira.
+    // gpio_install_isr_service/attachInterrupt nista možna z IDF 5.3 pioarduino:
+    // gpio_isr_register() vedno gre prek esp_ipc_call_blocking → ipc_task (1KB) overflow.
+    GPIOI("INT polling aktiven na IO%d (ni attachInterrupt — IDF 5.3 IPC omejitev)", PIN_MCP_INT);
 
     // Offset +120s: GPIO health-check pride 2 minuti za radarjem in
     // 1 minuto za TOF watchdog-om. Prepreči Wire1 mutex contention.
@@ -679,88 +632,59 @@ bool hal_gpio_ok() {
 void hal_gpio_process_queue() {
     if (!s_initialized) return;
 
-    uint8_t dummy;
-    // Procesiramo vse čakajoče evenimente v eni iteraciji
-    // (queue je morda nabral več interruptov med spanjem taska)
-    while (xQueueReceive(s_gpio_queue, &dummy, 0) == pdTRUE) {
+    // Polling PIN_MCP_INT — LOW pomeni MCP23017 ima pending interrupt.
+    if (digitalRead(PIN_MCP_INT) != LOW) return;
 
-        SemaphoreHandle_t mtx = bsp_get_wire1_mutex();
-        if (xSemaphoreTake(mtx, pdMS_TO_TICKS(GPIO_WIRE1_MUTEX_TIMEOUT_MS)) != pdTRUE) {
-            GPIOW("process_queue: Wire1 mutex timeout — interrupt event preskočen");
-            // Ne nadaljujemo z branjem INTCAP — INT signal ostane aktiven,
-            // kar sproži nov ISR in naslednji klic bo uspel.
-            // ⚠ Pozor: ta scenarij pomeni Wire1 je zaseden ~200ms — redko.
-            continue;
-        }
+    s_interrupt_count++;
 
-        // VRSTNI RED BRANJA JE KRITIČEN — Microchip DS20001952C poglavje 3.7:
-        //
-        // 1. INTFA NAJPREJ — kateri pin je sprožil INT.
-        //    INTFA je veljavno DOKLER ni INTCAP prebran. Ko preberemo INTCAP,
-        //    MCP23017 počisti INTFA in INT signal — zato INTFA beremo PRED INTCAP!
-        //
-        // 2. INTCAPA — snapshot vrednosti pinov OB TRENUTKU interrupta.
-        //    Branje tega registra POČISTI INT signal in INTFA na MCP23017.
-        //    Po tem branju je INTA pin sproščen (HIGH).
-        //
-        // 3. INTCAPB — za completeness (Port B nima INT pinov, a počistimo).
-        //
-        // NAPAKA ki smo jo imeli: INTCAPA pred INTFA → ob branju INTCAPA se INTFA
-        // počisti → dobimo INTFA=0x00 čeprav je INT prišel. Zdaj popravljeno.
-        uint8_t intfa    = mcp_read_reg(MCP_REG_INTFA);    // 1. INTFA NAJPREJ
-        uint8_t intcap_a = mcp_read_reg(MCP_REG_INTCAPA);  // 2. INTCAPA — počisti INT
-        uint8_t intcap_b = mcp_read_reg(MCP_REG_INTCAPB);  // 3. INTCAPB
+    SemaphoreHandle_t mtx = bsp_get_wire1_mutex();
+    if (xSemaphoreTake(mtx, pdMS_TO_TICKS(GPIO_WIRE1_MUTEX_TIMEOUT_MS)) != pdTRUE) {
+        GPIOW("process_queue: Wire1 mutex timeout — INT event preskočen");
+        return;
+    }
 
-        xSemaphoreGive(mtx);
+    // VRSTNI RED BRANJA — Microchip DS20001952C §3.7:
+    // 1. INTFA najprej (velja dokler INTCAP ni prebran)
+    // 2. INTCAPA — počisti INT signal in INTFA
+    // 3. INTCAPB — za completeness
+    uint8_t intfa    = mcp_read_reg(MCP_REG_INTFA);
+    uint8_t intcap_a = mcp_read_reg(MCP_REG_INTCAPA);
+    uint8_t intcap_b = mcp_read_reg(MCP_REG_INTCAPB);
 
-        GPIOD("INT obdelava: INTFA=0x%02X INTCAPA=0x%02X INTCAPB=0x%02X",
-              intfa, intcap_a, intcap_b);
+    xSemaphoreGive(mtx);
 
-        // Ugotovi katere vhodne pine obdelati.
-        // Normalno: active_pins = intfa & PORTA_INPUT_MASK
-        //
-        // FALLBACK za robustnost: če INTFA=0x00 (izjemen timing — pin se je vrnil
-        // v HIGH v µs med ISR in Wire1 dostopom), izpeljemo spremenjen pin
-        // iz razlike med INTCAPA in trenutnim stanjem GPIOA.
-        // INTCAPA vsebuje snapshot ob trenutku INT — primerjamo z aktualnim stanjem.
-        uint8_t active_pins = intfa & PORTA_INPUT_MASK;
+    GPIOD("INT polling: INTFA=0x%02X INTCAPA=0x%02X INTCAPB=0x%02X",
+          intfa, intcap_a, intcap_b);
 
-        if (active_pins == 0 && intcap_a != 0xFF) {
-            // INTFA je 0 ampak INTCAPA kaže spremembo — izračunamo iz INTCAPA.
-            // INTCAPA snapshot != 0xFF (ni I2C napaka).
-            // Beremo trenutno GPIOA in primerjamo s snapshot-om.
-            if (xSemaphoreTake(mtx, pdMS_TO_TICKS(GPIO_WIRE1_MUTEX_TIMEOUT_MS)) == pdTRUE) {
-                uint8_t current_gpio = mcp_read_reg(MCP_REG_GPIOA);
-                xSemaphoreGive(mtx);
-                // Spremenjen pin = bit kjer se snapshot razlikuje od trenutnega stanja
-                // ALI kjer snapshot kaže aktiven signal (LOW = 0 v pullup logiki)
-                active_pins = (~intcap_a) & PORTA_INPUT_MASK;  // biti ki so bili LOW ob INT
-                if (active_pins == 0) {
-                    // Snapshot identičen trenutnemu — res lažni INT (npr. glitch)
-                    GPIOD("INT fallback: brez razlike (INTCAPA=0x%02X current=0x%02X) — ignoriram",
-                          intcap_a, current_gpio);
-                    continue;
-                }
-                GPIOW("INT fallback: INTFA=0 a INTCAPA=0x%02X → izpeljani active_pins=0x%02X (timing edge case)",
-                      intcap_a, active_pins);
-            } else {
-                GPIOW("INT fallback: mutex timeout pri GPIOA branju — event preskočen");
-                continue;
+    uint8_t active_pins = intfa & PORTA_INPUT_MASK;
+
+    if (active_pins == 0 && intcap_a != 0xFF) {
+        if (xSemaphoreTake(mtx, pdMS_TO_TICKS(GPIO_WIRE1_MUTEX_TIMEOUT_MS)) == pdTRUE) {
+            uint8_t current_gpio = mcp_read_reg(MCP_REG_GPIOA);
+            xSemaphoreGive(mtx);
+            active_pins = (~intcap_a) & PORTA_INPUT_MASK;
+            if (active_pins == 0) {
+                GPIOD("INT fallback: brez razlike (INTCAPA=0x%02X current=0x%02X) — ignoriram",
+                      intcap_a, current_gpio);
+                return;
             }
-        } else if (active_pins == 0) {
-            GPIOD("INT brez aktivnih vhodnih pinov (INTFA=0x%02X INTCAPA=0x%02X) — ignoriram",
-                  intfa, intcap_a);
-            continue;
+            GPIOW("INT fallback: INTFA=0 a INTCAPA=0x%02X → active_pins=0x%02X",
+                  intcap_a, active_pins);
+        } else {
+            GPIOW("INT fallback: mutex timeout — event preskočen");
+            return;
         }
+    } else if (active_pins == 0) {
+        GPIOD("INT brez aktivnih pinov (INTFA=0x%02X) — ignoriram", intfa);
+        return;
+    }
 
-        // Iteriramo po vseh možnih vhodnih pinih in jih obdelamo
-        const uint8_t input_pins[] = {
-            PIN_RAMPAGOR, PIN_RAMPALUC, PIN_VRATAOD, PIN_CELICA1, PIN_CELICA2
-        };
-        for (uint8_t mask : input_pins) {
-            if (active_pins & mask) {
-                handle_pin_change(intcap_a, mask);
-            }
+    const uint8_t input_pins[] = {
+        PIN_RAMPAGOR, PIN_RAMPALUC, PIN_VRATAOD, PIN_CELICA1, PIN_CELICA2
+    };
+    for (uint8_t mask : input_pins) {
+        if (active_pins & mask) {
+            handle_pin_change(intcap_a, mask);
         }
     }
 }

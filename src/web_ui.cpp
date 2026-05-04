@@ -438,6 +438,26 @@ static void _handleRestart(AsyncWebServerRequest* req) {
 }
 
 // ============================================================
+// SECTION 3 — HANDLER-JI: /api/ssr  (ZAZNAMEK — Blok E)
+// ============================================================
+// NE implementiraj zdaj — implementirati ko se lotimo web integracije (Blok E).
+//
+//   GET  /api/ssr → vrne stanje vseh 4 SSR
+//   POST /api/ssr → {ssr: N, action: "toggle"|"disable"|"enable"}
+//
+//   Implementacija:
+//     #include "light_logic.h"
+//     GET handler: LightLogicState st = light_logic_get_state();
+//                  JSON array s ssr[1..4]: state/countdown_s/disabled/is_auto
+//     POST handler: parsaj action, kliči EventBus::publish(
+//                   action=="disable" ? BUTTON_SSR_DISABLE : BUTTON_SSR,
+//                   ssr_idx - 1)  // -1 ker EventBus payload je 0-based!
+//
+//   OPOMBA: web endpoint uporablja ssr indekse 1–4 (human readable).
+//   EventBus payload je 0–3 (screen_main konvencija).
+//   Pretvorba: EventBus payload = web ssr_idx - 1.
+
+// ============================================================
 // SECTION 3 — HANDLER-JI: /files
 // ============================================================
 // Implementirano prek sd_mgr API (thread-safe).

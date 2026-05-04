@@ -95,6 +95,10 @@ void hal_light_tick();
 // Varno za klic iz kateregakoli konteksta (bere volatile bool).
 bool hal_light_is_night();
 
+// hal_light_get_is_night()
+// Alias za hal_light_is_night() — za kompatibilnost z light_logic.cpp API.
+bool hal_light_get_is_night();
+
 // hal_light_get_lux()
 // Vrne zadnje drseče povprečje lux.
 // Vrne 0.0 če init ni bil uspešen ali buffer še ni poln.

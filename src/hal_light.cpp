@@ -317,6 +317,8 @@ float hal_light_force_read() {
     return _bh1750_read_lux();
 }
 
+bool hal_light_get_is_night() { return s_is_night; }
+
 bool hal_light_reset() {
     LGW("reset BH1750...");
     bool ok = true;

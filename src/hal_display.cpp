@@ -58,6 +58,8 @@ public:
 
 #include "screen_service.h"
 #include "screen_party.h"
+#include "screen_main.h"
+#include "light_logic.h"
 extern void screen_main_create(lv_obj_t* parent);
 extern void screen_main_apply_updates();
 
@@ -231,6 +233,47 @@ static void apply_pending() {
 }
 
 // ============================================================
+// UI REFRESH TIMER — Opcija B display polling (dogovorjeno 2026-05)
+// ============================================================
+// Teče v lvglTask kontekstu (edino varno mesto za LVGL klice).
+// Prebere stanje iz light_logic in posodobi vse zaslone.
+// 500ms interval: dovolj hiter za countdown prikaz, ne obremeni CPU.
+// Ko bodo implementirani novi moduli, SAMO DODAJ klice tukaj —
+// ne ustvari novih timerjev ali direktnih klicev iz taskov.
+static void ui_refresh_cb(lv_timer_t*) {
+    if (!light_logic_ok()) return;
+
+    LightLogicState st = light_logic_get_state();
+
+    // Posodobi SSR gumbe (indeksi 0–3 na zaslonu = SSR 1–4)
+    for (uint8_t i = 1; i <= 4; i++) {
+        SsrDisplayData d;
+        switch (st.ssr[i].state) {
+            case SsrLogicState::ON_AUTO:
+            case SsrLogicState::ON_MANUAL:
+                d.state       = DisplaySsrState::ON;
+                d.is_manual   = !st.ssr[i].is_auto;
+                d.countdown_s = st.ssr[i].countdown_s;
+                break;
+            case SsrLogicState::SSR_DISABLED:
+                d.state       = DisplaySsrState::SSR_DISABLED;
+                d.countdown_s = 0;
+                d.is_manual   = false;
+                break;
+            default:  // OFF
+                d.state       = DisplaySsrState::OFF;
+                d.countdown_s = 0;
+                d.is_manual   = false;
+                break;
+        }
+        screen_main_set_ssr(i - 1, d);  // zaslon idx = SSR idx - 1
+    }
+
+    // TODO: screen_main_set_radar() — ko bo radar vizualizacija dokončana
+    // TODO: screen_service_apply_updates() — ko bo servisni zaslon aktiven
+}
+
+// ============================================================
 // TCA9554 TOUCH RESET
 // ============================================================
 
@@ -369,6 +412,10 @@ bool hal_display_init() {
               mon.free_size, mon.frag_pct);
     }
     DISPI("Zasloni OK");
+
+    // UI refresh timer — Opcija B polling (light_logic → zaslon)
+    lv_timer_create(ui_refresh_cb, 500, nullptr);
+    DISPI("UI refresh timer OK (500ms)");
 
     // 9. Prikaži glavni zaslon
     lv_scr_load(s_screen_main);
