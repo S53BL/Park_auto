@@ -49,7 +49,18 @@
 // LVGL
 #define LVGL_BUF_LINES      40
 #define LVGL_TICK_MS        5
-#define LVGL_HANDLER_MS     5
+// LVGL_HANDLER_MS: povečano 5→10ms (2026-05, CPU razbremenitev)
+// Razlog: 5ms = 200Hz lvglTask tick — preveč za ta projekt.
+//   10ms = 100Hz → polovica CPU obremenitve lvglTask.
+//   Vizualni efekt: animacije ostanejo gladke (100fps > 60fps zaslona).
+//   Touch odzivnost: 10ms zamuda je neopazna (prag zaznavanja ~50ms).
+#define LVGL_HANDLER_MS     10    // SPREMENJEN iz 5ms (2026-05)
+// UI_REFRESH_TIMER_MS: interval LVGL timer za Opcija B display polling.
+// 1000ms namesto 500ms — countdown bo manj gladek (±1s natančnost)
+//   ampak LVGL timer obremenitev se prepolovi.
+//   Za SSR countdown prikaz je 1s natančnost povsem sprejemljiva.
+// Lokacija: hal_display.cpp ui_refresh_cb timer kreacija.
+#define UI_REFRESH_TIMER_MS 1000  // NOVO (2026-05) — prej hardcoded 500ms
 
 // ============================================================
 // 3. I2C BUS KONFIGURACIJA
@@ -121,7 +132,11 @@
 #define TCA_CH_TOF_P1_B     4
 #define TCA_CH_TOF_P2_B     5
 
-#define TOF_POLL_IDLE_MS    100
+// TOF_POLL_IDLE_MS: povečano 200→500ms (2026-05, Wire1 razbremenitev)
+// Razlog: TOF v IDLE fazi samo čaka na vstop vozila — 500ms latenca je
+//   neopazna za uporabnika. Wire1 zasedenost: 5ms/500ms = 1% (prej 2.5%).
+// OPOMBA: TOF WATCHDOG (600s) se ne spreminja — ostaja nespremenjen.
+#define TOF_POLL_IDLE_MS    500   // SPREMENJEN iz 200ms (2026-05)
 #define TOF_POLL_DETECT_MS  50
 // TOF IDLE watchdog interval — health-check meritev H_A + H_B vsakih 10 minut
 #define TOF_WATCHDOG_INTERVAL_MS    600000
@@ -137,6 +152,55 @@
 // XTAL na CJMCU-SC16IS752 modulu je 1.8432 MHz (potrjeno).
 // Divisor = 1.8432MHz / (16 × 115200) = 1.000 → točno, 0% napaka.
 #define RADAR_BAUD_RATE     115200
+// RADAR_TRIGGER_THROTTLE_MS: minimalni interval med TRIGGER_ON_AUTO
+// ukazi v SSR command queue (2026-05).
+// Zakaj 500ms: radar pošilja ~40 eventov/s (4 kanali × 10fps).
+//   Brez throttla queue se zapolni v 800ms → "queue polna" WARN.
+//   500ms = max 2 ukaza/s → queue nikoli ni polna.
+//   SSR1 timer reset (ko je SSR1 že ON) se zgodi znotraj throttla —
+//   timer se resetira najkasneje 500ms po zadnjem gibanju.
+#define RADAR_TRIGGER_THROTTLE_MS   500
+// RADAR_PUBLISH_INTERVAL_MS: minimalni interval med callback klici
+// za isti kanal (2026-05).
+//
+// LD2410C pošilja frame vsakih ~100ms (10 Hz fiksno).
+// Brez tega intervala: callback → EventBus → light_logic se kliče
+// 40×/s (4 kanali × 10 Hz) → poplava logov, Wire1 contention.
+//
+// Z vrednostjo 100ms: callback se kliče max 10×/s skupaj (1×/kanal/100ms).
+// EventBus obremenitev se zmanjša 4× (od 40/s na 10/s).
+//
+// Latenca zaznave gibanja: max 100ms (publish interval) +
+//   100ms (appTask tick) = 200ms worst-case.
+//   Za prižig luči je 200ms zamuda neopazna.
+//
+// Vrednost je nastavljiva — ne hardkodiraj v hal_radar.cpp!
+// Razpon: min 50ms (agresivno), max 1000ms (počasno).
+#define RADAR_PUBLISH_INTERVAL_MS   100
+// RADAR_DRAIN_MAX_LOOPS: max iteracij drain zanke v process_chip_irq()
+// (2026-05, OE! odprava).
+//
+// Zakaj 4 in ne 32:
+//   LD2410C frame = 23 bajtov. SC16IS752 FIFO trigger = 8 bajtov.
+//   Normalno: 2-3 drain iteracije na frame (8 + 8 + 7 bajtov).
+//   max_loops=4 je varen margin brez nepotrebnega Wire1 blokiranje.
+//
+//   Stara vrednost max_loops=32:
+//     Drain čas = 32 × 3 I2C transakcije × ~1ms = do 96ms.
+//     Med tem chip2 FIFO (64B) se zapolni v 5.5ms → OE! neizogibni.
+//
+//   Nova vrednost max_loops=4:
+//     Drain čas = 4 × 3ms = 12ms.
+//     Z round-robin (radarTask zanka): chip1 draina 1 iter. (~3ms),
+//     nato takoj chip2 → chip2 čaka max 3ms << 5.5ms FIFO zapolnitev.
+//
+//   Vrednost je nastavljiva — ne hardkodiraj v hal_radar.cpp!
+#define RADAR_DRAIN_MAX_LOOPS   4
+// RADAR_OE_LOG_INTERVAL_MS: minimalni interval med OE! log izpisi per kanal.
+// OE! ob zagonu (prvih 10s): normalni — TOF init zasede Wire1 ~300ms.
+// Po zagonu: OE! redki z round-robin drainanjem.
+// 30s interval: dovolj redko da ne zamaši loga, dovolj pogosto za diagnostiko.
+#define RADAR_OE_LOG_INTERVAL_MS    30000
 
 // ============================================================
 // 9. LED KONFIGURACIJA
@@ -173,12 +237,12 @@
 
 #define TASK_WIFI_STACK     8192
 #define TASK_WIFI_PRIO      1
-// TASK_EVENTBUS_STACK: povečano iz 4096 na 6144 (2026-05, preventivno)
-// Razlog: eventBusTask izvaja EventBus handlerje iz light_logic.cpp
-// (on_button_ssr, on_radar_motion, itd.) ki kličejo hal_gpio_set_ssr()
-// → Wire1 mutex → mcp_write_reg() → LOG_INFO (~512B). Skupaj ~1800B.
-// 6144B z PSRAM overhead daje faktor varnosti ~2×.
-#define TASK_EVENTBUS_STACK 6144
+// TASK_EVENTBUS_STACK: zmanjšano 6144→4096 (2026-05, optimizacija RAM)
+// Razlog: eventBusTask handlerji (on_button_ssr, on_radar_motion itd.)
+//   so po SsrCmd queue refaktoringu SAMO enqueue operacije (~50B stack).
+//   Ni več Wire1 klicev v handlerjih → ni več 512B logger stack nevarnosti.
+//   4096B z PSRAM overhead daje faktor varnosti >2×.
+#define TASK_EVENTBUS_STACK 4096
 #define TASK_EVENTBUS_PRIO  5
 #define TASK_SENSOR_STACK   6144
 #define TASK_SENSOR_PRIO    4
@@ -186,12 +250,12 @@
 #define TASK_LED_PRIO       3
 #define TASK_LVGL_STACK     8192
 #define TASK_LVGL_PRIO      2
-// TASK_APP_STACK: povečano iz 6144 na 8192 (2026-05, preventivno)
-// Razlog: appTask po refaktoringu (SsrCmd queue) izvaja celotno
-// SSR sekvenco vključno z vTaskDelay(500ms) za unfill pavzo.
-// hal_gpio_set_ssr() + led_mgr_fill() + config_get() + LOG = ~2000B.
-// 8192B v PSRAM zagotavlja stabilno delovanje.
-#define TASK_APP_STACK      8192
+// TASK_APP_STACK: zmanjšano 8192→6144 (2026-05, optimizacija RAM)
+// Razlog: dejanski stack ob zagonu = 5748B free / 8192B total = samo
+//   2444B porabljenih. Worst-case med SSR sekvenco: ~2000B dodatno =
+//   skupaj ~4500B. 6144B daje faktor varnosti 1.35× — zadostuje.
+//   Ob dvomih: log "appTask stack ob zagonu" bo pokazal dejanski usage.
+#define TASK_APP_STACK      6144
 #define TASK_APP_PRIO       3
 // RADAR_TASK_STACK: povečano iz 4096 na 8192 (2026-05, stabilizacija)
 // Razlog: radarTask teče v PSRAM (MALLOC_CAP_SPIRAM). FreeRTOS PSRAM stack

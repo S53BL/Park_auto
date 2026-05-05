@@ -201,3 +201,8 @@ GpioDiagnostics hal_gpio_get_diagnostics();
 // Wymušen health-check — prebere stanje in ga logira takoj (ne čaka na timer).
 // Kliči ročno iz service screena ali ob I2C recovery.
 void hal_gpio_force_healthcheck();
+
+// Vrne skupno število Wire1 mutex timeout napak od zagona.
+// Kliče se iz light_logic diagnostike za monitoring Wire1 zdravja.
+// Thread-safe: uint32_t read je atomaren na ESP32.
+uint32_t hal_gpio_get_wire1_errors();

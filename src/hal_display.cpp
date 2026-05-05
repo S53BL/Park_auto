@@ -34,6 +34,7 @@
 
 #include "hal_display.h"
 #include "bsp.h"
+#include "config.h"
 #include <Arduino_GFX_Library.h>
 #include <lvgl.h>
 #include <esp_task_wdt.h>
@@ -414,8 +415,10 @@ bool hal_display_init() {
     DISPI("Zasloni OK");
 
     // UI refresh timer — Opcija B polling (light_logic → zaslon)
-    lv_timer_create(ui_refresh_cb, 500, nullptr);
-    DISPI("UI refresh timer OK (500ms)");
+    // UI_REFRESH_TIMER_MS = 1000ms (config.h, 2026-05) — zmanjšano iz 500ms.
+    // Za SSR countdown prikaz je 1s natančnost povsem sprejemljiva.
+    lv_timer_create(ui_refresh_cb, UI_REFRESH_TIMER_MS, nullptr);
+    DISPI("UI refresh timer OK (%dms)", UI_REFRESH_TIMER_MS);
 
     // 9. Prikaži glavni zaslon
     lv_scr_load(s_screen_main);

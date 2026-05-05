@@ -8,6 +8,7 @@
 
 #include "hal_radar.h"
 #include "bsp.h"
+#include "config.h"
 #include "logger.h"
 #include <Wire.h>
 #include <esp_task_wdt.h>
@@ -692,8 +693,27 @@ static bool process_one_channel(RadarChannel& rc, uint8_t addr, uint8_t ch) {
             uint8_t lsr = 0;
             sc16_read(addr, SC16_REG(REG_LSR, ch), lsr);
             if (lsr & LSR_OVERRUN_ERR) {
-                RADW("SC16[0x%02X] ch%c OE! (prekoračen FIFO)", addr, ch==0?'A':'B');
                 rc.status.parse_errors++;
+                rc.status.oe_count++;
+
+                // OE! log throttle: max 1× per RADAR_OE_LOG_INTERVAL_MS per kanal.
+                // OE! ob zagonu (prvih 10s) je normalen — TOF init blokira Wire1 ~300ms.
+                // Med normalnim delovanjem po round-robin popravku OE! ne bi smeli biti pogosti.
+                uint32_t now_oe = millis();
+                if ((now_oe - rc.status.last_oe_log_ms) >= RADAR_OE_LOG_INTERVAL_MS) {
+                    rc.status.last_oe_log_ms = now_oe;
+                    if (rc.status.oe_count > 1) {
+                        RADW("SC16[0x%02X] ch%c OE! ×%lu (skupno: %lu)",
+                             addr, ch==0?'A':'B',
+                             (unsigned long)rc.status.oe_count,
+                             (unsigned long)rc.status.parse_errors);
+                    } else {
+                        RADW("SC16[0x%02X] ch%c OE! (skupno: %lu)",
+                             addr, ch==0?'A':'B',
+                             (unsigned long)rc.status.parse_errors);
+                    }
+                    rc.status.oe_count = 0;
+                }
             }
             // Če je RLS + RHR skupaj, nadaljujemo z branjem FIFO
             if (rxlvl == 0) return true; // RLS brez podatkov — počiščeno
@@ -711,7 +731,14 @@ static bool process_one_channel(RadarChannel& rc, uint8_t addr, uint8_t ch) {
                     rc.status.frames_ok++;
                     rc.status.last_frame    = frame;
                     rc.status.last_frame_ms = millis();
-                    if (s_radar.callback) {
+
+                    // FIFO drain teče nespremenjen → OE! so preprečeni.
+                    // Callback (→ EventBus → light_logic) se sproži max
+                    // 1× per RADAR_PUBLISH_INTERVAL_MS per kanal.
+                    uint32_t now_ms = millis();
+                    if (s_radar.callback &&
+                        (now_ms - rc.status.last_publish_ms) >= RADAR_PUBLISH_INTERVAL_MS) {
+                        rc.status.last_publish_ms = now_ms;
                         s_radar.callback(frame);
                     }
                 }
@@ -737,14 +764,19 @@ static void process_chip_irq(uint8_t chip_idx) {
     uint8_t addr    = (chip_idx == 0) ? SC16_ADDR_1 : SC16_ADDR_2;
     uint8_t ch_base = chip_idx * 2;
 
-    // Kernel-style drain loop:
-    // Beri oba kanala dokler NOBEN kanal nima več pending interrupta.
-    // Vir: Linux kernel sc16is7xx_irq() v sc16is7xx.c (torvalds/linux)
+    // Kernel-style single-chip drain — beri oba kanala tega čipa
+    // dokler noben kanal nima več pending interrupta.
     //
-    // Brez te zanke: med branjem kanala A priteče nov bajt v kanal B
-    // → ko končamo, IIR kanala B je aktiven → IRQ pin ostane LOW
-    // → ni FALLING edge → naslednji ISR ne pride nikoli.
-    uint8_t max_loops = 32; // zaščita pred infinite loop
+    // POZOR: Ta funkcija draina SAMO en čip (chip_idx parameter).
+    // Izmenjavanje med čipoma (round-robin) se izvaja v radarTask
+    // while zanki ZUNAJ te funkcije. Razlog: round-robin med čipoma
+    // preprečuje OE! ker chip2 čaka max ~3ms (ena chip1 iteracija)
+    // namesto 12ms (celoten chip1 drain) — oba čipa sta tako servisirana
+    // preden se njuni FIFO zapolnita (5.5ms pri 115200 baud).
+    //
+    // max_loops je zdaj RADAR_DRAIN_MAX_LOOPS (config.h, default 4).
+    // Pri normalnem LD2410C prometu zadostujeta 2-3 iteraciji.
+    uint8_t max_loops = RADAR_DRAIN_MAX_LOOPS;
     bool keep_polling;
     do {
         keep_polling = false;
@@ -756,7 +788,12 @@ static void process_chip_irq(uint8_t chip_idx) {
     } while (keep_polling && --max_loops > 0);
 
     if (max_loops == 0) {
-        RADW("SC16[0x%02X] IRQ drain: max_loops dosežen — morebitna IRQ zanka!", addr);
+        // max_loops dosežen — normalno pri burst prometu ob zagonu.
+        // Med normalnim delovanjem se NE sme dogajati pogosto.
+        // Če se pojavlja redno → zmanjšaj RADAR_DRAIN_MAX_LOOPS ali
+        // preveri ali LD2410C pošilja engineering mode frames.
+        RADD("SC16[0x%02X] IRQ drain: max_loops=%d dosežen",
+             addr, RADAR_DRAIN_MAX_LOOPS);
     }
 }
 
@@ -866,49 +903,66 @@ static void radarTask(void* pvParams) {
     while (true) {
         esp_task_wdt_reset();
 
-        // Polling IRQ pinov — 5ms interval ko ni aktivnih IRQ
-        bool any_irq = false;
-        if (s_radar.chip1_ok && digitalRead(RADAR_IRQ_CHIP1) == LOW) {
-            SemaphoreHandle_t mtx = bsp_get_wire1_mutex();
-            if (xSemaphoreTake(mtx, pdMS_TO_TICKS(50)) == pdTRUE) {
-                process_chip_irq(0);
-                xSemaphoreGive(mtx);
-                any_irq = true;
-            } else {
-                // Wire1 mutex timeout pomeni: drug task (appTask/sensorTask) drži Wire1.
-                // IRQ bo obdelan pri naslednjem 5ms poll ciklu — to je normalno in sprejemljivo.
-                // Če se to dogaja pogosto (>10× na minuto) → preveriti Wire1 mutex contention
-                // med sensorTask (TOF scan ~90ms) in appTask (SSR sekvence).
-                // Po refaktoringu light_logic.cpp (SsrCmd queue) se to ne sme več dogajati
-                // med SSR operacijami. Če ostane → povečaj Wire1 I2C frekvenco (config.h).
-                s_radar.ch[0].status.i2c_errors++;
-                s_radar.ch[1].status.i2c_errors++;
-                RADW("Wire1 mutex timeout (chip1) — poll #%lu — preveriti contention če je pogosto",
-                     (unsigned long)(s_radar.ch[0].status.irq_count + s_radar.ch[1].status.irq_count));
+        // ============================================================
+        // ROUND-ROBIN DRAIN (2026-05, OE! odprava)
+        // ============================================================
+        // Problem prejšnje implementacije:
+        //   chip1 se draina do konca (max 12ms z max_loops=4),
+        //   šele nato chip2. Med 12ms chip2 FIFO (64B) se zapolni
+        //   v 5.5ms → OE! neizogibni.
+        //
+        // Rešitev: v vsaki iteraciji 1× chip1, 1× chip2.
+        //   Chip2 čaka max ~3ms (ena chip1 iteracija) << 5.5ms FIFO.
+        //   OE! izginejo ker nobeden čip ne čaka predolgo.
+        //
+        // Mutex timeout zmanjšan 50→20ms: z max_loops=4 en
+        //   process_chip_irq() traja ~12ms → 20ms je dovolj in
+        //   hitreje sprosti Wire1 za TOF in appTask.
+        //   Timeout napake → i2c_errors++ (brez LOG_WARN v zanki).
+        // ============================================================
+        {
+            bool any_irq = false;
+            uint8_t rr_loops = RADAR_DRAIN_MAX_LOOPS * 2; // ×2 ker sta 2 čipa
+
+            bool chip1_pending = s_radar.chip1_ok && (digitalRead(RADAR_IRQ_CHIP1) == LOW);
+            bool chip2_pending = s_radar.chip2_ok && (digitalRead(RADAR_IRQ_CHIP2) == LOW);
+
+            while ((chip1_pending || chip2_pending) && rr_loops-- > 0) {
+
+                // --- Chip 1 --- ena drain iteracija
+                if (chip1_pending) {
+                    SemaphoreHandle_t mtx = bsp_get_wire1_mutex();
+                    if (xSemaphoreTake(mtx, pdMS_TO_TICKS(20)) == pdTRUE) {
+                        process_chip_irq(0);
+                        xSemaphoreGive(mtx);
+                        any_irq = true;
+                    } else {
+                        s_radar.ch[0].status.i2c_errors++;
+                        s_radar.ch[1].status.i2c_errors++;
+                    }
+                    chip1_pending = s_radar.chip1_ok && (digitalRead(RADAR_IRQ_CHIP1) == LOW);
+                }
+
+                // --- Chip 2 --- ena drain iteracija (takoj za chip1)
+                // Chip2 čaka max ~3ms (ena chip1 iteracija) << 5.5ms FIFO zapolnitev
+                if (chip2_pending) {
+                    SemaphoreHandle_t mtx = bsp_get_wire1_mutex();
+                    if (xSemaphoreTake(mtx, pdMS_TO_TICKS(20)) == pdTRUE) {
+                        process_chip_irq(1);
+                        xSemaphoreGive(mtx);
+                        any_irq = true;
+                    } else {
+                        s_radar.ch[2].status.i2c_errors++;
+                        s_radar.ch[3].status.i2c_errors++;
+                    }
+                    chip2_pending = s_radar.chip2_ok && (digitalRead(RADAR_IRQ_CHIP2) == LOW);
+                }
             }
-        }
-        if (s_radar.chip2_ok && digitalRead(RADAR_IRQ_CHIP2) == LOW) {
-            SemaphoreHandle_t mtx = bsp_get_wire1_mutex();
-            if (xSemaphoreTake(mtx, pdMS_TO_TICKS(50)) == pdTRUE) {
-                process_chip_irq(1);
-                xSemaphoreGive(mtx);
-                any_irq = true;
-            } else {
-                // Wire1 mutex timeout pomeni: drug task (appTask/sensorTask) drži Wire1.
-                // IRQ bo obdelan pri naslednjem 5ms poll ciklu — to je normalno in sprejemljivo.
-                // Če se to dogaja pogosto (>10× na minuto) → preveriti Wire1 mutex contention
-                // med sensorTask (TOF scan ~90ms) in appTask (SSR sekvence).
-                // Po refaktoringu light_logic.cpp (SsrCmd queue) se to ne sme več dogajati
-                // med SSR operacijami. Če ostane → povečaj Wire1 I2C frekvenco (config.h).
-                s_radar.ch[2].status.i2c_errors++;
-                s_radar.ch[3].status.i2c_errors++;
-                RADW("Wire1 mutex timeout (chip2) — poll #%lu — preveriti contention če je pogosto",
-                     (unsigned long)(s_radar.ch[2].status.irq_count + s_radar.ch[3].status.irq_count));
+
+            if (!any_irq) {
+                vTaskDelay(pdMS_TO_TICKS(5));
             }
-        }
-        if (!any_irq) {
-            vTaskDelay(pdMS_TO_TICKS(5));
-        }
+        } // end round-robin block
 
         // Recovery watchdog je bil tukaj (v3) — premaknjen v sensorTask
         // kjer se izvaja sinhrono s TOF watchdog-om vsakih 10 minut.

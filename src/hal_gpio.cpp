@@ -174,6 +174,10 @@ static uint8_t s_raw_gpiob = 0xFF;
 static bool s_initialized  = false;
 static bool s_mcp_detected = false;
 
+// Wire1 mutex timeout napake — skupno število od zagona
+// Thread-safe: uint32_t read/write je atomaren na ESP32.
+static uint32_t s_wire1_errors = 0;
+
 // ============================================================
 // I2C PRIMITIVNE FUNKCIJE — kliči SAMO pod Wire1 mutex
 // ============================================================
@@ -737,17 +741,15 @@ bool hal_gpio_set_ssr(uint8_t ssr_idx, bool on) {
     }
 
     SemaphoreHandle_t mtx = bsp_get_wire1_mutex();
-    if (xSemaphoreTake(mtx, pdMS_TO_TICKS(GPIO_WIRE1_MUTEX_TIMEOUT_MS)) != pdTRUE) {
-        // Wire1 mutex timeout pri SSR operaciji.
-        // Možni vzroki (po prioriteti):
-        //   1. radarTask drži Wire1 med process_chip_irq() drain zanko (~160ms max)
-        //   2. sensorTask drži Wire1 med TOF SCANNING fazou (~90ms)
-        //   3. Deadlock (ne bi smelo biti — vsi mutex klici imajo timeout)
-        // Po refaktoringu light_logic.cpp (SsrCmd queue, 2026-05):
-        //   SSR klici tečejo samo iz appTask → ne more biti contention z eventBusTask.
-        //   Contention z radarTask (~160ms) ostaja možna — timer 200ms je dovolj.
-        //   Če se timeout dogaja pogosto → razmisliti o ločenem Wire1 za SSR (ni priporočeno).
-        GPIOW("set_ssr(%d): Wire1 mutex timeout", ssr_idx);
+    // Wire1 mutex timeout: 500ms (povečano iz 200ms, 2026-05).
+    // Razlog: process_chip_irq() drain zanka (max_loops=32) drži Wire1
+    //   do 96ms. WiFi init zasede Wire1 do ~150ms. Skupaj worst-case
+    //   ~250ms → 200ms timeout je premalo.
+    // 500ms zagotavlja uspešen SSR vklop tudi ob Wire1 contention.
+    if (xSemaphoreTake(mtx, pdMS_TO_TICKS(500)) != pdTRUE) {
+        s_wire1_errors++;
+        GPIOW("set_ssr(%d): Wire1 mutex timeout (skupno: %lu)",
+              ssr_idx, (unsigned long)s_wire1_errors);
         return false;
     }
 
@@ -849,4 +851,12 @@ void hal_gpio_force_healthcheck() {
     do_healthcheck_locked();
 
     xSemaphoreGive(mtx);
+}
+
+// ============================================================
+// hal_gpio_get_wire1_errors
+// ============================================================
+
+uint32_t hal_gpio_get_wire1_errors() {
+    return s_wire1_errors;
 }

@@ -31,8 +31,8 @@
 //   Mutex se kreira v logger_sd_attach() ker taski še niso startani.
 //
 // FORMAT LOG VRSTICE:
-//   Z NTP:    "2026-04-15 14:32:01|PARK|[TAG:LEVEL] sporočilo\n"
-//   Brez NTP: "M000123456|PARK|[TAG:LEVEL] sporočilo\n"
+//   Z NTP:    "14:32:01|[TAG:L] sporočilo\n"   (L = D/I/W/E)
+//   Brez NTP: "M000123456|[TAG:L] sporočilo\n"
 //             M = millis() prefix — jasno razlikovanje od Unix časa
 //
 // MAKROJI (primarna API — vsi moduli kličejo samo te):

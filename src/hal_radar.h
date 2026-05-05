@@ -108,6 +108,9 @@ typedef struct {
     uint32_t irq_count;         // skupaj IRQ sprožitev za ta čip
     uint32_t last_frame_ms;     // millis() zadnjega veljavnega frame-a
     RadarFrame last_frame;      // zadnji veljaven frame
+    uint32_t last_publish_ms;   // millis() zadnjega callback klica (za publish interval throttle)
+    uint32_t oe_count;          // OE! od zadnjega log izpisa (za throttle)
+    uint32_t last_oe_log_ms;    // millis() zadnjega OE! log izpisa
 } RadarSensorStatus;
 
 // ============================================================

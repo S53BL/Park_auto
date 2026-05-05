@@ -260,9 +260,19 @@ static void bsp_tasks_create() {
     MAKE_PSRAM_TASK(eventBusTask, "EventBus", TASK_EVENTBUS_STACK, TASK_EVENTBUS_PRIO, hTaskEventBus, CORE_APP)
     MAKE_PSRAM_TASK(sensorTask,   "Sensor",   TASK_SENSOR_STACK,   TASK_SENSOR_PRIO,   hTaskSensor,   CORE_APP)
     MAKE_PSRAM_TASK(ledTask,      "LED",      TASK_LED_STACK,      TASK_LED_PRIO,      hTaskLed,      CORE_APP)
-    MAKE_TASK      (lvglTask,     "LVGL",     TASK_LVGL_STACK,     TASK_LVGL_PRIO,     hTaskLvgl,     CORE_APP)
+    // lvglTask stack v PSRAM (2026-05, RAM optimizacija).
+    // Razlog: lvglTask stack zasede 8KB SRAM. LVGL ne uporablja DMA
+    //   direktno za stack operacije → PSRAM stack je varen.
+    //   LVGL render buffer (307KB) je že v PSRAM — stack je ločena alokacija.
+    //   Prihranek: 8KB SRAM → min-ever se poveča za ~8KB.
+    // OPOMBA: Če se sistem obnaša nenavadno → vrni lvglTask v SRAM (MAKE_TASK).
+    MAKE_PSRAM_TASK(lvglTask,     "LVGL",     TASK_LVGL_STACK,     TASK_LVGL_PRIO,     hTaskLvgl,     CORE_APP)
     MAKE_PSRAM_TASK(appTask,      "App",      TASK_APP_STACK,      TASK_APP_PRIO,      hTaskApp,      CORE_APP)
-    MAKE_TASK      (wifiTask,     "WiFi",     TASK_WIFI_STACK,     TASK_WIFI_PRIO,     hTaskWifi,     CORE_WIFI)
+    // wifiTask stack v PSRAM (2026-05, RAM optimizacija).
+    // Razlog: WiFi stack zasede 8KB SRAM. ESP32 WiFi driver teče v
+    //   svojem internem tasku — naš wifiTask je samo wrapper za WiFi.begin().
+    //   WiFi driver interno uporablja IRAM/DRAM neodvisno od wifiTask stack lokacije.
+    MAKE_PSRAM_TASK(wifiTask,     "WiFi",     TASK_WIFI_STACK,     TASK_WIFI_PRIO,     hTaskWifi,     CORE_WIFI)
 
     #undef MAKE_PSRAM_TASK
     #undef MAKE_TASK
@@ -292,9 +302,11 @@ void bsp_init() {
     bsp_wdt_init();
     bsp_tasks_create();
     s_boot_time = millis() - t0;
-    LOGI("Internal SRAM free: %u B  min-ever: %u B",
-         heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
-         heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    // Pričakovano po optimizaciji (2026-05): min-ever > 20000 B (prej ~10232 B).
+    // Če je min-ever < 15000 B → preveriti ali sta lvglTask in wifiTask v PSRAM.
+    LOGI("Internal SRAM free: %lu B  min-ever: %lu B",
+         (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+         (unsigned long)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
     LOGI("=== BSP init OK v %lu ms ===", (unsigned long)s_boot_time);
 }
 

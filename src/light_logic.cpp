@@ -43,10 +43,13 @@
 //     SSR2/3/4 se ugasnejo po antiforgot timer izteku
 //     ne glede na BH1750 stanje.
 //
-// [7] Podnevi = avtomatika izklopljena, ročno vedno deluje:
-//     is_night=false → RAMP_UP, RAMP_MOVING, RADAR_MOTION
-//     eventi so ignorirani za SSR1 prižig.
-//     Ročni gumbi (BUTTON_SSR) vedno delujejo.
+// [7] Podnevi = SSR1 avtomatika izklopljena, ročno vedno deluje:
+//     is_night=false → RAMP_UP, RAMP_MOVING ne prožijo SSR1.
+//     RADAR_MOTION: anti-forget timeri, parking assist in vehicle_recog
+//     delujejo 24/7. Samo SSR1 prižig je filtriran z dan/noč.
+//     Ročni gumbi (BUTTON_SSR) vedno delujejo za vse SSR.
+//     Dan/noč filter = SAMO v on_radar_motion(), on_ramp_up(),
+//     on_ramp_moving() za TRIGGER_ON_AUTO enqueue odločitev.
 //
 // [8] Fill smer — zaenkrat fiksen (0→89):
 //     TODO: implementirati različne smeri glede na trigger vir.
@@ -204,16 +207,43 @@ static uint32_t ssr_remaining_s(uint8_t idx) {
 // Ne ponavljaj fill animacije pri vsakem radar pulzu!
 
 static void trigger_ssr1_auto(uint32_t fill_speed_ms) {
+    // ============================================================
+    // VKLOP SSR1 — avtomatski trigger (radar, rampa, raluc)
+    // ============================================================
+    // ARHITEKTURA (2026-05):
+    //   Kliče se iz CMD executor v light_logic_tick() (appTask kontekst).
+    //   Nikoli direktno iz EventBus handlerjev (eventBusTask kontekst).
+    //   Razlog: vTaskDelay() in Wire1 operacije zahtevajo appTask kontekst.
+    //
+    // SEKVENCA ob prvem prižigu:
+    //   1. Nastavi meta-podatke (is_auto, deadline) — PRED fizičnim vklopom
+    //   2. ssr_physical_on() → hal_gpio_set_ssr(1, true)
+    //   3. Če vklop uspe (s_ssr[1].on == true po klicu):
+    //      a. SSR1_STABILIZE_MS pavza za 12V trafo
+    //      b. led_mgr_fill() — animacija
+    //      c. Armiraj SSR2 sekvencer
+    //   4. Če vklop NE uspe: počisti meta-podatke (rollback!)
+    //      → naslednji TRIGGER_ON_AUTO bo spet poskusil
+    //
+    // BUG FIX (2026-05): v prejšnji verziji se je s_ssr[1].on nastavil
+    //   PRED ssr_physical_on() klicem. Če je Wire1 timeout →
+    //   s_ssr[1].on = false ampak deadline_ms je nastavljen →
+    //   naslednji trigger gre v "reset timer" vejo namesto "prižgi" →
+    //   SSR1 nikoli ne gori. Popravek: nastavi deadline ŠELE po uspešnem
+    //   fizičnem vklopu. Ob napaki: rollback is_auto in deadline.
+    // ============================================================
+
     const Config cfg = config_get();
     uint32_t timeout_ms = (uint32_t)cfg.timeout_ssr1_s * 1000UL;
     uint32_t now = millis();
 
     if (s_ssr[1].on) {
-        // SSR1 je že ON — samo resetiraj timer
-        s_ssr[1].deadline_ms = now + timeout_ms;
-        // Posodobi tudi anti-forget za SSR2
+        // SSR1 je že fizično ON — samo resetiraj timer.
+        // Ne ponavljaj fill animacije pri vsakem radar pulzu!
+        s_ssr[1].deadline_ms    = now + timeout_ms;
         s_ssr[2].last_motion_ms = now;
-        LLD("SSR1: timer resetiran → %lu s", (unsigned long)cfg.timeout_ssr1_s);
+        LLD("SSR1: timer resetiran → %lu s ostalo",
+            (unsigned long)cfg.timeout_ssr1_s);
         return;
     }
 
@@ -222,32 +252,46 @@ static void trigger_ssr1_auto(uint32_t fill_speed_ms) {
         return;
     }
 
-    // SSR1 je bil OFF — prižgi
+    // SSR1 je bil OFF — poskusi prižgati.
+    // Nastavi meta-podatke pred klicem (ssr_physical_on bere is_auto za log).
     s_ssr[1].is_auto     = true;
     s_ssr[1].deadline_ms = now + timeout_ms;
-    ssr_physical_on(1);
+
+    ssr_physical_on(1);  // nastavi s_ssr[1].on = true SAMO ob uspehu
+
+    if (!s_ssr[1].on) {
+        // ssr_physical_on() ni uspel (Wire1 timeout ali I2C napaka).
+        // ROLLBACK: počisti meta-podatke da naslednji trigger spet poskusi.
+        // Brez rollbacka: deadline_ms teče, is_auto=true, SSR1 fizično OFF →
+        //   naslednji trigger misli da je SSR1 ON in samo resetira timer.
+        s_ssr[1].is_auto     = false;
+        s_ssr[1].deadline_ms = 0;
+        LLW("SSR1: vklop ni uspel (Wire1 napaka) — bo poskusil ob naslednjem triggerju");
+        return;
+    }
+
+    // SSR1 je uspešno vklopljen — nadaljuj s sekvenco.
+    LLI("SSR1: vklopljen, začenjam fill sekvenco (speed=%lu ms)",
+        (unsigned long)fill_speed_ms);
 
     // Kratka pavza za stabilizacijo 12V trafota pred LED animacijo.
-    // SSR1_STABILIZE_MS = 10ms (config.h).
-    // Brez tega: WS2815 dobi signal preden je napajanje stabilno
-    // → možni glitchi pri prvi LED v verigi.
+    // SSR1_STABILIZE_MS = 10ms. Brez tega: WS2815 dobi signal preden
+    // je napajanje stabilno → možni glitchi pri prvi LED.
     vTaskDelay(pdMS_TO_TICKS(SSR1_STABILIZE_MS));
 
-    // Začni fill animacijo — hitrost odvisna od triggerja
+    // Začni fill animacijo — hitrost odvisna od triggerja.
     led_mgr_fill(fill_speed_ms);
-    LLI("SSR1: fill start (speed=%lu ms)", (unsigned long)fill_speed_ms);
 
-    // Armiraj SSR2 auto sekvencer — vklopi se po fill + SSR2_DELAY_MS.
-    // SSR2_DELAY_MS = 500ms (config.h). Sekvencer teče v light_logic_tick().
-    // Razlog za zamik: SSR2 (LED paneli) se vklopi POTEM ko je animacija
-    // zaključena — vizualni efekt "najprej animacija, nato polna svetloba".
+    // Armiraj SSR2 auto sekvencer.
+    // SSR2 (LED paneli) se vklopi POTEM ko fill konča + SSR2_DELAY_MS.
     if (!s_ssr[2].disabled && cfg.ssr2_auto_night) {
         s_ssr2_auto   = Ssr2AutoState::WAITING;
         s_ssr2_arm_ms = now;
-        LLD("SSR2 auto: armirano (čakam fill + %dms)", SSR2_DELAY_MS);
+        LLD("SSR2 auto: armirano (čakam fill %lums + delay %dms)",
+            (unsigned long)fill_speed_ms, SSR2_DELAY_MS);
     }
 
-    // Posodobi anti-forget referenčni čas za SSR2/3/4
+    // Posodobi anti-forget referenčni čas za SSR2/3/4.
     s_ssr[2].last_motion_ms = now;
     s_ssr[3].last_motion_ms = now;
     s_ssr[4].last_motion_ms = now;
@@ -322,25 +366,67 @@ static void on_ramp_moving(const Event& e) {
 }
 
 // RADAR_MOTION — gibanje zaznano na kateremkoli od 4 radar kanalov
-// Payload kodiranje (iz sensor_mgr.cpp):
-//   bit 0-7:  channel (0–3)
-//   bit 8:    motion flag
-//   bit 9:    stationary flag
+// ============================================================
+// ARHITEKTURNA ODLOČITEV (2026-05):
 //
-// Trigger za SSR1 s hitrim fill. Anti-forget reset za SSR2/3/4.
+// SENZORJI DELUJEJO 24/7 — dan/noč filter velja SAMO za SSR1 prižig!
+//   Napačna prejšnja implementacija: ob !is_night smo takoj vrnili
+//   → anti-forget timeri niso bili posodobljeni podnevi.
+//
+//   Pravilna logika:
+//     VEDNO (dan + noč): posodobi s_any_motion, anti-forget timerje
+//     SAMO ponoči:       enqueue TRIGGER_ON_AUTO za SSR1 prižig
+//
+// THROTTLE — zakaj je potreben:
+//   Radar pošilja ~10 frames/s × 4 kanali = 40 EventBus eventov/s.
+//   Brez throttla: 40 TRIGGER_ON_AUTO ukazov/s → queue polna v 800ms.
+//   Rešitev: enqueue samo 1× per RADAR_TRIGGER_THROTTLE_MS (500ms).
+// ============================================================
 static void on_radar_motion(const Event& e) {
     bool motion     = (e.payload >> 8) & 0x01;
     bool stationary = (e.payload >> 9) & 0x01;
     uint8_t channel = e.payload & 0xFF;
-    if (!motion && !stationary) return;
 
-    // Posodobi sumarni motion status — samo atomarne operacije, varne v handlerju
+    if (!motion && !stationary) return;  // clear event — ni gibanja
+
+    uint32_t now = millis();
+
+    // -------------------------------------------------------
+    // VEDNO — ne glede na dan/noč
+    // -------------------------------------------------------
     s_any_motion     = true;
-    s_last_motion_ms = millis();
-    for (uint8_t i = 2; i <= 4; i++) s_ssr[i].last_motion_ms = s_last_motion_ms;
+    s_last_motion_ms = now;
 
-    if (!s_is_night) { LLD("RADAR ch%d ignoriran — podnevi", channel); return; }
-    LLD("RADAR ch%d → enqueue TRIGGER_ON_AUTO (hiter fill)", channel);
+    // Anti-forget reset — vsako gibanje podaljša SSR2/3/4 timerje.
+    // Deluje 24/7 ker so SSR2/3/4 neodvisni od noč/dan (dogovorjeno 2026-05).
+    for (uint8_t i = 2; i <= 4; i++) {
+        s_ssr[i].last_motion_ms = now;
+    }
+
+    // TODO: parking_assist feed — deluje 24/7
+    // TODO: vehicle_recog feed — deluje 24/7
+
+    // -------------------------------------------------------
+    // DAN/NOČ FILTER — samo za SSR1 prižig
+    // -------------------------------------------------------
+    if (!s_is_night) {
+        // Podnevi: anti-forget, parking assist in vehicle_recog so posodobljeni
+        // (koda zgoraj). SSR1 se ne proži — za debug zadostuje radar status log.
+        return;
+    }
+
+    // -------------------------------------------------------
+    // THROTTLE — enqueue TRIGGER_ON_AUTO max 1× per 500ms
+    // -------------------------------------------------------
+    // Namen: prepreči flooding SSR command queue pri intenzivnem
+    // radarskem zaznavanju (40 eventov/s → max 2 ukaza/s).
+    static uint32_t s_last_trigger_ms = 0;
+    if ((now - s_last_trigger_ms) < RADAR_TRIGGER_THROTTLE_MS) {
+        return;
+    }
+    s_last_trigger_ms = now;
+
+    LLD("RADAR ch%d → enqueue TRIGGER_ON_AUTO (hiter fill, throttle OK)", channel);
     ssr_cmd_enqueue(SsrCmdType::TRIGGER_ON_AUTO, LIGHT_FADE_FAST_MS);
 }
 
@@ -717,6 +803,18 @@ void light_logic_tick() {
             // Stack usage diagnostika — kritično za dolgoročno stabilnost
             LLI("  appTask stack: %lu B free",
                 (unsigned long)uxTaskGetStackHighWaterMark(nullptr) * sizeof(StackType_t));
+
+            // Wire1 diagnostika — koliko SSR Wire1 napak je bilo skupno
+            // Namen: zaznati sistemsko Wire1 contention brez pregledovanja
+            //        celotnega loga. Če wire1_errors raste → preveriti mutex.
+            static uint32_t s_last_wire1_errors = 0;
+            uint32_t cur_errors = hal_gpio_get_wire1_errors();
+            if (cur_errors != s_last_wire1_errors) {
+                LLW("  Wire1 napake skupno: %lu (+%lu od zadnjega loga)",
+                    (unsigned long)cur_errors,
+                    (unsigned long)(cur_errors - s_last_wire1_errors));
+                s_last_wire1_errors = cur_errors;
+            }
         }
     }
 }

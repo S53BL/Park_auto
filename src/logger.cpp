@@ -90,15 +90,17 @@ static void give_mutex() {
 }
 
 // Sestavi timestamp string
-// Z NTP:    "2026-04-15 14:32:01"
-// Brez NTP: "M000123456"
+// Z NTP:    "14:32:01"   (samo ura — datum je balast v normalnem delovanju)
+// Brez NTP: "M000123456" (millis — pred NTP sinhronizacijo)
+// TODO: SD log datoteke bi morale obdržati datum za lažje iskanje po arhivu.
+//   Za zdaj oba izhoda (Serial + SD) dobita kratek format.
+//   Kasnejša ločitev: ločen format parameter ali ločena build_timestamp_sd().
 static void build_timestamp(char* out, size_t out_len) {
     time_t now = time(nullptr);
     if (s_ntp_synced && now > 1577836800UL) {
         struct tm t;
         localtime_r(&now, &t);
-        snprintf(out, out_len, "%04d-%02d-%02d %02d:%02d:%02d",
-                 t.tm_year + 1900, t.tm_mon + 1, t.tm_mday,
+        snprintf(out, out_len, "%02d:%02d:%02d",
                  t.tm_hour, t.tm_min, t.tm_sec);
     } else {
         snprintf(out, out_len, "M%010lu", (unsigned long)millis());
@@ -295,14 +297,14 @@ void logger_log(LogLevel level, const char* tag,
     if (level == LOG_LEVEL_WARN)  return;
 #endif
 
-    // Level string
-    const char* level_str;
+    // Level char — ena črka namesto besede (D/I/W/E)
+    char level_char;
     switch (level) {
-        case LOG_LEVEL_ERROR: level_str = "ERROR"; break;
-        case LOG_LEVEL_WARN:  level_str = "WARN";  break;
-        case LOG_LEVEL_INFO:  level_str = "INFO";  break;
-        case LOG_LEVEL_DEBUG: level_str = "DEBUG"; break;
-        default:              level_str = "?????"; break;
+        case LOG_LEVEL_ERROR: level_char = 'E'; break;
+        case LOG_LEVEL_WARN:  level_char = 'W'; break;
+        case LOG_LEVEL_INFO:  level_char = 'I'; break;
+        case LOG_LEVEL_DEBUG: level_char = 'D'; break;
+        default:              level_char = '?'; break;
     }
 
     // Format sporočila
@@ -326,11 +328,12 @@ void logger_log(LogLevel level, const char* tag,
     }
 
     // Sestavi log vrstico
-    // Format: "timestamp|PARK|[TAG:LEVEL] message\n"
+    // Format: "HH:MM:SS|[TAG:L] message\n"  (po NTP)
+    //         "M0000003440|[TAG:L] message\n" (pred NTP)
     char line[MAX_LINE_LEN];
     int len = snprintf(line, sizeof(line),
-                       "%s|PARK|[%s:%s] %s\n",
-                       timestamp, safe_tag, level_str, message);
+                       "%s|[%s:%c] %s\n",
+                       timestamp, safe_tag, level_char, message);
 
     if (len <= 0) return;
     if (len >= (int)sizeof(line)) {
