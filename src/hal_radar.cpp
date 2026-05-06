@@ -455,27 +455,130 @@ static bool sc16_write_uart(uint8_t addr, uint8_t ch,
     return (Wire1.endTransmission() == 0);
 }
 
-// Preberi odgovor iz LD2410C (čakaj max timeout_ms).
+// Preberi config ACK odgovor iz LD2410C (header-driven).
+//
+// PROBLEM ki ga rešuje ta implementacija:
+//   LD2410C neprestano pošilja reporting frames (header F4 F3 F2 F1).
+//   Config ACK ima header FD FC FB FA.
+//   Stara implementacija je prebrala reporting frame namesto ACK
+//   ker ni ločila med obema tipoma frameov.
+//
+// REŠITEV — header-driven branje:
+//   Iščemo FD FC FB FA; bajte pred njim (reporting frames) zavržemo.
+//   Ko najdemo header, beremo naprej do footer 04 03 02 01.
+//
 // Wire1 mutex mora biti pridobljen pred klicem.
 static uint8_t sc16_read_response(uint8_t addr, uint8_t ch,
                                    uint8_t* buf, uint8_t max_len,
-                                   uint32_t timeout_ms) {
-    uint32_t start = millis();
-    uint8_t  pos   = 0;
-    while ((millis() - start) < timeout_ms && pos < max_len) {
+                                   uint32_t timeout_ms = 200) {
+    static const uint8_t CFG_HEADER[4] = {0xFD, 0xFC, 0xFB, 0xFA};
+    static const uint8_t CFG_FOOTER[4] = {0x04, 0x03, 0x02, 0x01};
+
+    uint32_t start        = millis();
+    uint8_t  hdr_matched  = 0;
+    uint8_t  pos          = 0;
+    uint32_t bytes_skipped = 0;
+    bool     header_found = false;
+    // MAX_SKIP: max bajtov reporting frame-ov pred config ACK headerjem.
+    // En LD2410C reporting frame = 23 bajtov. Normalno: max 1-2 frame-a
+    // pred ACK = max ~46 bajtov. 50 je varen margin.
+    // Vrednost 200 je bila previsoka (200×0.3ms = 60ms blokade CPU).
+    const uint32_t MAX_SKIP = 50;
+
+    while ((millis() - start) < timeout_ms) {
+        // WDT reset — radarTask je registriran za TWDT.
+        // sc16_read_response() teče do ~75ms (MAX_SKIP×0.3ms + timeout)
+        // brez yield → sensorTask ne dobi CPU → WDT crash po ~50min.
+        // esp_task_wdt_reset() je poceni (<1µs), kliči v vsaki iteraciji.
+        esp_task_wdt_reset();
+
         uint8_t rxlvl = 0;
         sc16_read(addr, SC16_REG(REG_RXLVL, ch), rxlvl);
-        if (rxlvl > 0) {
-            uint8_t n = sc16_read_fifo(addr, ch, buf + pos, max_len - pos);
-            pos += n;
-            // Preveri ali imamo cel odgovor (footer 04 03 02 01)
-            if (pos >= 4) {
-                static const uint8_t CFG_FOOTER[4] = {0x04,0x03,0x02,0x01};
-                if (memcmp(buf + pos - 4, CFG_FOOTER, 4) == 0) break;
+
+        if (rxlvl == 0) {
+            vTaskDelay(pdMS_TO_TICKS(3));
+            continue;
+        }
+
+        // Preberi en bajt
+        uint8_t b = 0;
+        Wire1.beginTransmission(addr);
+        Wire1.write(SC16_REG(REG_RHR, ch));
+        if (Wire1.endTransmission(false) != 0) break;
+        if (Wire1.requestFrom(addr, (uint8_t)1) != 1) break;
+        b = Wire1.read();
+
+        if (!header_found) {
+            // Iščemo config ACK header FD FC FB FA
+            if (b == CFG_HEADER[hdr_matched]) {
+                hdr_matched++;
+                if (hdr_matched == 4) {
+                    header_found = true;
+                    if (pos + 4 <= max_len) {
+                        buf[pos++] = 0xFD;
+                        buf[pos++] = 0xFC;
+                        buf[pos++] = 0xFB;
+                        buf[pos++] = 0xFA;
+                    }
+                    RADD("sc16_read_response 0x%02X ch%c: "
+                         "ACK header FD FC FB FA najden (preskočeno %lu B)",
+                         addr, ch==0?'A':'B', (unsigned long)bytes_skipped);
+                }
+            } else {
+                bytes_skipped++;
+                hdr_matched = 0;
+                if (b == CFG_HEADER[0]) hdr_matched = 1;
+
+                // CPU yield vsakih 16 preskočenih bajtov.
+                // sensorTask (enaka prioriteta, Core1) mora dobiti CPU
+                // za lasten esp_task_wdt_reset(). Brez yield radarTask
+                // monopolizira CPU med iskanjem ACK headerja.
+                if ((bytes_skipped & 0x0F) == 0) {
+                    vTaskDelay(pdMS_TO_TICKS(1));
+                }
+
+                if (bytes_skipped >= MAX_SKIP) {
+                    RADW("sc16_read_response 0x%02X ch%c: "
+                         "preveč preskočenih bajtov (%lu) — timeout",
+                         addr, ch==0?'A':'B', (unsigned long)bytes_skipped);
+                    return 0;
+                }
             }
         } else {
-            vTaskDelay(pdMS_TO_TICKS(5));
+            if (pos < max_len) {
+                buf[pos++] = b;
+            }
+            if (pos >= 4) {
+                if (memcmp(buf + pos - 4, CFG_FOOTER, 4) == 0) {
+                    RADD("sc16_read_response 0x%02X ch%c: "
+                         "ACK footer najden, skupaj %d B",
+                         addr, ch==0?'A':'B', (int)pos);
+                    return pos;
+                }
+            }
         }
+    }
+
+    // Timeout — logiramo kaj smo dobili za debug
+    if (pos > 0) {
+        char hex_buf[64] = {0};
+        uint8_t log_len = (pos < 16) ? pos : 16;
+        for (uint8_t i = 0; i < log_len; i++) {
+            snprintf(hex_buf + i*3, sizeof(hex_buf) - i*3, "%02X ", buf[i]);
+        }
+        RADW("sc16_read_response 0x%02X ch%c: TIMEOUT — "
+             "dobili %d B, preskočili %lu B: %s%s",
+             addr, ch==0?'A':'B',
+             (int)pos, (unsigned long)bytes_skipped,
+             hex_buf, pos > 16 ? "..." : "");
+    } else if (bytes_skipped > 0) {
+        RADW("sc16_read_response 0x%02X ch%c: TIMEOUT — "
+             "preskočili %lu B, ACK header (FD FC FB FA) ni bil najden",
+             addr, ch==0?'A':'B', (unsigned long)bytes_skipped);
+    } else {
+        RADW("sc16_read_response 0x%02X ch%c: TIMEOUT — "
+             "ni odgovora (FIFO ves čas prazen)",
+             addr, ch==0?'A':'B');
     }
     return pos;
 }
@@ -504,118 +607,262 @@ static bool ld2410_send_cmd(uint8_t chip_addr, uint8_t uart_ch,
     memcpy(pkt + pos, cmd_data, cmd_len); pos += cmd_len;
     memcpy(pkt + pos, LD2410_CFG_FOOTER, 4); pos += 4;
 
+#ifdef RADAR_DEBUG_PROTOCOL
+    {
+        char tx_hex[120] = {0};
+        uint8_t log_n = (pos < 20) ? pos : 20;
+        for (uint8_t i = 0; i < log_n; i++) {
+            snprintf(tx_hex + i*3, sizeof(tx_hex) - i*3, "%02X ", pkt[i]);
+        }
+        RADD("ld2410 0x%02X ch%c TX (%dB): %s%s",
+             chip_addr, uart_ch==0?'A':'B', (int)pos, tx_hex,
+             pos > 20 ? "..." : "");
+    }
+#endif
     if (!sc16_write_uart(chip_addr, uart_ch, pkt, pos)) return false;
     if (resp_buf && resp_max > 0) {
         uint8_t n = sc16_read_response(chip_addr, uart_ch, resp_buf, resp_max, timeout_ms);
-        return (n >= 8);
+        if (n < 10) {
+            RADW("ld2410 0x%02X ch%c: ACK odgovor prekratek (%d B, min 10B)",
+                 chip_addr, uart_ch==0?'A':'B', (int)n);
+            return false;
+        }
+        bool ack_ok = (resp_buf[8] == 0x00 && resp_buf[9] == 0x00);
+        if (!ack_ok) {
+            RADW("ld2410 0x%02X ch%c: ACK status napaka "
+                 "(resp[8]=0x%02X resp[9]=0x%02X, pričakovano 0x00 0x00)",
+                 chip_addr, uart_ch==0?'A':'B', resp_buf[8], resp_buf[9]);
+            char rx_hex[64] = {0};
+            uint8_t log_n = (n < 18) ? n : 18;
+            for (uint8_t i = 0; i < log_n; i++) {
+                snprintf(rx_hex + i*3, sizeof(rx_hex) - i*3, "%02X ", resp_buf[i]);
+            }
+            RADW("ld2410 0x%02X ch%c: ACK napaka — RX dump (%dB): %s%s",
+                 chip_addr, uart_ch==0?'A':'B',
+                 (int)n, rx_hex, n > 18 ? "..." : "");
+        }
+        return ack_ok;
     }
     return true;
+}
+
+// Izprazni SC16IS752 RX FIFO pred pošiljanjem konfiguracijskih ukazov.
+// LD2410C neprestano pošilja reporting frames — brez flush bi sc16_read_response()
+// prebral reporting frame namesto config ACK → napačen ACK parse.
+// Wire1 mutex mora biti pridobljen pred klicem.
+static void ld2410_flush_rx(uint8_t addr, uint8_t ch) {
+    uint8_t rxlvl = 0;
+    uint8_t drain_buf[64];
+    uint8_t total_drained = 0;
+    for (int attempts = 0; attempts < 8; attempts++) {
+        sc16_read(addr, SC16_REG(REG_RXLVL, ch), rxlvl);
+        if (rxlvl == 0) break;
+        uint8_t n = (rxlvl > sizeof(drain_buf)) ? sizeof(drain_buf) : rxlvl;
+        sc16_read_fifo(addr, ch, drain_buf, n);
+        total_drained += n;
+    }
+    if (total_drained > 0) {
+        RADD("ld2410 flush_rx 0x%02X ch%c: 1. flush izpraznil %d bajtov",
+             addr, ch==0?'A':'B', (int)total_drained);
+    }
+    // Pavza 10ms — dovolj da se FIFO umiri po prvem flush-u.
+    // Krajša kot ~100ms period reporting frame-a → sc16_read_response()
+    // (header-driven) bo preskočil morebitne preostale bajte avtomatsko.
+    vTaskDelay(pdMS_TO_TICKS(10));
+
+    // Drugi flush: počisti bajte ki so prišli med 10ms pavzo
+    uint8_t rxlvl2 = 0;
+    sc16_read(addr, SC16_REG(REG_RXLVL, ch), rxlvl2);
+    if (rxlvl2 > 0) {
+        uint8_t drain2[64];
+        uint8_t n2 = sc16_read_fifo(addr, ch, drain2, sizeof(drain2));
+        if (n2 > 0) {
+            RADD("ld2410 flush_rx 0x%02X ch%c: 2. flush izpraznil %d bajtov",
+                 addr, ch==0?'A':'B', (int)n2);
+            total_drained += n2;
+        }
+    }
+
+    if (total_drained > 0) {
+        RADD("ld2410 flush_rx 0x%02X ch%c: skupaj izpraznjenih %d bajtov",
+             addr, ch==0?'A':'B', (int)total_drained);
+    } else {
+        RADD("ld2410 flush_rx 0x%02X ch%c: FIFO že prazen",
+             addr, ch==0?'A':'B');
+    }
 }
 
 // Odpri config mode — mora biti prvi ukaz pred vsemi nastavitvami.
 static bool ld2410_open_config(uint8_t chip_addr, uint8_t uart_ch) {
+    RADD("ld2410 0x%02X ch%c: open_config — začetek",
+         chip_addr, uart_ch==0?'A':'B');
+    ld2410_flush_rx(chip_addr, uart_ch);
+    RADD("ld2410 0x%02X ch%c: open_config — flush OK, pošiljam ukaz",
+         chip_addr, uart_ch==0?'A':'B');
     const uint8_t cmd[] = {0xFF, 0x00, 0x01, 0x00};
     uint8_t resp[20];
     bool ok = ld2410_send_cmd(chip_addr, uart_ch, cmd, 4, resp, sizeof(resp));
     if (!ok) {
-        RADW("ld2410 0x%02X ch%c: open_config NAPAKA", chip_addr, uart_ch==0?'A':'B');
-        return false;
-    }
-    bool ack_ok = (resp[6] == 0x00 && resp[7] == 0x00);
-    if (!ack_ok) {
-        RADW("ld2410 0x%02X ch%c: open_config ACK napaka (0x%02X 0x%02X)",
-             chip_addr, uart_ch==0?'A':'B', resp[6], resp[7]);
-    }
-    return ack_ok;
-}
-
-// Restart + zapri config mode — uveljavi nastavitve v flash.
-static bool ld2410_close_config(uint8_t chip_addr, uint8_t uart_ch) {
-    const uint8_t cmd_rst[] = {0xA3, 0x00};
-    ld2410_send_cmd(chip_addr, uart_ch, cmd_rst, 2, nullptr, 0);
-    vTaskDelay(pdMS_TO_TICKS(100));
-    const uint8_t cmd_end[] = {0xFE, 0x00};
-    uint8_t resp[20];
-    return ld2410_send_cmd(chip_addr, uart_ch, cmd_end, 2, resp, sizeof(resp));
-}
-
-// Nastavi max razdaljo in občutljivost (per-gate sensitivity via cmd 0x64).
-static bool ld2410_set_params(uint8_t chip_addr, uint8_t uart_ch,
-                              uint8_t max_dist,
-                              uint8_t move_sens,
-                              uint8_t static_sens) {
-    // Ukaz 0x60: nastavi max gate
-    uint8_t cmd[14];
-    cmd[0]  = 0x60; cmd[1]  = 0x00;
-    cmd[2]  = 0x00; cmd[3]  = 0x00; cmd[4]  = 0x00; cmd[5]  = 0x00;
-    cmd[6]  = max_dist;
-    cmd[7]  = 0x00; cmd[8]  = 0x00; cmd[9]  = 0x00;
-    cmd[10] = max_dist;
-    cmd[11] = 0x00; cmd[12] = 0x00; cmd[13] = 0x00;
-    uint8_t resp[20];
-    if (!ld2410_send_cmd(chip_addr, uart_ch, cmd, 14, resp, sizeof(resp))) return false;
-
-    // Ukaz 0x64: nastavi sensitivity za vsak gate
-    for (uint8_t gate = 0; gate <= max_dist && gate <= 8; gate++) {
-        uint8_t sens_cmd[8];
-        sens_cmd[0] = 0x64; sens_cmd[1] = 0x00;
-        sens_cmd[2] = gate; sens_cmd[3] = 0x00;
-        sens_cmd[4] = move_sens;   sens_cmd[5] = 0x00;
-        sens_cmd[6] = static_sens; sens_cmd[7] = 0x00;
-        ld2410_send_cmd(chip_addr, uart_ch, sens_cmd, 8, resp, sizeof(resp));
-        vTaskDelay(pdMS_TO_TICKS(20));
-    }
-    return true;
-}
-
-// Nastavi unmanned duration (čas po katerem radar preklopi v "ni nikogar").
-static bool ld2410_set_unmanned(uint8_t chip_addr, uint8_t uart_ch,
-                                uint16_t unmanned_s) {
-    uint8_t cmd[6];
-    cmd[0] = 0x80; cmd[1] = 0x00;
-    cmd[2] = (uint8_t)(unmanned_s & 0xFF);
-    cmd[3] = (uint8_t)(unmanned_s >> 8);
-    cmd[4] = 0x00; cmd[5] = 0x00;
-    uint8_t resp[20];
-    return ld2410_send_cmd(chip_addr, uart_ch, cmd, 6, resp, sizeof(resp));
-}
-
-// Preberi parametre za verifikacijo (cmd 0x61). Vrne true če se ujemajo.
-static bool ld2410_verify_params(uint8_t chip_addr, uint8_t uart_ch,
-                                 uint8_t expected_max_dist,
-                                 uint8_t expected_unmanned_s) {
-    // Pošlji query ročno da dobimo dejanski n za validacijo dolžine
-    uint8_t pkt[10];
-    uint8_t pos = 0;
-    memcpy(pkt + pos, LD2410_CFG_HEADER, 4); pos += 4;
-    pkt[pos++] = 2; pkt[pos++] = 0x00;
-    pkt[pos++] = 0x61; pkt[pos++] = 0x00;
-    memcpy(pkt + pos, LD2410_CFG_FOOTER, 4); pos += 4;
-
-    if (!sc16_write_uart(chip_addr, uart_ch, pkt, pos)) {
-        RADW("ld2410 0x%02X ch%c: verify send NAPAKA", chip_addr, uart_ch==0?'A':'B');
-        return false;
-    }
-    uint8_t resp[40];
-    uint8_t n = sc16_read_response(chip_addr, uart_ch, resp, sizeof(resp), 300);
-    if (n < 14) {
-        RADW("ld2410 0x%02X ch%c: verify odgovor prekratek (%d B)",
-             chip_addr, uart_ch==0?'A':'B', n);
-        return false;
-    }
-    // resp[8]=max_move_gate, resp[10]=max_static_gate, resp[12-13]=unmanned LE
-    uint8_t  read_max_dist = resp[8];
-    uint16_t read_unmanned = (uint16_t)resp[12] | ((uint16_t)resp[13] << 8);
-    bool ok = (read_max_dist == expected_max_dist) &&
-              (read_unmanned == expected_unmanned_s);
-    if (!ok) {
-        RADW("ld2410 0x%02X ch%c: verify NAPAKA — "
-             "max_dist exp=%d got=%d, unmanned exp=%d got=%d",
+        RADW("ld2410 0x%02X ch%c: open_config NAPAKA",
+             chip_addr, uart_ch==0?'A':'B');
+    } else {
+        RADD("ld2410 0x%02X ch%c: open_config OK "
+             "(protocol_ver=0x%02X%02X, buf_size=%d)",
              chip_addr, uart_ch==0?'A':'B',
-             expected_max_dist, read_max_dist,
-             expected_unmanned_s, read_unmanned);
+             resp[11], resp[10],
+             (int)((uint16_t)resp[12] | ((uint16_t)resp[13] << 8)));
     }
     return ok;
+}
+
+// Zapri config mode in restartiraj — uveljavi nastavitve v non-volatile memory.
+// Vrstni red po dokumentu: najprej 0xFE (end config), nato 0xA3 (restart).
+static bool ld2410_close_config(uint8_t chip_addr, uint8_t uart_ch) {
+    const uint8_t cmd_end[] = {0xFE, 0x00};
+    uint8_t resp[20];
+    bool end_ok = ld2410_send_cmd(chip_addr, uart_ch, cmd_end, 2, resp, sizeof(resp));
+    if (!end_ok) {
+        RADW("ld2410 0x%02X ch%c: close_config (0xFE) napaka",
+             chip_addr, uart_ch==0?'A':'B');
+    }
+    vTaskDelay(pdMS_TO_TICKS(30));
+    const uint8_t cmd_rst[] = {0xA3, 0x00};
+    ld2410_send_cmd(chip_addr, uart_ch, cmd_rst, 2, nullptr, 0);
+    RADD("ld2410 0x%02X ch%c: close_config + restart poslano",
+         chip_addr, uart_ch==0?'A':'B');
+    return end_ok;
+}
+
+// Nastavi max razdaljo in unmanned duration (ukaz 0x0060).
+// Intra-frame data = 20B: param0(motion gate) + param1(static gate) + param2(unmanned).
+static bool ld2410_set_params(uint8_t chip_addr, uint8_t uart_ch,
+                              uint8_t max_dist,
+                              uint16_t unmanned_s) {
+    uint8_t cmd[20];
+    cmd[0]  = 0x60; cmd[1]  = 0x00;
+    // param 0x0000: max motion distance gate (uint32 LE)
+    cmd[2]  = 0x00; cmd[3]  = 0x00;
+    cmd[4]  = max_dist; cmd[5] = 0x00;
+    cmd[6]  = 0x00;     cmd[7] = 0x00;
+    // param 0x0001: max static distance gate (uint32 LE)
+    cmd[8]  = 0x01; cmd[9]  = 0x00;
+    cmd[10] = max_dist; cmd[11] = 0x00;
+    cmd[12] = 0x00;     cmd[13] = 0x00;
+    // param 0x0002: unmanned duration sekunde (uint32 LE)
+    cmd[14] = 0x02; cmd[15] = 0x00;
+    cmd[16] = (uint8_t)(unmanned_s & 0xFF);
+    cmd[17] = (uint8_t)(unmanned_s >> 8);
+    cmd[18] = 0x00; cmd[19] = 0x00;
+
+    uint8_t resp[20];
+    bool ok = ld2410_send_cmd(chip_addr, uart_ch, cmd, 20, resp, sizeof(resp));
+    if (!ok) {
+        RADW("ld2410 0x%02X ch%c: set_params (0x60) napaka",
+             chip_addr, uart_ch==0?'A':'B');
+    } else {
+        RADD("ld2410 0x%02X ch%c: set_params OK (max_dist=%d, unmanned=%ds)",
+             chip_addr, uart_ch==0?'A':'B', max_dist, (int)unmanned_s);
+    }
+    return ok;
+}
+
+// Nastavi občutljivost za vse gate hkrati (ukaz 0x0064, gate=0xFFFF).
+// En ukaz namesto starega per-gate loopa (9 ukazov za gate 0-8).
+static bool ld2410_set_sensitivity(uint8_t chip_addr, uint8_t uart_ch,
+                                   uint8_t move_sens,
+                                   uint8_t static_sens) {
+    uint8_t cmd[20];
+    cmd[0]  = 0x64; cmd[1]  = 0x00;
+    // param 0x0000: gate selection = 0xFFFF (vse gate hkrati)
+    cmd[2]  = 0x00; cmd[3]  = 0x00;
+    cmd[4]  = 0xFF; cmd[5]  = 0xFF;
+    cmd[6]  = 0x00; cmd[7]  = 0x00;
+    // param 0x0001: motion sensitivity (uint32 LE)
+    cmd[8]  = 0x01; cmd[9]  = 0x00;
+    cmd[10] = move_sens; cmd[11] = 0x00;
+    cmd[12] = 0x00;      cmd[13] = 0x00;
+    // param 0x0002: static sensitivity (uint32 LE)
+    cmd[14] = 0x02; cmd[15] = 0x00;
+    cmd[16] = static_sens; cmd[17] = 0x00;
+    cmd[18] = 0x00;        cmd[19] = 0x00;
+
+    uint8_t resp[20];
+    bool ok = ld2410_send_cmd(chip_addr, uart_ch, cmd, 20, resp, sizeof(resp));
+    if (!ok) {
+        RADW("ld2410 0x%02X ch%c: set_sensitivity (0x64) napaka",
+             chip_addr, uart_ch==0?'A':'B');
+    } else {
+        RADD("ld2410 0x%02X ch%c: set_sensitivity OK (move=%d, static=%d)",
+             chip_addr, uart_ch==0?'A':'B', move_sens, static_sens);
+    }
+    return ok;
+}
+
+// Preberi in verificiraj konfiguracijske parametre (ukaz 0x61).
+// ACK format: [0..3]=header [4..5]=len [6..7]=61 01 [8..9]=STATUS
+//             [10]=0xAA [11]=N [12]=motion_gate [13]=static_gate
+//             [14..22]=motion_sens 9B [23..31]=static_sens 9B
+//             [32..33]=unmanned LE [34..37]=footer
+static bool ld2410_verify_params(uint8_t chip_addr, uint8_t uart_ch,
+                                 uint8_t expected_max_dist,
+                                 uint8_t expected_move_sens,
+                                 uint8_t expected_static_sens,
+                                 uint16_t expected_unmanned_s) {
+    const uint8_t cmd[] = {0x61, 0x00};
+    uint8_t resp[50];
+
+    ld2410_flush_rx(chip_addr, uart_ch);
+
+    // Timeout zmanjšan 400→250ms (WDT fix 2026-05).
+    // Verify ACK pride takoj po ukazu (~10ms). 250ms je dovolj za
+    // ACK + 2 reporting frame-a overhead, brez nepotrebne CPU blokade.
+    bool ok = ld2410_send_cmd(chip_addr, uart_ch, cmd, 2, resp, sizeof(resp), 250);
+    if (!ok) {
+        RADW("ld2410 0x%02X ch%c: verify read_params (0x61) napaka",
+             chip_addr, uart_ch==0?'A':'B');
+        return false;
+    }
+
+    if (resp[10] != 0xAA) {
+        RADW("ld2410 0x%02X ch%c: verify — intra-frame header napaka (0x%02X != 0xAA)",
+             chip_addr, uart_ch==0?'A':'B', resp[10]);
+        return false;
+    }
+
+    uint8_t  read_motion_gate = resp[12];
+    uint8_t  read_static_gate = resp[13];
+    uint8_t  read_move_sens   = (resp[12] >= 2) ? resp[16] : resp[14];
+    uint8_t  read_static_sens = (resp[13] >= 2) ? resp[25] : resp[23];
+    uint16_t read_unmanned    = (uint16_t)resp[32] | ((uint16_t)resp[33] << 8);
+
+    bool dist_ok     = (read_motion_gate == expected_max_dist) &&
+                       (read_static_gate == expected_max_dist);
+    bool unmanned_ok = (read_unmanned == expected_unmanned_s);
+    bool all_ok      = dist_ok && unmanned_ok;
+
+    if (!all_ok) {
+        RADW("ld2410 0x%02X ch%c: verify NAPAKA —",
+             chip_addr, uart_ch==0?'A':'B');
+        if (!dist_ok) {
+            RADW("  max_dist: exp=%d got motion=%d static=%d",
+                 expected_max_dist, read_motion_gate, read_static_gate);
+        }
+        if (!unmanned_ok) {
+            RADW("  unmanned: exp=%ds got=%ds",
+                 (int)expected_unmanned_s, (int)read_unmanned);
+        }
+        RADW("  Možni vzroki:");
+        RADW("  1. Radar na napačnem baud rate (factory reset?)");
+        RADW("     -> ročno rekonfiguriraj z set_baud.py skriptо");
+        RADW("  2. Protokol napaka — preveriti ld2410_set_params()");
+        RADW("  3. Radar firmware ne podpira tega ukaza");
+    } else {
+        RADI("ld2410 0x%02X ch%c: verify OK (gate=%d, unmanned=%ds, move_sens~=%d, static_sens~=%d)",
+             chip_addr, uart_ch==0?'A':'B',
+             read_motion_gate, (int)read_unmanned,
+             read_move_sens, read_static_sens);
+    }
+    return all_ok;
 }
 
 // ============================================================
@@ -1117,10 +1364,10 @@ static void radarTask(void* pvParams) {
             do {
                 if (!ld2410_open_config(chip_addr, uart_ch)) break;
                 vTaskDelay(pdMS_TO_TICKS(50));
-                if (!ld2410_set_params(chip_addr, uart_ch,
-                                       max_dist, move_sens, stat_sens)) break;
+                if (!ld2410_set_params(chip_addr, uart_ch, max_dist, unmanned)) break;
                 vTaskDelay(pdMS_TO_TICKS(50));
-                if (!ld2410_set_unmanned(chip_addr, uart_ch, unmanned)) break;
+                if (!ld2410_set_sensitivity(chip_addr, uart_ch,
+                                            move_sens, stat_sens)) break;
                 vTaskDelay(pdMS_TO_TICKS(50));
                 ok = true;
             } while (false);
@@ -1128,15 +1375,12 @@ static void radarTask(void* pvParams) {
             bool verified = false;
             if (ok) {
                 verified = ld2410_verify_params(chip_addr, uart_ch,
-                                                max_dist, (uint8_t)unmanned);
-                if (!verified) {
-                    RADW("  [%s]: verify NAPAKA — parametri morda niso bili sprejeti",
-                         sensor_names[i]);
-                }
+                                                max_dist, move_sens,
+                                                stat_sens, unmanned);
             }
 
             ld2410_close_config(chip_addr, uart_ch);
-            vTaskDelay(pdMS_TO_TICKS(150));
+            vTaskDelay(pdMS_TO_TICKS(500));
 
             xSemaphoreGive(mtx);
 
@@ -1549,9 +1793,10 @@ bool hal_radar_reconfigure(RadarSensorId id,
         if (!ld2410_open_config(rc.chip_addr, rc.uart_ch)) break;
         vTaskDelay(pdMS_TO_TICKS(50));
         if (!ld2410_set_params(rc.chip_addr, rc.uart_ch,
-                               max_dist, move_sens, static_sens)) break;
+                               max_dist, unmanned_s)) break;
         vTaskDelay(pdMS_TO_TICKS(50));
-        if (!ld2410_set_unmanned(rc.chip_addr, rc.uart_ch, unmanned_s)) break;
+        if (!ld2410_set_sensitivity(rc.chip_addr, rc.uart_ch,
+                                    move_sens, static_sens)) break;
         vTaskDelay(pdMS_TO_TICKS(50));
         ok = true;
     } while (false);
@@ -1559,10 +1804,11 @@ bool hal_radar_reconfigure(RadarSensorId id,
     bool verified = false;
     if (ok) {
         verified = ld2410_verify_params(rc.chip_addr, rc.uart_ch,
-                                        max_dist, (uint8_t)unmanned_s);
+                                        max_dist, move_sens,
+                                        static_sens, unmanned_s);
     }
     ld2410_close_config(rc.chip_addr, rc.uart_ch);
-    vTaskDelay(pdMS_TO_TICKS(150));
+    vTaskDelay(pdMS_TO_TICKS(500));
 
     xSemaphoreGive(mtx);
 

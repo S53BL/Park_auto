@@ -201,6 +201,10 @@
 // Po zagonu: OE! redki z round-robin drainanjem.
 // 30s interval: dovolj redko da ne zamaši loga, dovolj pogosto za diagnostiko.
 #define RADAR_OE_LOG_INTERVAL_MS    30000
+// RADAR_DEBUG_PROTOCOL: če je definirano, logira TX/RX bajte pri
+// konfiguracijskem protokolu. Izklopi v produkciji — preveč verbose.
+// Odkomentiraj za debug konfiguracije, zakomentiraj po uspešnem testu.
+// #define RADAR_DEBUG_PROTOCOL
 
 // ============================================================
 // 9. LED KONFIGURACIJA
