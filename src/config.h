@@ -228,6 +228,9 @@
 #define SSR2_DELAY_MS       500
 #define SSR3_ANTIFORGET_MS  (5 * 60 * 1000)
 #define SSR4_ANTIFORGET_MS  (5 * 60 * 1000)
+// Minimalni interval med zaporednima BUTTON_SSR eventoma istega gumba.
+// Touch panel pošlje dvojne evente — 500ms je neopazno za uporabnika.
+#define BUTTON_DEBOUNCE_MS  500
 
 // ============================================================
 // 11. FREERTOS TASKI

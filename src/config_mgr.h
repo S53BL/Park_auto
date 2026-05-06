@@ -133,6 +133,26 @@ struct Config {
 
     // Čas stabilnosti H senzorja pred začetkom skeniranja (sekunde).
     float    stability_s;           // default: 1.5,  min: 0.5,   max: 10.0
+
+    // ----------------------------------------------------------
+    // Tab: Radar konfiguracija — per senzor (indeksi 0-3)
+    // ----------------------------------------------------------
+    // Parametri se ob zagonu pošljejo na vsak LD2410C radar prek
+    // SC16IS752 UART. Ob web spremembi: NVS + radar takoj.
+    //
+    // max_dist: maksimalna razdalja zaznave [0-8, enota 0.75m]
+    //   0=0m (izklopljeno), 1=0.75m, ..., 8=6m. Default=2 (1.5m)
+    // move_sens: občutljivost gibanja [0-100]. Default=20 (nizka)
+    // static_sens: občutljivost statičnih objektov [0-100]. Default=0
+    // unmanned_s: čas [s] po katerem radar preklopi v "ni nikogar". Default=5
+    uint8_t  radar_max_dist[4];     // default: 2, min: 0, max: 8
+    uint8_t  radar_move_sens[4];    // default: 20, min: 0, max: 100
+    uint8_t  radar_static_sens[4];  // default: 0, min: 0, max: 100
+    uint16_t radar_unmanned_s[4];   // default: 5, min: 0, max: 65535
+
+    // Persistence filter: N zaporednih frames pred SSR triggerjem (v sensor_mgr).
+    // 0=izklopljeno, 1=vsak frame. Default=3 (300ms latenca)
+    uint8_t  radar_persistence_n;   // default: 3, min: 0, max: 10
 };
 
 // ============================================================
@@ -173,6 +193,14 @@ inline Config config_defaults() {
     c.delta_filter_mm      = 15;
     c.phase_confirm_cm     = 350;
     c.stability_s          = 1.5f;
+    // Radar — utišane začetne vrednosti (kalibrirati po namestitvi)
+    for (int i = 0; i < 4; i++) {
+        c.radar_max_dist[i]    = 2;    // 1.5m
+        c.radar_move_sens[i]   = 20;   // nizka občutljivost
+        c.radar_static_sens[i] = 0;    // statično izklopljeno
+        c.radar_unmanned_s[i]  = 5;    // 5s
+    }
+    c.radar_persistence_n = 3;
     return c;
 }
 

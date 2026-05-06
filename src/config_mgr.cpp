@@ -93,6 +93,15 @@
 #define NVS_K_PHASE_CFM     "phase_cfm"     // phase_confirm_cm
 #define NVS_K_STAB_S        "stab_s"        // stability_s (float as uint32)
 
+// Radar — per senzor (indeks 0-3 v imenu ključa)
+// "r" = radar, "md" = max_dist, "ms" = move_sens,
+// "ss" = static_sens, "us" = unmanned_s
+static const char* NVS_RADAR_MD[] = {"r_md_0","r_md_1","r_md_2","r_md_3"};
+static const char* NVS_RADAR_MS[] = {"r_ms_0","r_ms_1","r_ms_2","r_ms_3"};
+static const char* NVS_RADAR_SS[] = {"r_ss_0","r_ss_1","r_ss_2","r_ss_3"};
+static const char* NVS_RADAR_US[] = {"r_us_0","r_us_1","r_us_2","r_us_3"};
+#define NVS_K_RADAR_PERSIST  "r_persist"
+
 // ============================================================
 // MEJNE VREDNOSTI ZA VALIDACIJO
 // ============================================================
@@ -329,6 +338,51 @@ static void load_and_validate(Preferences& prefs) {
     VALIDATE_U32  (prefs, NVS_K_DELTA_FLT,  delta_filter_mm,    CFG_MIN_DELTA_FLT,  CFG_MAX_DELTA_FLT,  def.delta_filter_mm);
     VALIDATE_U32  (prefs, NVS_K_PHASE_CFM,  phase_confirm_cm,   CFG_MIN_PHASE_CFM,  CFG_MAX_PHASE_CFM,  def.phase_confirm_cm);
     VALIDATE_FLOAT(prefs, NVS_K_STAB_S,     stability_s,        CFG_MIN_STAB_S,     CFG_MAX_STAB_S,     def.stability_s);
+
+    // --- Radar parametri --- per senzor
+    for (int ri = 0; ri < 4; ri++) {
+        uint8_t md = prefs.getUChar(NVS_RADAR_MD[ri], 0xFF);
+        if (md <= 8) {
+            s_config.radar_max_dist[ri] = md;
+        } else {
+            CFGD("  %s ni v NVS → default %d", NVS_RADAR_MD[ri], def.radar_max_dist[ri]);
+            s_config.radar_max_dist[ri] = def.radar_max_dist[ri];
+            prefs.putUChar(NVS_RADAR_MD[ri], def.radar_max_dist[ri]);
+            s_replaced_count++;
+        }
+        uint8_t ms = prefs.getUChar(NVS_RADAR_MS[ri], 0xFF);
+        if (ms <= 100) {
+            s_config.radar_move_sens[ri] = ms;
+        } else {
+            s_config.radar_move_sens[ri] = def.radar_move_sens[ri];
+            prefs.putUChar(NVS_RADAR_MS[ri], def.radar_move_sens[ri]);
+            s_replaced_count++;
+        }
+        uint8_t ss = prefs.getUChar(NVS_RADAR_SS[ri], 0xFF);
+        if (ss <= 100) {
+            s_config.radar_static_sens[ri] = ss;
+        } else {
+            s_config.radar_static_sens[ri] = def.radar_static_sens[ri];
+            prefs.putUChar(NVS_RADAR_SS[ri], def.radar_static_sens[ri]);
+            s_replaced_count++;
+        }
+        uint32_t us = prefs.getUInt(NVS_RADAR_US[ri], 0xFFFFFFFF);
+        if (us <= 65535) {
+            s_config.radar_unmanned_s[ri] = (uint16_t)us;
+        } else {
+            s_config.radar_unmanned_s[ri] = def.radar_unmanned_s[ri];
+            prefs.putUInt(NVS_RADAR_US[ri], def.radar_unmanned_s[ri]);
+            s_replaced_count++;
+        }
+    }
+    uint8_t pn = prefs.getUChar(NVS_K_RADAR_PERSIST, 0xFF);
+    if (pn <= 10) {
+        s_config.radar_persistence_n = pn;
+    } else {
+        s_config.radar_persistence_n = def.radar_persistence_n;
+        prefs.putUChar(NVS_K_RADAR_PERSIST, def.radar_persistence_n);
+        s_replaced_count++;
+    }
 }
 
 // ============================================================
@@ -367,6 +421,14 @@ static void write_all_to_nvs(Preferences& prefs) {
     prefs.putUInt (NVS_K_DELTA_FLT,  s_config.delta_filter_mm);
     prefs.putUInt (NVS_K_PHASE_CFM,  s_config.phase_confirm_cm);
     prefs.putUInt (NVS_K_STAB_S,     float_to_u32(s_config.stability_s));
+    // Radar parametri
+    for (int ri = 0; ri < 4; ri++) {
+        prefs.putUChar(NVS_RADAR_MD[ri], s_config.radar_max_dist[ri]);
+        prefs.putUChar(NVS_RADAR_MS[ri], s_config.radar_move_sens[ri]);
+        prefs.putUChar(NVS_RADAR_SS[ri], s_config.radar_static_sens[ri]);
+        prefs.putUInt (NVS_RADAR_US[ri], s_config.radar_unmanned_s[ri]);
+    }
+    prefs.putUChar(NVS_K_RADAR_PERSIST, s_config.radar_persistence_n);
 }
 
 // ============================================================

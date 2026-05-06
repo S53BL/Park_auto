@@ -23,3 +23,27 @@ void screen_main_apply_updates();
 void screen_main_set_ssr(uint8_t idx, const SsrDisplayData& data);
 void screen_main_set_parking(uint8_t idx, const ParkingDisplayData& data);
 void screen_main_set_radar(uint8_t idx, const RadarDisplayData& data);
+
+// ============================================================
+// Radar arc vizualizacija
+// ============================================================
+
+enum class RadarArcState : uint8_t {
+    INACTIVE     = 0,   // senzor ni aktiven — siva
+    IDLE         = 1,   // aktiven, ni zaznave — temno zelena
+    MOVING       = 2,   // gibanje — zelena (intenzivnost ~ energy)
+    STATIONARY   = 3,   // statično — modra
+    CONFIG_ERROR = 4,   // konfiguracija napaka — rdeča
+};
+
+struct RadarArcData {
+    RadarArcState state;
+    uint8_t       energy;    // 0-100, za arc fill intenzivnost
+    uint16_t      dist_cm;   // razdalja zadnje zaznave
+    bool          config_ok;
+    bool          verified;
+};
+
+// Posodobi arc vizualizacijo za senzor idx (0-3).
+// Kliče se iz ui_refresh_cb v lvglTask kontekstu — thread-safe.
+void screen_main_set_radar_arc(uint8_t idx, const RadarArcData& data);

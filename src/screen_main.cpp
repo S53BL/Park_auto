@@ -550,3 +550,35 @@ void screen_main_set_radar(uint8_t idx, const RadarDisplayData& data) {
     s_rad[idx].data = data;
     rad_apply(s_rad[idx]);
 }
+
+void screen_main_set_radar_arc(uint8_t idx, const RadarArcData& data) {
+    if (idx >= 4 || !s_created) return;
+    RadWidget& w = s_rad[idx];
+
+    lv_color_t color;
+    switch (data.state) {
+        case RadarArcState::INACTIVE:
+            color = lv_color_hex(0x404040);
+            break;
+        case RadarArcState::IDLE:
+            color = lv_color_hex(0x1A4A1A);
+            break;
+        case RadarArcState::MOVING: {
+            uint8_t bright = 0x20 + (uint8_t)((data.energy * 0xDFu) / 100u);
+            color = lv_color_make(0, bright, 0);
+            break;
+        }
+        case RadarArcState::STATIONARY:
+            color = lv_color_hex(0x1A1A8A);
+            break;
+        case RadarArcState::CONFIG_ERROR:
+            color = lv_color_hex(0x8A1A1A);
+            break;
+        default:
+            color = lv_color_hex(0x404040);
+            break;
+    }
+
+    lv_arc_set_value(w.arc, data.energy);
+    lv_obj_set_style_arc_color(w.arc, color, LV_PART_INDICATOR);
+}

@@ -61,6 +61,7 @@ public:
 #include "screen_party.h"
 #include "screen_main.h"
 #include "light_logic.h"
+#include "hal_radar.h"
 extern void screen_main_create(lv_obj_t* parent);
 extern void screen_main_apply_updates();
 
@@ -270,8 +271,31 @@ static void ui_refresh_cb(lv_timer_t*) {
         screen_main_set_ssr(i - 1, d);  // zaslon idx = SSR idx - 1
     }
 
-    // TODO: screen_main_set_radar() — ko bo radar vizualizacija dokončana
-    // TODO: screen_service_apply_updates() — ko bo servisni zaslon aktiven
+    // Posodobi arc vizualizacijo radarjev (4 arc-i spodaj)
+    for (uint8_t ri = 0; ri < 4; ri++) {
+        const RadarSensorStatus& rs = hal_radar_get_status((RadarSensorId)ri);
+        RadarArcData arc;
+
+        if (!rs.active) {
+            arc.state = RadarArcState::INACTIVE;
+        } else if (!rs.config_ok) {
+            arc.state = RadarArcState::CONFIG_ERROR;
+        } else {
+            switch (rs.last_frame.detection) {
+                case 1:  arc.state = RadarArcState::MOVING;     break;
+                case 2:  arc.state = RadarArcState::STATIONARY; break;
+                case 3:  arc.state = RadarArcState::MOVING;     break;
+                default: arc.state = RadarArcState::IDLE;       break;
+            }
+        }
+        arc.energy    = rs.last_frame.moving_energy > rs.last_frame.static_energy
+                      ? rs.last_frame.moving_energy : rs.last_frame.static_energy;
+        arc.dist_cm   = rs.last_frame.detect_dist_cm;
+        arc.config_ok = rs.config_ok;
+        arc.verified  = rs.config_verified;
+
+        screen_main_set_radar_arc(ri, arc);
+    }
 }
 
 // ============================================================

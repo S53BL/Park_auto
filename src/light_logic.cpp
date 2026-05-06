@@ -242,8 +242,13 @@ static void trigger_ssr1_auto(uint32_t fill_speed_ms) {
         // Ne ponavljaj fill animacije pri vsakem radar pulzu!
         s_ssr[1].deadline_ms    = now + timeout_ms;
         s_ssr[2].last_motion_ms = now;
-        LLD("SSR1: timer resetiran → %lu s ostalo",
-            (unsigned long)cfg.timeout_ssr1_s);
+        // Timer reset log samo 1× per 30s — ne za vsak radar event.
+        static uint32_t s_last_reset_log_ms = 0;
+        if ((now - s_last_reset_log_ms) >= 30000) {
+            s_last_reset_log_ms = now;
+            LLD("SSR1: timer aktiven (zadnji reset pred <30s), ostalo=%lu s",
+                (unsigned long)ssr_remaining_s(1));
+        }
         return;
     }
 
@@ -426,7 +431,7 @@ static void on_radar_motion(const Event& e) {
     }
     s_last_trigger_ms = now;
 
-    LLD("RADAR ch%d → enqueue TRIGGER_ON_AUTO (hiter fill, throttle OK)", channel);
+    // Log samo ob prvem prižigu (SSR1 je OFF) — ne pri vsakem timer resetu.
     ssr_cmd_enqueue(SsrCmdType::TRIGGER_ON_AUTO, LIGHT_FADE_FAST_MS);
 }
 
@@ -467,8 +472,16 @@ static void on_button_ssr(const Event& e) {
         LLD("BUTTON_SSR%d ignoriran — disabled", ssr_idx);
         return;
     }
+    // Debounce: touch panel pošlje dvojne evente pri hitrih dotiki.
+    static uint32_t s_last_toggle_ms[5] = {0};
+    uint32_t now_btn = millis();
+    if ((now_btn - s_last_toggle_ms[ssr_idx]) < BUTTON_DEBOUNCE_MS) {
+        LLD("BUTTON_SSR%d ignoriran — debounce (%lu ms)",
+            ssr_idx, (unsigned long)(now_btn - s_last_toggle_ms[ssr_idx]));
+        return;
+    }
+    s_last_toggle_ms[ssr_idx] = now_btn;
     LLI("BUTTON_SSR%d → enqueue BUTTON_TOGGLE", ssr_idx);
-    // Payload = ssr_idx (1-4) — appTask izvede toggle logiko
     ssr_cmd_enqueue(SsrCmdType::BUTTON_TOGGLE, ssr_idx);
 }
 
@@ -487,6 +500,14 @@ static void on_button_ssr_disable(const Event& e) {
         LLW("BUTTON_SSR_DISABLE: neveljaven payload=%lu", (unsigned long)e.payload);
         return;
     }
+    // Debounce za disable — daljši (1000ms) ker je hold event
+    static uint32_t s_last_disable_ms[5] = {0};
+    uint32_t now_dis = millis();
+    if ((now_dis - s_last_disable_ms[ssr_idx]) < 1000) {
+        LLD("BUTTON_SSR_DISABLE%d ignoriran — debounce", ssr_idx);
+        return;
+    }
+    s_last_disable_ms[ssr_idx] = now_dis;
     LLI("BUTTON_SSR_DISABLE SSR%d → enqueue BUTTON_DISABLE", ssr_idx);
     ssr_cmd_enqueue(SsrCmdType::BUTTON_DISABLE, ssr_idx);
 }
@@ -514,8 +535,11 @@ bool light_logic_init() {
     LLD("SSR command queue OK (size=%d)", SSR_CMD_QUEUE_SIZE);
 
     // Inicializiraj SSR runtime stanje — vsi OFF, ni disabled
+    // last_motion_ms = init_ms (ne 0) da anti-forget ne sproži takoj ob
+    // prvem ročnem vklopu brez predhodnih radar eventov.
+    uint32_t init_ms = millis();
     for (uint8_t i = 0; i <= 4; i++) {
-        s_ssr[i] = { false, false, false, 0, 0 };
+        s_ssr[i] = { false, false, false, 0, init_ms };
     }
 
     // Preberi začetno noč/dan stanje iz hal_light
@@ -566,7 +590,11 @@ void light_logic_tick() {
             switch (cmd.type) {
 
                 case SsrCmdType::TRIGGER_ON_AUTO:
-                    LLD("CMD: TRIGGER_ON_AUTO (speed=%lu ms)", (unsigned long)cmd.payload);
+                    // Log samo če SSR1 ni že ON (prižig) — timer reset je tih
+                    if (!s_ssr[1].on) {
+                        LLD("CMD: TRIGGER_ON_AUTO → prižig SSR1 (speed=%lu ms)",
+                            (unsigned long)cmd.payload);
+                    }
                     trigger_ssr1_auto(cmd.payload);
                     break;
 

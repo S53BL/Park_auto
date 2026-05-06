@@ -46,16 +46,40 @@ bool sensor_mgr_init() {
     }
 
     SMGI("hal_radar_init...");
+    // Persistence filter stanje — per kanal
+    static uint8_t  s_persist_count[4]    = {0};
+    static uint8_t  s_persist_det[4]      = {0};
+    static uint32_t s_persist_clear_ms[4] = {0};
+
     bool radar_ok = hal_radar_init([](const RadarFrame& f) {
-        // Objavi radar event — subscribers (light_logic, alarm) reagirajo
-        // Payload: zakodiramo channel (0-3) in motion flag v uint32_t
-        //   bit 0-7:  channel index (f.channel)
-        //   bit 8:    motion detected (f.motion)
-        //   bit 9:    stationary detected (f.stationary)
-        uint32_t payload = ((uint32_t)f.sensor_id & 0xFF)
-                         | ((f.detection & 1) ? (1u << 8) : 0u)   // bit 8: premik
-                         | ((f.detection & 2) ? (1u << 9) : 0u);  // bit 9: statično
-        EventBus::publish(EventType::RADAR_MOTION, payload);
+        uint8_t ch = (uint8_t)f.sensor_id;
+        if (ch >= 4) return;
+
+        const Config cfg = config_get();
+        uint8_t persist_n = cfg.radar_persistence_n;
+
+        if (f.detection == 0) {
+            if (s_persist_count[ch] > 0) {
+                s_persist_count[ch] = 0;
+                s_persist_clear_ms[ch] = millis();
+                uint32_t payload = (uint32_t)ch;
+                EventBus::publish(EventType::RADAR_MOTION, payload);
+            }
+            return;
+        }
+
+        s_persist_count[ch]++;
+        s_persist_det[ch] = f.detection;
+
+        if (persist_n == 0 || s_persist_count[ch] >= persist_n) {
+            bool motion     = (f.detection == 1 || f.detection == 3);
+            bool stationary = (f.detection == 2 || f.detection == 3);
+            if (stationary && !motion && cfg.radar_static_sens[ch] == 0) return;
+            uint32_t payload = ((uint32_t)ch & 0xFF)
+                             | (motion     ? (1u << 8) : 0u)
+                             | (stationary ? (1u << 9) : 0u);
+            EventBus::publish(EventType::RADAR_MOTION, payload);
+        }
     });
     if (!radar_ok) {
         SMGW("hal_radar_init NAPAKA — sistem dela naprej brez radarja");

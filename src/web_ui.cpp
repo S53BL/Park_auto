@@ -28,6 +28,7 @@
 #include "wifi_manager.h"
 #include "config.h"
 #include "config_mgr.h"
+#include "hal_radar.h"
 
 #include <LittleFS.h>
 #include <ESPAsyncWebServer.h>
@@ -372,6 +373,116 @@ static void _handleConfigReset(AsyncWebServerRequest* req) {
 }
 
 // ============================================================
+// SECTION 3b — HANDLER-JI: /api/radar
+// ============================================================
+
+static void _handleRadarGet(AsyncWebServerRequest* req) {
+    _stats.req_total++;
+    _stats.req_api++;
+    JsonDocument doc;
+    JsonArray sensors = doc["sensors"].to<JsonArray>();
+
+    const char* names[4] = {"Vhod","Cesta_L","Cesta_D","Garaza"};
+    const Config cfg = config_get();
+
+    for (uint8_t i = 0; i < 4; i++) {
+        const RadarSensorStatus& rs = hal_radar_get_status((RadarSensorId)i);
+        JsonObject s = sensors.add<JsonObject>();
+        s["id"]              = i;
+        s["name"]            = names[i];
+        s["active"]          = rs.active;
+        s["config_ok"]       = rs.config_ok;
+        s["config_verified"] = rs.config_verified;
+        s["detection"]       = rs.last_frame.detection;
+        s["dist_cm"]         = rs.last_frame.detect_dist_cm;
+        s["move_energy"]     = rs.last_frame.moving_energy;
+        s["static_energy"]   = rs.last_frame.static_energy;
+        s["frames_ok"]       = rs.frames_ok;
+        s["errors"]          = rs.parse_errors + rs.i2c_errors;
+        s["max_dist"]        = rs.configured_max_dist;
+        s["move_sens"]       = rs.configured_move_sens;
+        s["static_sens"]     = rs.configured_static_sens;
+        s["unmanned_s"]      = rs.configured_unmanned_s;
+        s["cfg_max_dist"]    = cfg.radar_max_dist[i];
+        s["cfg_move_sens"]   = cfg.radar_move_sens[i];
+        s["cfg_static_sens"] = cfg.radar_static_sens[i];
+        s["cfg_unmanned_s"]  = cfg.radar_unmanned_s[i];
+    }
+    doc["persistence_n"] = cfg.radar_persistence_n;
+    _sendJson(req, 200, doc);
+}
+
+static void _handleRadarConfigBody(AsyncWebServerRequest* req, uint8_t* data,
+                                   size_t len, size_t index, size_t total) {
+    _stats.req_total++;
+    _stats.req_api++;
+    if (index != 0) return;  // samo prvi chunk (JSON je kratek)
+
+    JsonDocument doc;
+    if (deserializeJson(doc, data, len)) {
+        _sendError(req, 400, "neveljaven JSON");
+        return;
+    }
+
+    // Globalni parameter
+    if (doc["persistence_n"].is<int>()) {
+        uint8_t pn = (uint8_t)doc["persistence_n"].as<int>();
+        if (pn > 10) { _sendError(req, 400, "persistence_n izven obsega"); return; }
+        Config cfg = config_get();
+        cfg.radar_persistence_n = pn;
+        config_set(cfg);
+        config_save();
+        JsonDocument resp;
+        resp["ok"] = true;
+        resp["persistence_n"] = pn;
+        _sendJson(req, 200, resp);
+        return;
+    }
+
+    // Per-senzor konfiguracija
+    if (!doc["sensor"].is<int>()) {
+        _sendError(req, 400, "sensor manjka");
+        return;
+    }
+    uint8_t sid = (uint8_t)doc["sensor"].as<int>();
+    if (sid >= 4) { _sendError(req, 400, "sensor izven obsega"); return; }
+
+    Config cfg = config_get();
+    if (doc["max_dist"].is<int>())    cfg.radar_max_dist[sid]    = (uint8_t)doc["max_dist"].as<int>();
+    if (doc["move_sens"].is<int>())   cfg.radar_move_sens[sid]   = (uint8_t)doc["move_sens"].as<int>();
+    if (doc["static_sens"].is<int>()) cfg.radar_static_sens[sid] = (uint8_t)doc["static_sens"].as<int>();
+    if (doc["unmanned_s"].is<int>())  cfg.radar_unmanned_s[sid]  = (uint16_t)doc["unmanned_s"].as<int>();
+
+    if (cfg.radar_max_dist[sid] > 8 || cfg.radar_move_sens[sid] > 100 ||
+        cfg.radar_static_sens[sid] > 100) {
+        _sendError(req, 400, "vrednost izven obsega");
+        return;
+    }
+
+    config_set(cfg);
+    config_save();
+
+    bool reconfig_ok = hal_radar_reconfigure(
+        (RadarSensorId)sid,
+        cfg.radar_max_dist[sid],
+        cfg.radar_move_sens[sid],
+        cfg.radar_static_sens[sid],
+        cfg.radar_unmanned_s[sid]
+    );
+
+    const RadarSensorStatus& rs = hal_radar_get_status((RadarSensorId)sid);
+    JsonDocument resp;
+    resp["ok"]              = true;
+    resp["sensor"]          = sid;
+    resp["config_ok"]       = rs.config_ok;
+    resp["config_verified"] = rs.config_verified;
+    if (!reconfig_ok) {
+        resp["warn"] = "konfiguracija na radar ni uspela — bo poskusil ob restartu";
+    }
+    _sendJson(req, 200, resp);
+}
+
+// ============================================================
 // SECTION 3 — HANDLER-JI: /api/vehicles  (STUB — Faza 3)
 // ============================================================
 
@@ -665,6 +776,14 @@ static void _registerApiHandlers() {
         _handleConfigPost                   // onBody
     );
     _server.on("/api/config/reset", HTTP_POST, _handleConfigReset);
+
+    // --- Radar ---
+    _server.on("/api/radar",        HTTP_GET,  _handleRadarGet);
+    _server.on("/api/radar/config", HTTP_POST,
+        [](AsyncWebServerRequest* req) {},
+        nullptr,
+        _handleRadarConfigBody
+    );
 
     // --- Vozila (stub) ---
     _server.on("/api/vehicles", HTTP_GET, _handleVehiclesGet);

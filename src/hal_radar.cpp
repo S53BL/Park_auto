@@ -9,6 +9,7 @@
 #include "hal_radar.h"
 #include "bsp.h"
 #include "config.h"
+#include "config_mgr.h"
 #include "logger.h"
 #include <Wire.h>
 #include <esp_task_wdt.h>
@@ -435,6 +436,186 @@ static uint8_t sc16_read_fifo(uint8_t addr, uint8_t ch, uint8_t* buf, uint8_t ma
 static bool sc16_ping(uint8_t addr) {
     Wire1.beginTransmission(addr);
     return (Wire1.endTransmission() == 0);
+}
+
+// Pošlji N bajtov prek SC16IS752 TX FIFO (THR register).
+// Wire1 mutex mora biti pridobljen pred klicem.
+static bool sc16_write_uart(uint8_t addr, uint8_t ch,
+                            const uint8_t* data, uint8_t len) {
+    if (len == 0 || len > 64) return false;
+    uint8_t txlvl = 0;
+    sc16_read(addr, SC16_REG(REG_TXLVL, ch), txlvl);
+    if (txlvl < len) {
+        RADW("sc16_write_uart: TX FIFO premalo prostora (%d < %d)", txlvl, len);
+        return false;
+    }
+    Wire1.beginTransmission(addr);
+    Wire1.write(SC16_REG(REG_RHR, ch));  // REG_RHR = REG_THR pri pisanju
+    for (uint8_t i = 0; i < len; i++) Wire1.write(data[i]);
+    return (Wire1.endTransmission() == 0);
+}
+
+// Preberi odgovor iz LD2410C (čakaj max timeout_ms).
+// Wire1 mutex mora biti pridobljen pred klicem.
+static uint8_t sc16_read_response(uint8_t addr, uint8_t ch,
+                                   uint8_t* buf, uint8_t max_len,
+                                   uint32_t timeout_ms) {
+    uint32_t start = millis();
+    uint8_t  pos   = 0;
+    while ((millis() - start) < timeout_ms && pos < max_len) {
+        uint8_t rxlvl = 0;
+        sc16_read(addr, SC16_REG(REG_RXLVL, ch), rxlvl);
+        if (rxlvl > 0) {
+            uint8_t n = sc16_read_fifo(addr, ch, buf + pos, max_len - pos);
+            pos += n;
+            // Preveri ali imamo cel odgovor (footer 04 03 02 01)
+            if (pos >= 4) {
+                static const uint8_t CFG_FOOTER[4] = {0x04,0x03,0x02,0x01};
+                if (memcmp(buf + pos - 4, CFG_FOOTER, 4) == 0) break;
+            }
+        } else {
+            vTaskDelay(pdMS_TO_TICKS(5));
+        }
+    }
+    return pos;
+}
+
+// ============================================================
+// LD2410C KONFIGURACIJSKI UKAZI
+// Protokol: header FD FC FB FA | len LE | cmd+data | footer 04 03 02 01
+// Odziv:    header FD FC FB FA | len LE | cmd+0x01 | status 00 00 | data | footer
+// Wire1 mutex mora biti pridobljen pred klicem vseh ld2410_* funkcij.
+// ============================================================
+
+static const uint8_t LD2410_CFG_HEADER[4] = {0xFD, 0xFC, 0xFB, 0xFA};
+static const uint8_t LD2410_CFG_FOOTER[4] = {0x04, 0x03, 0x02, 0x01};
+
+// Sestavi in pošlji LD2410C konfiguracijski ukaz, preberi odgovor.
+// cmd_data: ukaz + data brez header/len/footer. Vrne true če odgovor prispel (n >= 8).
+static bool ld2410_send_cmd(uint8_t chip_addr, uint8_t uart_ch,
+                            const uint8_t* cmd_data, uint8_t cmd_len,
+                            uint8_t* resp_buf, uint8_t resp_max,
+                            uint32_t timeout_ms = 200) {
+    uint8_t pkt[80];
+    uint8_t pos = 0;
+    memcpy(pkt + pos, LD2410_CFG_HEADER, 4); pos += 4;
+    pkt[pos++] = cmd_len;
+    pkt[pos++] = 0x00;
+    memcpy(pkt + pos, cmd_data, cmd_len); pos += cmd_len;
+    memcpy(pkt + pos, LD2410_CFG_FOOTER, 4); pos += 4;
+
+    if (!sc16_write_uart(chip_addr, uart_ch, pkt, pos)) return false;
+    if (resp_buf && resp_max > 0) {
+        uint8_t n = sc16_read_response(chip_addr, uart_ch, resp_buf, resp_max, timeout_ms);
+        return (n >= 8);
+    }
+    return true;
+}
+
+// Odpri config mode — mora biti prvi ukaz pred vsemi nastavitvami.
+static bool ld2410_open_config(uint8_t chip_addr, uint8_t uart_ch) {
+    const uint8_t cmd[] = {0xFF, 0x00, 0x01, 0x00};
+    uint8_t resp[20];
+    bool ok = ld2410_send_cmd(chip_addr, uart_ch, cmd, 4, resp, sizeof(resp));
+    if (!ok) {
+        RADW("ld2410 0x%02X ch%c: open_config NAPAKA", chip_addr, uart_ch==0?'A':'B');
+        return false;
+    }
+    bool ack_ok = (resp[6] == 0x00 && resp[7] == 0x00);
+    if (!ack_ok) {
+        RADW("ld2410 0x%02X ch%c: open_config ACK napaka (0x%02X 0x%02X)",
+             chip_addr, uart_ch==0?'A':'B', resp[6], resp[7]);
+    }
+    return ack_ok;
+}
+
+// Restart + zapri config mode — uveljavi nastavitve v flash.
+static bool ld2410_close_config(uint8_t chip_addr, uint8_t uart_ch) {
+    const uint8_t cmd_rst[] = {0xA3, 0x00};
+    ld2410_send_cmd(chip_addr, uart_ch, cmd_rst, 2, nullptr, 0);
+    vTaskDelay(pdMS_TO_TICKS(100));
+    const uint8_t cmd_end[] = {0xFE, 0x00};
+    uint8_t resp[20];
+    return ld2410_send_cmd(chip_addr, uart_ch, cmd_end, 2, resp, sizeof(resp));
+}
+
+// Nastavi max razdaljo in občutljivost (per-gate sensitivity via cmd 0x64).
+static bool ld2410_set_params(uint8_t chip_addr, uint8_t uart_ch,
+                              uint8_t max_dist,
+                              uint8_t move_sens,
+                              uint8_t static_sens) {
+    // Ukaz 0x60: nastavi max gate
+    uint8_t cmd[14];
+    cmd[0]  = 0x60; cmd[1]  = 0x00;
+    cmd[2]  = 0x00; cmd[3]  = 0x00; cmd[4]  = 0x00; cmd[5]  = 0x00;
+    cmd[6]  = max_dist;
+    cmd[7]  = 0x00; cmd[8]  = 0x00; cmd[9]  = 0x00;
+    cmd[10] = max_dist;
+    cmd[11] = 0x00; cmd[12] = 0x00; cmd[13] = 0x00;
+    uint8_t resp[20];
+    if (!ld2410_send_cmd(chip_addr, uart_ch, cmd, 14, resp, sizeof(resp))) return false;
+
+    // Ukaz 0x64: nastavi sensitivity za vsak gate
+    for (uint8_t gate = 0; gate <= max_dist && gate <= 8; gate++) {
+        uint8_t sens_cmd[8];
+        sens_cmd[0] = 0x64; sens_cmd[1] = 0x00;
+        sens_cmd[2] = gate; sens_cmd[3] = 0x00;
+        sens_cmd[4] = move_sens;   sens_cmd[5] = 0x00;
+        sens_cmd[6] = static_sens; sens_cmd[7] = 0x00;
+        ld2410_send_cmd(chip_addr, uart_ch, sens_cmd, 8, resp, sizeof(resp));
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    return true;
+}
+
+// Nastavi unmanned duration (čas po katerem radar preklopi v "ni nikogar").
+static bool ld2410_set_unmanned(uint8_t chip_addr, uint8_t uart_ch,
+                                uint16_t unmanned_s) {
+    uint8_t cmd[6];
+    cmd[0] = 0x80; cmd[1] = 0x00;
+    cmd[2] = (uint8_t)(unmanned_s & 0xFF);
+    cmd[3] = (uint8_t)(unmanned_s >> 8);
+    cmd[4] = 0x00; cmd[5] = 0x00;
+    uint8_t resp[20];
+    return ld2410_send_cmd(chip_addr, uart_ch, cmd, 6, resp, sizeof(resp));
+}
+
+// Preberi parametre za verifikacijo (cmd 0x61). Vrne true če se ujemajo.
+static bool ld2410_verify_params(uint8_t chip_addr, uint8_t uart_ch,
+                                 uint8_t expected_max_dist,
+                                 uint8_t expected_unmanned_s) {
+    // Pošlji query ročno da dobimo dejanski n za validacijo dolžine
+    uint8_t pkt[10];
+    uint8_t pos = 0;
+    memcpy(pkt + pos, LD2410_CFG_HEADER, 4); pos += 4;
+    pkt[pos++] = 2; pkt[pos++] = 0x00;
+    pkt[pos++] = 0x61; pkt[pos++] = 0x00;
+    memcpy(pkt + pos, LD2410_CFG_FOOTER, 4); pos += 4;
+
+    if (!sc16_write_uart(chip_addr, uart_ch, pkt, pos)) {
+        RADW("ld2410 0x%02X ch%c: verify send NAPAKA", chip_addr, uart_ch==0?'A':'B');
+        return false;
+    }
+    uint8_t resp[40];
+    uint8_t n = sc16_read_response(chip_addr, uart_ch, resp, sizeof(resp), 300);
+    if (n < 14) {
+        RADW("ld2410 0x%02X ch%c: verify odgovor prekratek (%d B)",
+             chip_addr, uart_ch==0?'A':'B', n);
+        return false;
+    }
+    // resp[8]=max_move_gate, resp[10]=max_static_gate, resp[12-13]=unmanned LE
+    uint8_t  read_max_dist = resp[8];
+    uint16_t read_unmanned = (uint16_t)resp[12] | ((uint16_t)resp[13] << 8);
+    bool ok = (read_max_dist == expected_max_dist) &&
+              (read_unmanned == expected_unmanned_s);
+    if (!ok) {
+        RADW("ld2410 0x%02X ch%c: verify NAPAKA — "
+             "max_dist exp=%d got=%d, unmanned exp=%d got=%d",
+             chip_addr, uart_ch==0?'A':'B',
+             expected_max_dist, read_max_dist,
+             expected_unmanned_s, read_unmanned);
+    }
+    return ok;
 }
 
 // ============================================================
@@ -896,6 +1077,87 @@ static void radarTask(void* pvParams) {
         (unsigned long)s_radar.ch[2].status.boot_parse_errors,
         (unsigned long)s_radar.ch[3].status.boot_parse_errors);
 
+    // ============================================================
+    // ZAGОНSKA KONFIGURACIJA LD2410C RADARJEV
+    // Sekvencialno per senzor: odpri config → nastavi → verify → zapri.
+    // Med config mode ta senzor ne pošilja reporting frames (~200ms).
+    // Skupni čas: ~4 × 300ms = ~1.2s — sprejemljivo ob zagonu.
+    // ============================================================
+    {
+        RADI("=== Radar konfiguracija ob zagonu ===");
+        const Config cfg = config_get();
+        const char* sensor_names[4] = {"Vhod","Cesta_L","Cesta_D","Garaza"};
+
+        for (uint8_t i = 0; i < RADAR_SENSOR_COUNT; i++) {
+            RadarChannel& rc = s_radar.ch[i];
+            if (!rc.status.active) {
+                RADW("  [%s]: preskočen — neaktiven", sensor_names[i]);
+                rc.status.config_ok = false;
+                continue;
+            }
+
+            uint8_t  chip_addr = rc.chip_addr;
+            uint8_t  uart_ch   = rc.uart_ch;
+            uint8_t  max_dist  = cfg.radar_max_dist[i];
+            uint8_t  move_sens = cfg.radar_move_sens[i];
+            uint8_t  stat_sens = cfg.radar_static_sens[i];
+            uint16_t unmanned  = cfg.radar_unmanned_s[i];
+
+            RADI("  [%s]: konfiguriram (max_dist=%d, move=%d, static=%d, unmanned=%ds)",
+                 sensor_names[i], max_dist, move_sens, stat_sens, unmanned);
+
+            SemaphoreHandle_t mtx = bsp_get_wire1_mutex();
+            if (xSemaphoreTake(mtx, pdMS_TO_TICKS(500)) != pdTRUE) {
+                RADW("  [%s]: Wire1 mutex timeout — preskočen", sensor_names[i]);
+                rc.status.config_ok = false;
+                continue;
+            }
+
+            bool ok = false;
+            do {
+                if (!ld2410_open_config(chip_addr, uart_ch)) break;
+                vTaskDelay(pdMS_TO_TICKS(50));
+                if (!ld2410_set_params(chip_addr, uart_ch,
+                                       max_dist, move_sens, stat_sens)) break;
+                vTaskDelay(pdMS_TO_TICKS(50));
+                if (!ld2410_set_unmanned(chip_addr, uart_ch, unmanned)) break;
+                vTaskDelay(pdMS_TO_TICKS(50));
+                ok = true;
+            } while (false);
+
+            bool verified = false;
+            if (ok) {
+                verified = ld2410_verify_params(chip_addr, uart_ch,
+                                                max_dist, (uint8_t)unmanned);
+                if (!verified) {
+                    RADW("  [%s]: verify NAPAKA — parametri morda niso bili sprejeti",
+                         sensor_names[i]);
+                }
+            }
+
+            ld2410_close_config(chip_addr, uart_ch);
+            vTaskDelay(pdMS_TO_TICKS(150));
+
+            xSemaphoreGive(mtx);
+
+            rc.status.config_ok              = ok;
+            rc.status.config_verified        = verified;
+            rc.status.config_ms              = millis();
+            rc.status.configured_max_dist    = max_dist;
+            rc.status.configured_move_sens   = move_sens;
+            rc.status.configured_static_sens = stat_sens;
+            rc.status.configured_unmanned_s  = unmanned;
+
+            RADI("  [%s]: konfiguracija %s%s",
+                 sensor_names[i],
+                 ok ? "OK" : "NAPAKA",
+                 verified ? " (verificirano)" : " (verify ni uspel)");
+
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+        RADI("=== Radar konfiguracija končana ===");
+    }
+
     static const char* names[4] = {"Vhod", "Cesta_L", "Cesta_D", "Garaza"};
     uint32_t last_status_ms = 0;
     bool     first_status   = true;
@@ -1261,4 +1523,60 @@ void hal_radar_recovery_check() {
             RADD("Recovery check (10min): IO%d HIGH — chip%d OK", irq_pin, ci + 1);
         }
     }
+}
+
+bool hal_radar_reconfigure(RadarSensorId id,
+                           uint8_t max_dist,
+                           uint8_t move_sens,
+                           uint8_t static_sens,
+                           uint16_t unmanned_s) {
+    if (!s_radar.initialized) return false;
+    RadarChannel& rc = s_radar.ch[(int)id];
+    if (!rc.status.active) return false;
+
+    const char* names[4] = {"Vhod","Cesta_L","Cesta_D","Garaza"};
+    RADI("hal_radar_reconfigure [%s]: max=%d move=%d static=%d unmanned=%d",
+         names[(int)id], max_dist, move_sens, static_sens, unmanned_s);
+
+    SemaphoreHandle_t mtx = bsp_get_wire1_mutex();
+    if (xSemaphoreTake(mtx, pdMS_TO_TICKS(500)) != pdTRUE) {
+        RADW("hal_radar_reconfigure: Wire1 mutex timeout");
+        return false;
+    }
+
+    bool ok = false;
+    do {
+        if (!ld2410_open_config(rc.chip_addr, rc.uart_ch)) break;
+        vTaskDelay(pdMS_TO_TICKS(50));
+        if (!ld2410_set_params(rc.chip_addr, rc.uart_ch,
+                               max_dist, move_sens, static_sens)) break;
+        vTaskDelay(pdMS_TO_TICKS(50));
+        if (!ld2410_set_unmanned(rc.chip_addr, rc.uart_ch, unmanned_s)) break;
+        vTaskDelay(pdMS_TO_TICKS(50));
+        ok = true;
+    } while (false);
+
+    bool verified = false;
+    if (ok) {
+        verified = ld2410_verify_params(rc.chip_addr, rc.uart_ch,
+                                        max_dist, (uint8_t)unmanned_s);
+    }
+    ld2410_close_config(rc.chip_addr, rc.uart_ch);
+    vTaskDelay(pdMS_TO_TICKS(150));
+
+    xSemaphoreGive(mtx);
+
+    rc.status.config_ok              = ok;
+    rc.status.config_verified        = verified;
+    rc.status.config_ms              = millis();
+    rc.status.configured_max_dist    = max_dist;
+    rc.status.configured_move_sens   = move_sens;
+    rc.status.configured_static_sens = static_sens;
+    rc.status.configured_unmanned_s  = unmanned_s;
+
+    RADI("hal_radar_reconfigure [%s]: %s%s",
+         names[(int)id],
+         ok ? "OK" : "NAPAKA",
+         verified ? " (verificirano)" : "");
+    return ok && verified;
 }

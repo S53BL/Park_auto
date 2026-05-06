@@ -111,6 +111,14 @@ typedef struct {
     uint32_t last_publish_ms;   // millis() zadnjega callback klica (za publish interval throttle)
     uint32_t oe_count;          // OE! od zadnjega log izpisa (za throttle)
     uint32_t last_oe_log_ms;    // millis() zadnjega OE! log izpisa
+    // Konfiguracijski status — posodobljen ob zagonu in runtime reconfig
+    bool     config_ok;             // true = zadnja konfiguracija uspešna
+    bool     config_verified;       // true = verify je potrdil parametre
+    uint32_t config_ms;             // millis() zadnje konfiguracije
+    uint8_t  configured_max_dist;   // dejansko konfigurirani parametri
+    uint8_t  configured_move_sens;
+    uint8_t  configured_static_sens;
+    uint16_t configured_unmanned_s;
 } RadarSensorStatus;
 
 // ============================================================
@@ -155,3 +163,13 @@ void hal_radar_log_stats();
 // Preveri IRQ pine in počisti FIFO če je pin ostal LOW.
 // NE kliči iz radarTask — povzroča mutex konflikte.
 void hal_radar_recovery_check();
+
+// Runtime rekonfiguracija enega senzorja (~300ms, Wire1 mutex).
+// Med rekonfigracijo ta senzor ne pošilja reporting frames.
+// Kliči iz web_ui handlera ob POST /api/radar/config.
+// Vrne true če je konfiguracija in verify uspela.
+bool hal_radar_reconfigure(RadarSensorId id,
+                            uint8_t max_dist,
+                            uint8_t move_sens,
+                            uint8_t static_sens,
+                            uint16_t unmanned_s);
