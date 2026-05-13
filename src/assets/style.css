@@ -387,18 +387,39 @@ html, body {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 10px 12px;
-  height: 420px;
+  height: 460px;
   overflow-y: auto;
   overflow-x: hidden;
   scrollbar-width: thin;
   scrollbar-color: var(--border2) transparent;
 }
-#log-output .ll-error { color: var(--red); }
-#log-output .ll-warn  { color: var(--amber); }
-#log-output .ll-info  { color: var(--text); }
-#log-output .ll-debug { color: var(--text3); }
-#log-output .ll-ts    { color: var(--text3); margin-right: 4px; }
-#log-output .ll-mod   { color: var(--cyan); margin-right: 4px; }
+
+/* ll-* razredi — skupni za #log-output in .log-output-sm (SD preview) */
+.ll        { line-height: 1.6; padding: 0 2px; word-break: break-all; }
+.ll-error  { color: var(--red); }
+.ll-warn   { color: var(--amber); }
+.ll-info   { color: var(--text); }
+.ll-debug  { color: var(--text3); }
+.ll-ts     { color: var(--text3); }
+.ll-mod    { color: var(--cyan); }
+.ll-empty  { color: var(--text3); font-family: var(--font);
+             font-size: 11px; text-align: center; padding: 20px; }
+
+/* SD log preview window */
+.log-output-sm {
+  font-family: var(--font);
+  font-size: 11px;
+  line-height: 1.6;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  height: 320px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border2) transparent;
+}
 
 /* --- LOG TOOLBAR --- */
 .log-toolbar {

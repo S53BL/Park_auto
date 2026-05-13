@@ -5,8 +5,40 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Parking ESP32</title>
 <link rel="stylesheet" href="/style.css">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=DM+Sans:wght@400;500&display=swap" rel="stylesheet">
+<!-- BREZ Google Fonts CDN — sistem mora delovati brez interneta -->
+<!-- JetBrains Mono in DM Sans se naložita iz /fonts/ če so datoteke prisotne,  -->
+<!-- sicer pa pademo na lokalne system monospace/sans-serif fallback-e.          -->
+<!-- Agent: fonts/ mapa je že na Box-u (381625735026) — preveri vsebino.        -->
+<style>
+  @font-face {
+    font-family: 'JetBrains Mono';
+    src: url('/fonts/JetBrainsMono-Regular.woff2') format('woff2');
+    font-weight: 400;
+    font-style: normal;
+    font-display: swap;
+  }
+  @font-face {
+    font-family: 'JetBrains Mono';
+    src: url('/fonts/JetBrainsMono-Bold.woff2') format('woff2');
+    font-weight: 700;
+    font-style: normal;
+    font-display: swap;
+  }
+  @font-face {
+    font-family: 'DM Sans';
+    src: url('/fonts/DMSans-Regular.woff2') format('woff2');
+    font-weight: 400;
+    font-style: normal;
+    font-display: swap;
+  }
+  @font-face {
+    font-family: 'DM Sans';
+    src: url('/fonts/DMSans-Medium.woff2') format('woff2');
+    font-weight: 500;
+    font-style: normal;
+    font-display: swap;
+  }
+</style>
 </head>
 <body>
 
@@ -108,7 +140,6 @@ function nav(id) {
 }
 
 // ── Skupni polling registrar ─────────────────────────────
-// Vsaka stran pokliče registerPoller(id, fn, intervalMs)
 window.registerPoller = function(pageId, fn, ms) {
   if (_timers[pageId]) clearInterval(_timers[pageId]);
   fn(); // takoj ob aktivaciji
@@ -190,9 +221,9 @@ window.fmt = {
     if (b >= 1024)    return (b/1024).toFixed(0) + ' KB';
     return b + ' B';
   },
-  countdown(ms) {
-    if (!ms || ms <= 0) return '--:--';
-    const s = Math.ceil(ms / 1000);
+  countdown(s) {
+    // Sprejema sekunde (ne ms!) — skladno z API ki vrača countdown_s
+    if (!s || s <= 0) return '--:--';
     return String(Math.floor(s/60)).padStart(2,'0') + ':' + String(s%60).padStart(2,'0');
   }
 };

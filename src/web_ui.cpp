@@ -29,6 +29,9 @@
 #include "config.h"
 #include "config_mgr.h"
 #include "hal_radar.h"
+#include "hal_gpio.h"
+#include "hal_tof.h"
+#include "hal_light.h"
 
 #include <LittleFS.h>
 #include <ESPAsyncWebServer.h>
@@ -36,6 +39,7 @@
 #include <esp_ota_ops.h>
 #include <Update.h>
 #include <freertos/semphr.h>
+#include <esp_heap_caps.h>
 
 // ============================================================
 // SECTION 1 — GLOBALNE SPREMENLJIVKE
@@ -146,18 +150,110 @@ static void _handleStatus(AsyncWebServerRequest* req) {
     wu["littlefs_ok"]  = _littlefs_ok;
     wu["assets_ok"]    = _assets_ok;
 
-    // --- Stubs (Faza 3) ---
-    // SSR, senzorji, parking — prazni array-i da frontend ne crashne
-    doc["ssr"].to<JsonArray>();
-    doc["tof"].to<JsonArray>();
-    doc["radar"].to<JsonArray>();
-    doc["cells"].to<JsonArray>();
-    doc["parking"].to<JsonArray>();
-    doc["is_night"]   = false;
-    doc["lux"]        = 0;
-    doc["party_mode"] = false;
-    doc["ramp"]       = "unknown";
-    doc["door"]       = "unknown";
+    // --- GPIO stanje (MCP23017) ---
+    GpioState gpio = hal_gpio_get_state();
+
+    // --- SSR stanje (4 SSR-ji, indeks 1–4) ---
+    JsonArray ssrArr = doc["ssr"].to<JsonArray>();
+    for (uint8_t i = 1; i <= 4; i++) {
+        JsonObject s = ssrArr.add<JsonObject>();
+        s["id"]         = i;
+        s["on"]         = gpio.ssr[i];
+        s["countdown_s"]= 0;   // TODO Blok D: light_logic_get_state().ssr_countdown_s[i]
+    }
+
+    // --- TOF senzorji (6 kanalov: H_A, P1_A, P2_A, H_B, P1_B, P2_B) ---
+    TofDiagnostics tofDiag = hal_tof_getDiagnostics();
+    const char* tofNames[6] = {"H_A", "P1_A", "P2_A", "H_B", "P1_B", "P2_B"};
+    JsonArray tofArr = doc["tof"].to<JsonArray>();
+    for (uint8_t i = 0; i < 6; i++) {
+        JsonObject t = tofArr.add<JsonObject>();
+        t["id"]      = i;
+        t["name"]    = tofNames[i];
+        t["ok"]      = tofDiag.sensor_ok[i];
+        t["dist_mm"] = tofDiag.sensor_ok[i] ? tofDiag.last_mm[i] : TOF_ERR;
+        t["errors"]  = tofDiag.error_count[i];
+    }
+
+    // --- Radar senzorji (4 LD2410C) ---
+    const char* radarNames[4] = {"Vhod", "Cesta_L", "Cesta_D", "Garaza"};
+    // detection: 0=nič, 1=premik, 2=statično, 3=oboje
+    const char* detectionStr[4] = {"absent", "moving", "static", "both"};
+    JsonArray radarArr = doc["radar"].to<JsonArray>();
+    for (uint8_t i = 0; i < RADAR_SENSOR_COUNT; i++) {
+        const RadarSensorStatus& rs = hal_radar_get_status((RadarSensorId)i);
+        JsonObject r = radarArr.add<JsonObject>();
+        r["id"]            = i;
+        r["name"]          = radarNames[i];
+        r["active"]        = rs.active;
+        uint8_t det = rs.last_frame.detection;
+        r["detection"]     = det < 4 ? detectionStr[det] : "unknown";
+        r["moving_dist_cm"]= rs.last_frame.moving_dist_cm;
+        r["moving_energy"] = rs.last_frame.moving_energy;
+        r["static_dist_cm"]= rs.last_frame.static_dist_cm;
+        r["static_energy"] = rs.last_frame.static_energy;
+        r["last_frame_ms"] = rs.last_frame_ms;
+    }
+
+    // --- Fotocelice ---
+    JsonArray cellsArr = doc["cells"].to<JsonArray>();
+    {
+        JsonObject c1 = cellsArr.add<JsonObject>();
+        c1["id"]       = 1;
+        c1["name"]     = "zunanja";
+        c1["broken"]   = gpio.celica1;  // true = prekinjena
+
+        JsonObject c2 = cellsArr.add<JsonObject>();
+        c2["id"]       = 2;
+        c2["name"]     = "notranja";
+        c2["broken"]   = gpio.celica2;
+    }
+
+    // --- Rampa ---
+    // rampagor: true = rampa dvignjena
+    // rampaluc: true = rampa se premika (retriggerable 2000ms timeout)
+    if (gpio.rampaluc) {
+        doc["ramp"] = "moving";
+    } else if (gpio.rampagor) {
+        doc["ramp"] = "up";
+    } else {
+        doc["ramp"] = "down";
+    }
+
+    // --- Vrata ---
+    doc["door"] = gpio.vrataod ? "open" : "closed";
+
+    // --- Svetloba ---
+    doc["is_night"]   = hal_light_get_is_night();
+    doc["lux"]        = hal_light_get_lux();
+
+    // --- Party mode ---
+    doc["party_mode"] = false;   // TODO Blok C: led_mgr_is_party_mode()
+
+    // --- Parkirišče (TOF faza + vehicle_recog placeholder) ---
+    JsonArray parkArr = doc["parking"].to<JsonArray>();
+    const char* phaseStr[4] = {"IDLE", "DETECT", "SCANNING", "DTW_WAIT"};
+    for (uint8_t p = 0; p < 2; p++) {
+        JsonObject pk = parkArr.add<JsonObject>();
+        pk["place"]    = (p == 0) ? "A" : "B";
+        pk["phase"]    = (uint8_t)tofDiag.current_phase;
+        pk["phase_str"]= phaseStr[(uint8_t)tofDiag.current_phase];
+        pk["active"]   = ((uint8_t)tofDiag.active_place == p &&
+                          tofDiag.current_phase != TOF_PHASE_IDLE);
+        pk["occupied"] = false;              // TODO Blok F: vehicle_recog_identify()
+        pk["vehicle"]  = "";                 // TODO Blok F: vehicle name
+        pk["dtw_dist"] = 0.0f;              // TODO Blok F: DTW razdalja
+        pk["profile_pts"] = (p == 0) ? (uint8_t)tofDiag.profile_pts : 0;
+    }
+
+    // --- Sistemski podatki (RAM, PSRAM, config mgr) ---
+    JsonObject sysObj = doc["system"].to<JsonObject>();
+    sysObj["free_heap"]      = (uint32_t)esp_get_free_heap_size();
+    sysObj["min_free_heap"]  = (uint32_t)esp_get_minimum_free_heap_size();
+    sysObj["free_psram"]     = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    sysObj["min_free_psram"] = (uint32_t)heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM);
+    sysObj["config_ok"]      = config_mgr_ok();
+    sysObj["config_replaced"]= (uint8_t)config_mgr_replaced_count();
 
     _sendJson(req, 200, doc);
 }

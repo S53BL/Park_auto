@@ -1,7 +1,16 @@
 // ============================================================
-// status.js — Stran: Status
+// status.js — Stran: Status  (v2 — usklajen z /api/status E3)
 // Polling /api/status vsakih 2 s
 // Read-only diagnostika: SSR, senzorji, parkirišče
+//
+// SPREMEMBE glede na v1:
+//   - radar: .detection string ("moving"/"static"/"absent"/"both")
+//     namesto bool .motion — razširjene kartice z razdaljo+energijo
+//   - tof: .ok + .name namesto .status + .label
+//   - cells: .broken bool + .name namesto .ok + .label
+//   - parking: .vehicle namesto .vehicle_name
+//   - countdown: API vrača countdown_s (sekunde), ne countdown_ms
+//   - radar kartica: prikazuje dist_cm in energijo kadar je detekcija aktivna
 // ============================================================
 
 (function () {
@@ -26,7 +35,7 @@
   </div>`).join('')}
 </div>
 
-<!-- LUX / PARTY ────────────────────────────── -->
+<!-- LUX / PARTY / RAMPA+VRATA ──────────────── -->
 <div class="grid-3 mt12">
   <div class="card">
     <div class="card-title">Svetloba</div>
@@ -40,8 +49,14 @@
   <div class="card">
     <div class="card-title">Rampa / Vrata</div>
     <div class="kv-list mt8">
-      <div class="kv-row"><span class="kv-key">Rampa</span><span class="kv-val" id="st-ramp">–</span></div>
-      <div class="kv-row"><span class="kv-key">Vrata</span><span class="kv-val" id="st-door">–</span></div>
+      <div class="kv-row">
+        <span class="kv-key">Rampa</span>
+        <span class="kv-val" id="st-ramp">–</span>
+      </div>
+      <div class="kv-row">
+        <span class="kv-key">Vrata</span>
+        <span class="kv-val" id="st-door">–</span>
+      </div>
     </div>
   </div>
 </div>
@@ -54,8 +69,18 @@
     <div class="card-title">Mesto ${m}</div>
     <div class="metric loading" id="st-park${m}-state">–</div>
     <div class="kv-list mt8">
-      <div class="kv-row"><span class="kv-key">Faza</span><span class="kv-val" id="st-park${m}-phase">–</span></div>
-      <div class="kv-row"><span class="kv-key">DTW dist</span><span class="kv-val text-mono" id="st-park${m}-dtw">–</span></div>
+      <div class="kv-row">
+        <span class="kv-key">Faza</span>
+        <span class="kv-val" id="st-park${m}-phase">–</span>
+      </div>
+      <div class="kv-row">
+        <span class="kv-key">Vozilo</span>
+        <span class="kv-val text-mono" id="st-park${m}-vehicle">–</span>
+      </div>
+      <div class="kv-row">
+        <span class="kv-key">DTW dist</span>
+        <span class="kv-val text-mono" id="st-park${m}-dtw">–</span>
+      </div>
     </div>
   </div>`).join('')}
 </div>
@@ -63,23 +88,33 @@
 <!-- TOF SENZORJI ───────────────────────────── -->
 <div class="section-label mt20">TOF senzorji</div>
 <div class="card">
-  <table class="tbl" id="st-tof-tbl">
+  <table class="tbl">
     <thead><tr>
-      <th>Senzor</th><th>Razdalja</th><th>Status</th>
+      <th>Senzor</th><th>Razdalja</th><th>Status</th><th class="right">Napake</th>
     </tr></thead>
     <tbody id="st-tof-body">
-      <tr><td colspan="3" class="empty-state loading">Pridobivam…</td></tr>
+      <tr><td colspan="4" class="empty-state loading">Pridobivam…</td></tr>
     </tbody>
   </table>
 </div>
 
 <!-- RADAR ──────────────────────────────────── -->
 <div class="section-label mt20">Radar senzorji</div>
-<div class="grid-4" id="st-radar">
-  ${[0,1,2,3].map(i => `
-  <div class="card">
-    <div class="card-title">Radar ${i+1}</div>
-    <div class="metric loading" id="st-radar${i}">–</div>
+<div class="grid-4" id="st-radar-grid">
+  ${['Vhod','Cesta L','Cesta D','Garaža'].map((name, i) => `
+  <div class="card" id="st-radar-card${i}">
+    <div class="card-title">${name}</div>
+    <div class="metric loading" id="st-radar${i}-det">–</div>
+    <div class="kv-list mt8" id="st-radar${i}-detail" style="display:none">
+      <div class="kv-row">
+        <span class="kv-key">Razdalja</span>
+        <span class="kv-val text-mono" id="st-radar${i}-dist">–</span>
+      </div>
+      <div class="kv-row">
+        <span class="kv-key">Energija</span>
+        <span class="kv-val text-mono" id="st-radar${i}-nrg">–</span>
+      </div>
+    </div>
   </div>`).join('')}
 </div>
 
@@ -97,23 +132,25 @@
 <!-- WiFi / SD ──────────────────────────────── -->
 <div class="grid-2 mt20">
   <div class="card">
-    <div class="card-title">WiFi & sistem</div>
+    <div class="card-title">WiFi &amp; sistem</div>
     <div class="kv-list">
-      <div class="kv-row"><span class="kv-key">IP</span>      <span class="kv-val text-mono" id="st-ip">–</span></div>
-      <div class="kv-row"><span class="kv-key">SSID</span>    <span class="kv-val" id="st-ssid">–</span></div>
-      <div class="kv-row"><span class="kv-key">RSSI</span>    <span class="kv-val" id="st-rssi">–</span></div>
-      <div class="kv-row"><span class="kv-key">NTP</span>     <span class="kv-val" id="st-ntp">–</span></div>
-      <div class="kv-row"><span class="kv-key">Uptime</span>  <span class="kv-val" id="st-uptime">–</span></div>
+      <div class="kv-row"><span class="kv-key">IP</span>     <span class="kv-val text-mono" id="st-ip">–</span></div>
+      <div class="kv-row"><span class="kv-key">SSID</span>   <span class="kv-val" id="st-ssid">–</span></div>
+      <div class="kv-row"><span class="kv-key">RSSI</span>   <span class="kv-val" id="st-rssi">–</span></div>
+      <div class="kv-row"><span class="kv-key">NTP</span>    <span class="kv-val" id="st-ntp">–</span></div>
+      <div class="kv-row"><span class="kv-key">Uptime</span> <span class="kv-val" id="st-uptime">–</span></div>
     </div>
   </div>
   <div class="card">
     <div class="card-title">SD kartica</div>
     <div class="kv-list">
-      <div class="kv-row"><span class="kv-key">Status</span>  <span class="kv-val" id="st-sd-status">–</span></div>
-      <div class="kv-row"><span class="kv-key">Skupaj</span>  <span class="kv-val" id="st-sd-total">–</span></div>
-      <div class="kv-row"><span class="kv-key">Prosto</span>  <span class="kv-val" id="st-sd-free">–</span></div>
+      <div class="kv-row"><span class="kv-key">Status</span> <span class="kv-val" id="st-sd-status">–</span></div>
+      <div class="kv-row"><span class="kv-key">Skupaj</span> <span class="kv-val" id="st-sd-total">–</span></div>
+      <div class="kv-row"><span class="kv-key">Prosto</span> <span class="kv-val" id="st-sd-free">–</span></div>
     </div>
-    <div class="progress-bar mt8"><div class="progress-fill" id="st-sd-bar" style="width:0%"></div></div>
+    <div class="progress-bar mt8">
+      <div class="progress-fill" id="st-sd-bar" style="width:0%"></div>
+    </div>
   </div>
 </div>
 `;
@@ -121,113 +158,179 @@
 
   // ── Posodobi UI iz podatkov ──────────────────────────────
   function _update(d) {
-    const set = (id, val) => { const el = document.getElementById(id); if (el) { el.textContent = val; el.classList.remove('loading'); } };
-    const cls = (id, c)   => { const el = document.getElementById(id); if (el) el.className = 'metric ' + c; };
+    const el   = id => document.getElementById(id);
+    const set  = (id, val) => { const e = el(id); if (e) { e.textContent = val; e.classList.remove('loading'); } };
+    const cls  = (id, c)   => { const e = el(id); if (e) e.className = 'metric ' + c; };
+    const show = (id, vis) => { const e = el(id); if (e) e.style.display = vis ? '' : 'none'; };
 
     // Timestamp
     set('st-ts', new Date().toLocaleTimeString('sl-SI'));
 
-    // SSR
+    // ── SSR (countdown_s = sekunde iz light_logic, 0 = ni timera) ──
     const ssrs = d.ssr || [];
     [1,2,3,4].forEach((n, i) => {
       const ssr = ssrs[i] || {};
       const on  = ssr.on || false;
       set('st-ssr'+n+'-state', on ? 'ON' : 'OFF');
       cls('st-ssr'+n+'-state', on ? 'ok' : '');
-      const cd = ssr.countdown_ms > 0 ? fmt.countdown(ssr.countdown_ms) : '';
+      const cd = ssr.countdown_s > 0 ? fmt.countdown(ssr.countdown_s) : '';
       set('st-ssr'+n+'-cd', cd ? '⏱ ' + cd : '');
     });
 
-    // Lux / day-night
+    // ── Lux / noč-dan ──
     const lux   = d.lux !== undefined ? d.lux : null;
     const night = d.is_night;
-    set('st-lux', lux !== null ? lux + ' lx' : (d.ssr ? '–' : '–'));
+    set('st-lux',      lux !== null ? lux.toFixed(1) + ' lx' : '–');
     set('st-daynight', night !== undefined ? (night ? '🌙 noč' : '☀ dan') : '–');
 
-    // Party
+    // ── Party ──
     const party = d.party_mode;
     set('st-party', party !== undefined ? (party ? 'AKTIVEN' : 'neaktiven') : '–');
     cls('st-party', party ? 'ok' : '');
 
-    // Rampa / vrata
-    set('st-ramp', d.ramp || '–');
-    set('st-door', d.door || '–');
+    // ── Rampa / vrata ──
+    // API vrača: ramp = "up" | "moving" | "down"
+    //            door = "open" | "closed"
+    const rampMap = { up: 'GOR', moving: '↕ PREMIKANJE', down: 'DOL' };
+    const doorMap = { open: 'ODPRTA', closed: 'zaprta' };
+    set('st-ramp', rampMap[d.ramp] || d.ramp || '–');
+    set('st-door', doorMap[d.door] || d.door || '–');
 
-    // Parkirišče
+    const rampEl = el('st-ramp');
+    if (rampEl) rampEl.className = 'kv-val' + (d.ramp === 'moving' ? ' warn' : d.ramp === 'up' ? ' ok' : '');
+    const doorEl = el('st-door');
+    if (doorEl) doorEl.className = 'kv-val' + (d.door === 'open' ? ' warn' : '');
+
+    // ── Parkirišče ──
+    // API: parking[].place, .phase, .phase_str, .active, .occupied, .vehicle, .dtw_dist
     const parks = d.parking || [];
     ['A','B'].forEach((m, i) => {
-      const p   = parks[i] || {};
-      const occ = p.occupied;
-      const name = p.vehicle_name || (occ ? 'neznan' : '');
-      set('st-park'+m+'-state', occ !== undefined ? (occ ? (name || 'ZASEDENO') : 'PROSTO') : '–');
-      cls('st-park'+m+'-state', occ !== undefined ? (occ ? 'warn' : 'ok') : 'loading');
-      set('st-park'+m+'-phase', p.phase !== undefined ? 'Faza ' + p.phase : '–');
-      set('st-park'+m+'-dtw',   p.dtw_dist !== undefined ? p.dtw_dist.toFixed(2) : '–');
+      const p    = parks[i] || {};
+      const occ  = p.occupied;
+      const name = p.vehicle || '';
+
+      set('st-park'+m+'-state',
+          occ !== undefined ? (occ ? (name || 'ZASEDENO') : 'PROSTO') : '–');
+      cls('st-park'+m+'-state',
+          occ !== undefined ? (occ ? 'warn' : 'ok') : 'loading');
+
+      const phaseLabels = ['IDLE','DETECT','SCANNING','DTW_WAIT'];
+      const phaseIdx    = p.phase;
+      const phaseLabel  = p.phase_str || (phaseIdx !== undefined ? phaseLabels[phaseIdx] : '–');
+      set('st-park'+m+'-phase',   phaseLabel || '–');
+      set('st-park'+m+'-vehicle', name || (occ ? 'neznan' : '–'));
+      set('st-park'+m+'-dtw',     p.dtw_dist !== undefined && p.dtw_dist > 0
+                                    ? p.dtw_dist.toFixed(2) : '–');
     });
 
-    // TOF
-    const tofs = d.tof || [];
-    const tbody = document.getElementById('st-tof-body');
+    // ── TOF senzorji ──
+    // API: tof[].id, .name, .ok, .dist_mm, .errors
+    const tofs  = d.tof || [];
+    const tbody = el('st-tof-body');
     if (tbody) {
       if (tofs.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="3" class="text-dim" style="padding:8px 10px">Ni podatkov (stub)</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="4" class="text-dim" style="padding:8px 10px">Ni podatkov</td></tr>';
       } else {
-        tbody.innerHTML = tofs.map((t, i) => {
-          const ok = t.status !== 'error';
+        tbody.innerHTML = tofs.map(t => {
+          const ok      = t.ok !== false;
+          const err     = t.dist_mm === 0xFFFF || t.dist_mm === 65535;
+          const distStr = (!ok || err) ? '–' : (t.dist_mm + ' mm');
+          const badge   = !ok
+            ? '<span class="badge badge-gray">N/I</span>'
+            : err
+              ? '<span class="badge badge-red">NAPAKA</span>'
+              : '<span class="badge badge-green">OK</span>';
           return `<tr>
-            <td class="mono">TOF-${i+1} <span class="text-dim">${t.label||''}</span></td>
-            <td class="mono">${t.dist_mm !== undefined ? t.dist_mm + ' mm' : '–'}</td>
-            <td><span class="badge ${ok ? 'badge-green' : 'badge-red'}">${t.status||'–'}</span></td>
+            <td class="mono">${t.name || ('TOF-' + t.id)}</td>
+            <td class="mono">${distStr}</td>
+            <td>${badge}</td>
+            <td class="right dim">${t.errors || 0}</td>
           </tr>`;
         }).join('');
       }
     }
 
-    // Radar
+    // ── Radar senzorji ──
+    // API: radar[].id, .name, .active, .detection ("moving"|"static"|"absent"|"both")
+    //             .moving_dist_cm, .moving_energy, .static_dist_cm, .static_energy
     const radars = d.radar || [];
     [0,1,2,3].forEach(i => {
       const r   = radars[i] || {};
-      const mov = r.motion;
-      set('st-radar'+i, mov !== undefined ? (mov ? 'GIBANJE' : 'mirovanje') : '–');
-      cls('st-radar'+i, mov !== undefined ? (mov ? 'warn' : '') : 'loading');
+      const det = r.detection || 'absent'; // "moving"|"static"|"absent"|"both"
+
+      // Prikazan tekst in barva
+      let label = '–', metricCls = 'loading';
+      if (!r.active) {
+        label = 'N/I'; metricCls = '';
+      } else if (det === 'moving' || det === 'both') {
+        label = 'GIBANJE'; metricCls = 'warn';
+      } else if (det === 'static') {
+        label = 'statično'; metricCls = '';
+      } else {
+        label = 'mirovanje'; metricCls = '';
+      }
+      set('st-radar'+i+'-det', label);
+      cls('st-radar'+i+'-det', metricCls);
+
+      // Detail vrstica — prikaži samo kadar je detekcija aktivna
+      const hasMotion = det === 'moving' || det === 'both';
+      const hasStatic = det === 'static' || det === 'both';
+      const showDetail = r.active && (hasMotion || hasStatic);
+
+      show('st-radar'+i+'-detail', showDetail);
+      if (showDetail) {
+        if (hasMotion) {
+          set('st-radar'+i+'-dist',  r.moving_dist_cm + ' cm');
+          set('st-radar'+i+'-nrg',   r.moving_energy + '%');
+        } else {
+          set('st-radar'+i+'-dist',  r.static_dist_cm + ' cm');
+          set('st-radar'+i+'-nrg',   r.static_energy + '%');
+        }
+      }
     });
 
-    // Fotocelice
+    // ── Fotocelice ──
+    // API: cells[].id, .name, .broken  (broken=true → prekinjena)
     const cells = d.cells || [];
-    const cbody = document.getElementById('st-cells-body');
+    const cbody = el('st-cells-body');
     if (cbody) {
       if (cells.length === 0) {
-        cbody.innerHTML = '<tr><td colspan="2" class="text-dim" style="padding:8px 10px">Ni podatkov (stub)</td></tr>';
+        cbody.innerHTML = '<tr><td colspan="2" class="text-dim" style="padding:8px 10px">Ni podatkov</td></tr>';
       } else {
-        cbody.innerHTML = cells.map((c, i) => {
-          const ok = c.ok !== false;
+        cbody.innerHTML = cells.map(c => {
+          const broken = c.broken === true;
+          const badge  = broken
+            ? '<span class="badge badge-red">PREKINJENA</span>'
+            : '<span class="badge badge-green">OK</span>';
           return `<tr>
-            <td>Fotocelica ${i+1} <span class="text-dim">${c.label||''}</span></td>
-            <td><span class="badge ${ok ? 'badge-green' : 'badge-red'}">${ok ? 'OK' : 'PREKINJENA'}</span></td>
+            <td>${c.name || ('Fotocelica ' + c.id)}</td>
+            <td>${badge}</td>
           </tr>`;
         }).join('');
       }
     }
 
-    // WiFi
+    // ── WiFi ──
     const w = d.wifi || {};
     set('st-ip',     w.ip      || '–');
     set('st-ssid',   w.ssid    || '–');
     set('st-rssi',   w.rssi    !== undefined ? w.rssi + ' dBm' : '–');
-    set('st-ntp',    w.ntp_ok  !== undefined ? (w.ntp_ok ? (w.ntp_time || 'OK') : 'NI sinhronizirano') : '–');
+    set('st-ntp',    w.ntp_ok  !== undefined
+                       ? (w.ntp_ok ? (w.ntp_time || 'OK') : 'NI sinhronizirano')
+                       : '–');
     set('st-uptime', w.uptime_ms !== undefined ? fmt.uptime(w.uptime_ms) : '–');
 
-    // SD
+    // ── SD ──
     const sd = d.sd || {};
     set('st-sd-status', sd.ready !== undefined ? (sd.ready ? 'READY' : sd.status || 'napaka') : '–');
     set('st-sd-total',  sd.total_mb !== undefined ? sd.total_mb + ' MB' : '–');
     set('st-sd-free',   sd.free_mb  !== undefined ? sd.free_mb  + ' MB' : '–');
 
-    const bar = document.getElementById('st-sd-bar');
+    const bar = el('st-sd-bar');
     if (bar && sd.total_mb > 0) {
       const pct = Math.round(100 - (sd.free_mb / sd.total_mb) * 100);
       bar.style.width = pct + '%';
-      bar.className = 'progress-fill' + (pct > 90 ? ' err' : pct > 75 ? ' warn' : '');
+      bar.className   = 'progress-fill' + (pct > 90 ? ' err' : pct > 75 ? ' warn' : '');
     }
   }
 
@@ -237,14 +340,14 @@
       const d = await api.get('/api/status');
       _update(d);
     } catch(e) {
-      const el = document.getElementById('st-ts');
-      if (el) el.textContent = 'napaka: ' + e.message;
+      const e2 = document.getElementById('st-ts');
+      if (e2) e2.textContent = 'napaka: ' + e.message;
     }
   }
 
   // ── Init (kliče ga router) ───────────────────────────────
   window.page_status = function () {
     if (!document.getElementById('st-ts')) _render();
-    registerPoller('status', _poll, 5000);
+    registerPoller('status', _poll, 2000);
   };
 })();
