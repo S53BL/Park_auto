@@ -101,6 +101,8 @@ static const char* NVS_RADAR_MS[] = {"r_ms_0","r_ms_1","r_ms_2","r_ms_3"};
 static const char* NVS_RADAR_SS[] = {"r_ss_0","r_ss_1","r_ss_2","r_ss_3"};
 static const char* NVS_RADAR_US[] = {"r_us_0","r_us_1","r_us_2","r_us_3"};
 #define NVS_K_RADAR_PERSIST  "r_persist"
+#define NVS_K_RADAR_POLL_IV  "r_poll_iv"    // radar_poll_interval_ms
+#define NVS_K_RADAR_MAX_OVF  "r_max_ovf"    // radar_max_consec_overflows
 
 // ============================================================
 // MEJNE VREDNOSTI ZA VALIDACIJO
@@ -159,6 +161,12 @@ static const char* NVS_RADAR_US[] = {"r_us_0","r_us_1","r_us_2","r_us_3"};
 #define CFG_MAX_PHASE_CFM       500u
 #define CFG_MIN_STAB_S          0.5f
 #define CFG_MAX_STAB_S          10.0f
+
+// Radar polling (v2.0)
+#define CFG_MIN_RADAR_POLL_IV    10u
+#define CFG_MAX_RADAR_POLL_IV   100u
+#define CFG_MIN_RADAR_MAX_OVF    1u
+#define CFG_MAX_RADAR_MAX_OVF  100u
 
 // ============================================================
 // INTERNO STANJE
@@ -383,6 +391,16 @@ static void load_and_validate(Preferences& prefs) {
         prefs.putUChar(NVS_K_RADAR_PERSIST, def.radar_persistence_n);
         s_replaced_count++;
     }
+
+    VALIDATE_U32(prefs, NVS_K_RADAR_POLL_IV,
+                 radar_poll_interval_ms,
+                 CFG_MIN_RADAR_POLL_IV, CFG_MAX_RADAR_POLL_IV,
+                 def.radar_poll_interval_ms);
+
+    VALIDATE_U32(prefs, NVS_K_RADAR_MAX_OVF,
+                 radar_max_consec_overflows,
+                 CFG_MIN_RADAR_MAX_OVF, CFG_MAX_RADAR_MAX_OVF,
+                 def.radar_max_consec_overflows);
 }
 
 // ============================================================
@@ -429,6 +447,8 @@ static void write_all_to_nvs(Preferences& prefs) {
         prefs.putUInt (NVS_RADAR_US[ri], s_config.radar_unmanned_s[ri]);
     }
     prefs.putUChar(NVS_K_RADAR_PERSIST, s_config.radar_persistence_n);
+    prefs.putUInt(NVS_K_RADAR_POLL_IV,  s_config.radar_poll_interval_ms);
+    prefs.putUInt(NVS_K_RADAR_MAX_OVF,  s_config.radar_max_consec_overflows);
 }
 
 // ============================================================

@@ -414,10 +414,11 @@ static void on_radar_motion(const Event& e) {
         s_ssr[i].last_motion_ms = now;
     }
 
-    // Prikaz ure PODNEVI ob zaznavi gibanja (P4 — najnižja prioriteta).
-    if (!s_is_night) {
-        signal_led_clock_show();
-    }
+    // 2026-05-13: Ura na signalni LED verigi naj deluje 24/7 (tudi ponoči)
+    // Odstranjena omejitev "samo podnevi" 
+    // if (!s_is_night) {
+        signal_led_clock_show();     // vedno pokličemo, ne glede na svetlobo / BH1750
+    // }
 
     // TODO: parking_assist feed — deluje 24/7
     // TODO: vehicle_recog feed — deluje 24/7

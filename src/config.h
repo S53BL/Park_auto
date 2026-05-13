@@ -206,6 +206,12 @@
 // Odkomentiraj za debug konfiguracije, zakomentiraj po uspešnem testu.
 // #define RADAR_DEBUG_PROTOCOL
 
+// Radar polling interval (v2.0 arhitektura)
+#define RADAR_POLL_INTERVAL_MS_DEFAULT   50u
+#define RADAR_POLL_INTERVAL_MIN_MS       10u
+#define RADAR_POLL_INTERVAL_MAX_MS      100u
+#define RADAR_MAX_CONSECUTIVE_OVERFLOWS  10u
+
 // ============================================================
 // 9. LED KONFIGURACIJA
 // ============================================================
