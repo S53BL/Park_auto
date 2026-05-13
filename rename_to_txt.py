@@ -3,32 +3,32 @@ import sys
 import shutil
 
 # ============================================
-# Skripta za pripravo src_txt/ mape
-# 1. Zbrise src_txt/ ce obstaja
-# 2. Kopira src/ v src_txt/
-# 3. Kopira platformio.ini v src_txt/
-# 4. Kopira include/ v src_txt/include/
+# Skripta za pripravo Park_auto_last/ mape
+# 1. Zbrise Park_auto_last/ ce obstaja
+# 2. Kopira src/ v Park_auto_last/
+# 3. Kopira platformio.ini v Park_auto_last/
+# 4. Kopira include/ v Park_auto_last/include/
 # 5. Vsem datotekam doda .txt koncnico
 # ============================================
 
 SRC_DIR = 'src'
-DST_DIR = 'src_txt'
+DST_DIR = 'Park_auto_last'
 
-# 1. Zbrisi src_txt ce obstaja
+# 1. Zbrisi Park_auto_last ce obstaja
 if os.path.isdir(DST_DIR):
     print('Brisem ' + DST_DIR + '/ ...')
     shutil.rmtree(DST_DIR)
 
-# 2. Kopiraj src/ v src_txt/
+# 2. Kopiraj src/ v Park_auto_last/
 print('Kopiram ' + SRC_DIR + '/ -> ' + DST_DIR + '/ ...')
 shutil.copytree(SRC_DIR, DST_DIR)
 
-# 3. Kopiraj platformio.ini v src_txt/
+# 3. Kopiraj platformio.ini v Park_auto_last/
 if os.path.isfile('platformio.ini'):
     shutil.copy2('platformio.ini', os.path.join(DST_DIR, 'platformio.ini'))
     print('  kopiram platformio.ini')
 
-# 4. Kopiraj include/ v src_txt/include/
+# 4. Kopiraj include/ v Park_auto_last/include/
 if os.path.isdir('include'):
     dst_include = os.path.join(DST_DIR, 'include')
     shutil.copytree('include', dst_include)

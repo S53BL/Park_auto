@@ -124,7 +124,13 @@
 <!-- ── TAB: RADAR ───────────────────────────── -->
 <div class="tab-panel card" id="spanel-radar">
   <div class="section-label">Globalne nastavitve</div>
-  ${_field('radar_persistence_n', 'Persistence filter',      'frames', 3, 'N zaporednih frames pred SSR triggerjem (0=izklopljeno)', 1)}
+  ${_field('radar_persistence_n',       'Persistence filter',  'frames', 3,
+           'N zaporednih frames pred SSR triggerjem (0=izklopljeno)', 1)}
+  ${_field('radar_poll_interval_ms',    'Polling interval',    'ms',    50,
+           'Interval branja UART FIFO (10–100 ms). Manjši = hitrejši odziv, večji = manj Wire1 obremenitve.', 5)}
+  ${_field('radar_max_consec_overflows','Max overflowi',       '',      10,
+           'Število zaporednih FIFO overflowov pred WARN logom (1–100). Povečaj če je log poln opozoril.', 1)}
+  ${_saveBtn('radar')}
 
   <div class="section-label mt16">Per-senzor konfiguracija</div>
   <p class="form-hint" style="margin-bottom:12px">
@@ -271,9 +277,18 @@
     try {
       _radarCfg = await api.get('/api/radar');
       _renderRadarSensors(_radarCfg);
-      // Nastavi persistence_n vnosno polje
+      // Nastavi globalne radar parametre iz GET /api/radar odgovora
       const pn = document.getElementById('cfg-radar_persistence_n');
-      if (pn && _radarCfg.persistence_n !== undefined) pn.value = _radarCfg.persistence_n;
+      if (pn && _radarCfg.persistence_n !== undefined)
+          pn.value = _radarCfg.persistence_n;
+
+      const piv = document.getElementById('cfg-radar_poll_interval_ms');
+      if (piv && _radarCfg.poll_interval_ms !== undefined)
+          piv.value = _radarCfg.poll_interval_ms;
+
+      const mcov = document.getElementById('cfg-radar_max_consec_overflows');
+      if (mcov && _radarCfg.max_consec_overflows !== undefined)
+          mcov.value = _radarCfg.max_consec_overflows;
     } catch(e) {
       const c = document.getElementById('radar-sensors-list');
       if (c) c.innerHTML = `<div class="text-dim text-tiny" style="padding:10px">
@@ -306,8 +321,18 @@
         // Posodobi badge
         _radarCfg = await api.get('/api/radar');
         _renderRadarSensors(_radarCfg);
+        // Nastavi globalne radar parametre iz GET /api/radar odgovora
         const pn = document.getElementById('cfg-radar_persistence_n');
-        if (pn && _radarCfg.persistence_n !== undefined) pn.value = _radarCfg.persistence_n;
+        if (pn && _radarCfg.persistence_n !== undefined)
+            pn.value = _radarCfg.persistence_n;
+
+        const piv = document.getElementById('cfg-radar_poll_interval_ms');
+        if (piv && _radarCfg.poll_interval_ms !== undefined)
+            piv.value = _radarCfg.poll_interval_ms;
+
+        const mcov = document.getElementById('cfg-radar_max_consec_overflows');
+        if (mcov && _radarCfg.max_consec_overflows !== undefined)
+            mcov.value = _radarCfg.max_consec_overflows;
       }
     } catch(e) {
       setS('Napaka: ' + e.message, false);
@@ -323,13 +348,20 @@
         _saving = true;
         _setStatus('Shranjujem persistence…');
         try {
-          const pn = parseInt(document.getElementById('cfg-radar_persistence_n').value, 10);
-          if (isNaN(pn) || pn < 0 || pn > 10) {
-            _setStatus('Persistence mora biti 0–10', false);
-            return;
-          }
-          await api.post('/api/radar/config', { persistence_n: pn });
-          _setStatus('Persistence shranjen ✓', true);
+          const pn   = parseInt(document.getElementById('cfg-radar_persistence_n').value, 10);
+          const piv  = parseInt(document.getElementById('cfg-radar_poll_interval_ms').value, 10);
+          const mcov = parseInt(document.getElementById('cfg-radar_max_consec_overflows').value, 10);
+
+          if (isNaN(pn)   || pn   < 0  || pn   > 10)  { _setStatus('Persistence mora biti 0–10', false);         return; }
+          if (isNaN(piv)  || piv  < 10 || piv  > 100)  { _setStatus('Polling interval mora biti 10–100 ms', false); return; }
+          if (isNaN(mcov) || mcov < 1  || mcov > 100)  { _setStatus('Max overflowi mora biti 1–100', false);         return; }
+
+          await api.post('/api/radar/config', {
+              persistence_n:        pn,
+              poll_interval_ms:     piv,
+              max_consec_overflows: mcov
+          });
+          _setStatus('Radar nastavitve shranjene ✓', true);
         } catch(e) {
           _setStatus('Napaka: ' + e.message, false);
         } finally {

@@ -216,8 +216,9 @@ static volatile bool     s_cell2_broken      = false;
 static volatile bool     s_cell_is_night     = false;
 static volatile uint32_t s_cell_start_ms     = 0;       // čas zadnje aktivacije (za 5min timer)
 
-static volatile bool     s_clock_active      = false;
-static volatile uint32_t s_clock_end_ms      = 0;
+static volatile bool     s_clock_active         = false;
+static volatile uint32_t s_clock_end_ms        = 0;
+static volatile uint32_t s_clock_last_start_ms = 0;
 
 // -----------------------------------------------
 // Stanje rampa animacije (samo tick() piše/bere)
@@ -960,9 +961,8 @@ static void tick_photocell() {
 static void tick_clock() {
     uint32_t now = millis();
 
-    // Preveri iztekanje prikazovalnega časa
     if (now >= s_clock_end_ms) {
-        SIGD("CLOCK: prikaz iztekel");
+        SIGD("CLOCK: prikaz iztekel po %lums", (unsigned long)SIG_CLOCK_DURATION_MS);
         s_clock_active = false;
         buf_clear();
         return;
@@ -970,51 +970,42 @@ static void tick_clock() {
 
     buf_clear();
 
-    // Preberem sistemski čas
     struct tm ti;
     time_t t = time(nullptr);
     localtime_r(&t, &ti);
 
-    int hour   = ti.tm_hour;    // 0–23
-    int minute = ti.tm_min;     // 0–59
-    int zone   = hour / 6;      // 0–3 (katera 6-urna cona)
-    int hour_in_zone = hour % 6;  // 0–5 (ura znotraj cone)
+    int hour         = ti.tm_hour;
+    int minute       = ti.tm_min;
+    int zone         = hour / 6;
+    int hour_in_zone = hour % 6;
 
-    // --- Ločilne pike (vedno dimmed siva) ---
     for (int s = 0; s < CLOCK_SEP_COUNT; s++) {
         buf_set(CLOCK_SEP_POS[s], CLR_SEP_DOT);
     }
 
-    // --- Padding (vedno 5% dimmed) ---
     for (int i = CLOCK_PADDING_START; i < SIG_TOTAL; i++) {
         buf_set(i, CLR_PADDING);
     }
 
-    // --- Segmenti za ure (rumeno-bela, en segment = 1 ura) ---
-    // Prižgamo segmente 0 do (hour_in_zone - 1).
-    // Segment 5 (index 5) je rezerviran za minute marker — nikoli se ne prižge za ure.
     for (int seg = 0; seg < 5 && seg < hour_in_zone; seg++) {
         buf_fill_zone(CLOCK_SEG_START[seg],
                       CLOCK_SEG_START[seg] + CLOCK_SEG_LEN - 1,
                       CLR_HOUR_SEG);
     }
 
-    // --- Minute marker (zeleni 2-LED, v segmentu 5) ---
-    // Marker se premika od začetka seg5 (minuta 0) do konca seg5 (minuta 59)
-    // seg5 = LED 116–137 (22 LED), marker dolžina 2 LED
-    float min_rel = (float)minute / 59.0f;  // 0.0–1.0
+    float min_rel    = (float)minute / 59.0f;
     int marker_start = CLOCK_SEG_START[5] +
                        (int)(min_rel * (float)(CLOCK_SEG_LEN - CLOCK_MIN_MARKER_LEN));
-    int marker_end = marker_start + CLOCK_MIN_MARKER_LEN - 1;
-
+    int marker_end   = marker_start + CLOCK_MIN_MARKER_LEN - 1;
     buf_fill_zone(marker_start, marker_end, CLR_MIN_MARKER);
 
-    // Debug log (samo enkrat na minuto)
     static int s_last_logged_min = -1;
     if (minute != s_last_logged_min) {
         s_last_logged_min = minute;
-        SIGD("CLOCK: cona=%d ura=%02d:%02d seg_lit=%d marker@%d",
-             zone, hour, minute, hour_in_zone, marker_start);
+        uint32_t remaining_ms = (s_clock_end_ms > now) ? (s_clock_end_ms - now) : 0;
+        SIGD("CLOCK: cona=%d ura=%02d:%02d seg_lit=%d marker@%d preostalo=%lums",
+             zone, hour, minute, hour_in_zone, marker_start,
+             (unsigned long)remaining_ms);
     }
 }
 
@@ -1211,13 +1202,39 @@ void signal_led_photocell_stop() {
 void signal_led_clock_show() {
     if (!s_initialized) return;
 
-    uint32_t duration_ms = SIG_CLOCK_DURATION_MS;  // config.h: 10000ms
+    uint32_t now = millis();
 
-    s_clock_end_ms = millis() + duration_ms;
+    bool first_ever  = (s_clock_last_start_ms == 0);
+    bool cooldown_ok = first_ever ||
+                       ((now - s_clock_last_start_ms) >= SIG_CLOCK_COOLDOWN_MS);
+
+    if (!cooldown_ok) {
+        static uint32_t s_last_ignored_log_ms = 0;
+        if ((now - s_last_ignored_log_ms) >= 60000) {
+            s_last_ignored_log_ms = now;
+            uint32_t remaining_s = (SIG_CLOCK_COOLDOWN_MS -
+                                    (now - s_clock_last_start_ms)) / 1000;
+            SIGD("CLOCK: cooldown aktiven — naslednji prikaz cez ~%lus",
+                 (unsigned long)remaining_s);
+        }
+        return;
+    }
+
+    if (s_clock_active) {
+        SIGD("CLOCK: ze aktiven — prikaz tece do izteka");
+        return;
+    }
+
+    s_clock_last_start_ms = now;
+
+    uint32_t duration_ms = SIG_CLOCK_DURATION_MS;
+    s_clock_end_ms = now + duration_ms;
     s_clock_active = true;
 
     s_stats.clock_shows++;
-    SIGD("CLOCK: prikaži (trajanje=%lu ms)", (unsigned long)duration_ms);
+    SIGI("CLOCK: START (trajanje=%lums, cooldown=%lus)",
+         (unsigned long)duration_ms,
+         (unsigned long)(SIG_CLOCK_COOLDOWN_MS / 1000));
 }
 
 void signal_led_clock_stop() {
@@ -1235,7 +1252,8 @@ void signal_led_off() {
     s_parking_active  = false;
     s_parking_stopping = false;
     s_cell_active     = false;
-    s_clock_active    = false;
+    s_clock_active        = false;
+    s_clock_last_start_ms = 0;   // reset cooldown pri ročnem izklopu
     s_current_mode    = SignalMode::SIG_IDLE;
     s_ramp_phase      = RampPhase::RAMP_PULSE1;  // reset za naslednji start
     s_park_phase      = ParkPhase::PARK_DONE;

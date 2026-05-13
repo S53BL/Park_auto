@@ -1,10 +1,14 @@
 // ============================================================
 // screen_main.h
 // Projekt : Avtomatizacija Pokritega Parkirišča
-// Verzija : 2.1.0-dev  |  Datum: 2026-05
+// Verzija : 2.2.0  |  Datum: 2026-05
 //
-// SPREMEMBE v2.1.0:
-//   E3.3 — dodana screen_main_set_daynight() deklaracija
+// SPREMEMBE v2.2.0 (ARC4x spec):
+//   - RadarArcData: dodana polja dist_cm (razdalja per tip),
+//     is_permanent_error (trajna vs začasna napaka)
+//   - RadarArcState: IDLE preimenovan v INACTIVE (senzor brez detekcije),
+//     dodan komentar za vsako stanje
+//   - screen_main_set_radar_arc() — nova implementacija v .cpp
 // ============================================================
 #pragma once
 #include <lvgl.h>
@@ -22,23 +26,22 @@ void screen_main_set_radar(uint8_t idx, const RadarDisplayData& data);
 void screen_main_set_daynight(bool is_night, float lux);
 
 // ============================================================
-// Radar arc vizualizacija
+// Radar arc vizualizacija — ARC4x spec
 // ============================================================
 
 enum class RadarArcState : uint8_t {
-    INACTIVE     = 0,
-    IDLE         = 1,
-    MOVING       = 2,
-    STATIONARY   = 3,
-    CONFIG_ERROR = 4,
+    INACTIVE     = 0,   // Senzor aktiven, detection=0 — nič ne zaznava (siva, fill 10%)
+    MOVING       = 1,   // detection=1 ali 3 — gibanje zaznano (zelena, fill=moving_energy)
+    STATIONARY   = 2,   // detection=2 — statična prisotnost (modra, fill=static_energy)
+    CONFIG_ERROR = 3,   // Napaka konfiguracije ali senzor ni aktiven (rdeča)
 };
 
 struct RadarArcData {
     RadarArcState state;
-    uint8_t       energy;
-    uint16_t      dist_cm;
-    bool          config_ok;
-    bool          verified;
+    uint8_t       energy;           // fill vrednost arc-a (0–100)
+    uint16_t      dist_cm;          // razdalja za prikaz v sredini arc-a
+    bool          is_permanent_error; // true = senzor ni inicializiran (arc 100%),
+                                      // false = začasna napaka (arc 50%)
 };
 
 void screen_main_set_radar_arc(uint8_t idx, const RadarArcData& data);

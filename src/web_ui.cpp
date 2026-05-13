@@ -541,7 +541,9 @@ static void _handleRadarGet(AsyncWebServerRequest* req) {
         s["cfg_static_sens"] = cfg.radar_static_sens[i];
         s["cfg_unmanned_s"]  = cfg.radar_unmanned_s[i];
     }
-    doc["persistence_n"] = cfg.radar_persistence_n;
+    doc["persistence_n"]        = cfg.radar_persistence_n;
+    doc["poll_interval_ms"]     = cfg.radar_poll_interval_ms;
+    doc["max_consec_overflows"] = cfg.radar_max_consec_overflows;
     _sendJson(req, 200, doc);
 }
 
@@ -557,17 +559,52 @@ static void _handleRadarConfigBody(AsyncWebServerRequest* req, uint8_t* data,
         return;
     }
 
-    // Globalni parameter
+    // Globalni parametri — persistence_n, poll_interval_ms, max_consec_overflows
+    // Vsi trije so opcijski v istem POST klicu.
+    // Validacija je usklajena z mejami v config_mgr.cpp.
+    bool global_changed = false;
+    Config cfg_global = config_get();
+
     if (doc["persistence_n"].is<int>()) {
         uint8_t pn = (uint8_t)doc["persistence_n"].as<int>();
-        if (pn > 10) { _sendError(req, 400, "persistence_n izven obsega"); return; }
-        Config cfg = config_get();
-        cfg.radar_persistence_n = pn;
-        config_set(cfg);
+        if (pn > 10) { _sendError(req, 400, "persistence_n izven obsega (0-10)"); return; }
+        cfg_global.radar_persistence_n = pn;
+        global_changed = true;
+    }
+
+    if (doc["poll_interval_ms"].is<int>()) {
+        // Nastavljiv interval pollinga radarTask (hal_radar v2.0).
+        // Sprememba stopi v veljavo pri naslednjem ticku (~50ms) — ni restart.
+        // config.h: RADAR_POLL_INTERVAL_MIN_MS=10, RADAR_POLL_INTERVAL_MAX_MS=100
+        uint32_t piv = (uint32_t)doc["poll_interval_ms"].as<int>();
+        if (piv < RADAR_POLL_INTERVAL_MIN_MS || piv > RADAR_POLL_INTERVAL_MAX_MS) {
+            _sendError(req, 400, "poll_interval_ms izven obsega (10-100)");
+            return;
+        }
+        cfg_global.radar_poll_interval_ms = piv;
+        global_changed = true;
+    }
+
+    if (doc["max_consec_overflows"].is<int>()) {
+        // Prag zaporednih FIFO overflowov pred WARN logom.
+        // config_mgr: CFG_MIN_RADAR_MAX_OVF=1, CFG_MAX_RADAR_MAX_OVF=100
+        uint32_t mcov = (uint32_t)doc["max_consec_overflows"].as<int>();
+        if (mcov < 1 || mcov > 100) {
+            _sendError(req, 400, "max_consec_overflows izven obsega (1-100)");
+            return;
+        }
+        cfg_global.radar_max_consec_overflows = mcov;
+        global_changed = true;
+    }
+
+    if (global_changed) {
+        config_set(cfg_global);
         config_save();
         JsonDocument resp;
-        resp["ok"] = true;
-        resp["persistence_n"] = pn;
+        resp["ok"]                   = true;
+        resp["persistence_n"]        = cfg_global.radar_persistence_n;
+        resp["poll_interval_ms"]     = cfg_global.radar_poll_interval_ms;
+        resp["max_consec_overflows"] = cfg_global.radar_max_consec_overflows;
         _sendJson(req, 200, resp);
         return;
     }

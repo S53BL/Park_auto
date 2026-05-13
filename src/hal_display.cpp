@@ -276,28 +276,69 @@ static void ui_refresh_cb(lv_timer_t*) {
         screen_main_set_ssr(i - 1, d);
     }
 
-    // ── Radar arci (4 arci spodaj) ───────────────────────────────
+    // ── Radar arci (4 arci spodaj) — ARC4x v2.2.0 ────────────────────────
+    // Preslikava: RadarSensorStatus → RadarArcData
+    //
+    //   !rs.active                  → CONFIG_ERROR + is_permanent_error=true
+    //                                 (senzor se ni inicializiral ob zagonu)
+    //   rs.active && !rs.config_ok  → CONFIG_ERROR + is_permanent_error=false
+    //                                 (senzor deluje, config je začasno padel)
+    //   detection=0                 → INACTIVE (nič ne zaznava)
+    //   detection=1 ali 3           → MOVING, dist=moving_dist_cm, energy=moving_energy
+    //                                 (detection=3: oboje → prednost MOVING)
+    //   detection=2                 → STATIONARY, dist=static_dist_cm, energy=static_energy
+    //
+    // OPOMBA: peak_duration_ms se posodobi v screen_main_set_radar_arc
+    //   iz rs.configured_unmanned_s — ni potrebno posredovati prek RadarArcData.
+    // ─────────────────────────────────────────────────────────────────────────────
     for (uint8_t ri = 0; ri < 4; ri++) {
         const RadarSensorStatus& rs = hal_radar_get_status((RadarSensorId)ri);
-        RadarArcData arc;
-        arc.dist_cm   = rs.last_frame.detect_dist_cm;
-        arc.config_ok = rs.config_ok;
-        arc.verified  = rs.config_verified;
-        arc.energy    = rs.last_frame.moving_energy > rs.last_frame.static_energy
-                      ? rs.last_frame.moving_energy : rs.last_frame.static_energy;
+        RadarArcData arc = {};
 
         if (!rs.active) {
-            arc.state = RadarArcState::INACTIVE;
+            // Trajna napaka: senzor se ni inicializiral ob zagonu
+            arc.state              = RadarArcState::CONFIG_ERROR;
+            arc.energy             = 100;   // Arc 100% za trajno napako
+            arc.dist_cm            = 0;
+            arc.is_permanent_error = true;
+
         } else if (!rs.config_ok) {
-            arc.state = RadarArcState::CONFIG_ERROR;
+            // Začasna napaka: senzor deluje, config je padel
+            arc.state              = RadarArcState::CONFIG_ERROR;
+            arc.energy             = 50;    // Arc 50% za začasno napako
+            arc.dist_cm            = 0;
+            arc.is_permanent_error = false;
+
         } else {
+            arc.is_permanent_error = false;
             switch (rs.last_frame.detection) {
-                case 1:  arc.state = RadarArcState::MOVING;     break;
-                case 2:  arc.state = RadarArcState::STATIONARY; break;
-                case 3:  arc.state = RadarArcState::MOVING;     break;
-                default: arc.state = RadarArcState::IDLE;       break;
+                case 1:
+                    // Samo gibanje
+                    arc.state   = RadarArcState::MOVING;
+                    arc.energy  = rs.last_frame.moving_energy;
+                    arc.dist_cm = rs.last_frame.moving_dist_cm;
+                    break;
+                case 2:
+                    // Samo statično
+                    arc.state   = RadarArcState::STATIONARY;
+                    arc.energy  = rs.last_frame.static_energy;
+                    arc.dist_cm = rs.last_frame.static_dist_cm;
+                    break;
+                case 3:
+                    // Oboje — prednost MOVING (po ARC4x spec)
+                    arc.state   = RadarArcState::MOVING;
+                    arc.energy  = rs.last_frame.moving_energy;
+                    arc.dist_cm = rs.last_frame.moving_dist_cm;
+                    break;
+                default:
+                    // detection=0: nič ne zaznava
+                    arc.state   = RadarArcState::INACTIVE;
+                    arc.energy  = 0;
+                    arc.dist_cm = 0;
+                    break;
             }
         }
+
         screen_main_set_radar_arc(ri, arc);
     }
 

@@ -324,6 +324,7 @@
 #define SIG_PARK_STABLE_MS      4000
 #define SIG_CELL_TIMER_MS       (5 * 60 * 1000)
 #define SIG_CLOCK_DURATION_MS   10000
+#define SIG_CLOCK_COOLDOWN_MS   (5UL * 60UL * 1000UL)   // 300000ms
 
 // ============================================================
 // 15. LOGGER
