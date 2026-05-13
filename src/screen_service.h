@@ -54,3 +54,6 @@ void screen_service_update_sys(uint32_t fh, uint32_t fp,
 
 // Posodobitev I2C health — thread-safe (prek mutex)
 void screen_service_set_i2c_health(const I2cHealthData& data);
+
+// Posodobitev signalne vrstice — klicati samo iz lvglTask (LVGL direkten klic)
+void screen_service_set_signal(uint8_t idx, const char* text, bool ok);

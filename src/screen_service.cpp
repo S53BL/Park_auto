@@ -119,17 +119,18 @@ struct SignalRow {
     lv_obj_t* lbl_val;
 };
 
-static SignalRow s_sig[4];  // 0=celica1, 1=celica2, 2=rampa, 3=vrata
+static SignalRow s_sig[5];  // 0=celica1, 1=celica2, 2=rampa, 3=vrata, 4=rampaluc
 
-static const char* SIG_NAMES[4] = {
+static const char* SIG_NAMES[5] = {
     "Celica 1 (zunanja)",
     "Celica 2 (notranja)",
     "Rampa",
-    "Drsna vrata"
+    "Drsna vrata",
+    "Rampa luč"
 };
 
-static const char* SIG_DEFAULT[4] = {
-    "OK", "OK", "Dol", "Zaprta"
+static const char* SIG_DEFAULT[5] = {
+    "OK", "OK", "Dol", "Zaprta", "--"
 };
 
 // ============================================================
@@ -538,11 +539,11 @@ void screen_service_create(lv_obj_t* parent) {
     // --------------------------------------------------------
     // SEKCIJA 2 — SIGNALI
     // --------------------------------------------------------
-    make_section_header(parent, cy, "  SIGNALI");
+    make_section_header(parent, cy, "  SIGNALI  (5x)");
     cy += 26;
 
-    static const lv_color_t sig_colors[4] = { C_OK, C_OK, C_TEXT, C_TEXT };
-    for (int i = 0; i < 4; i++) {
+    static const lv_color_t sig_colors[5] = { C_OK, C_OK, C_TEXT, C_TEXT, C_TEXT_DIM };
+    for (int i = 0; i < 5; i++) {
         make_row(parent, cy,
                  &s_sig[i].lbl_name, &s_sig[i].lbl_val,
                  SIG_NAMES[i], SIG_DEFAULT[i], sig_colors[i]);
@@ -731,7 +732,7 @@ void screen_service_set_signal(uint8_t idx, const char* text, bool ok) {
     // Implementiraj prek pending mutex ko bo hardware priključen.
     // Za zdaj: direkten LVGL klic je varen SAMO če smo v lvglTask.
     // TODO: dodaj v pending sistem ko pride hardware (enako kot lux/tof).
-    if (!s_created || idx >= 4) return;
+    if (!s_created || idx >= 5) return;
     lv_label_set_text(s_sig[idx].lbl_val, text);
     lv_obj_set_style_text_color(s_sig[idx].lbl_val,
                                  ok ? C_OK : C_ERR, LV_PART_MAIN);

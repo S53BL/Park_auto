@@ -63,6 +63,8 @@ public:
 #include "light_logic.h"
 #include "hal_radar.h"
 #include "hal_tof.h"
+#include "hal_gpio.h"
+#include "hal_light.h"
 extern void screen_main_create(lv_obj_t* parent);
 extern void screen_main_apply_updates();
 
@@ -235,6 +237,34 @@ static void apply_pending() {
     if (need_svc)  screen_service_apply_updates();
 }
 
+// ── Core usage helper — FreeRTOS task stats ───────────────────────────────
+// Prebere CPU obremenitev Core0 in Core1 z uxTaskGetSystemState().
+// Kliče se iz ui_refresh_cb vsakih 5s — ne prepogosto (alokacija na stacku).
+static void _calc_core_usage(uint8_t& c0_out, uint8_t& c1_out) {
+    const uint8_t MAX_TASKS = 20;
+    TaskStatus_t tasks[MAX_TASKS];
+    uint32_t total_runtime = 0;
+    uint32_t n = uxTaskGetSystemState(tasks, MAX_TASKS, &total_runtime);
+
+    uint32_t idle0 = 0, idle1 = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        if (strcmp(tasks[i].pcTaskName, "IDLE0") == 0 ||
+            strcmp(tasks[i].pcTaskName, "IDLE") == 0) {
+            if (tasks[i].xCoreID == 0) idle0 = tasks[i].ulRunTimeCounter;
+        }
+        if (strcmp(tasks[i].pcTaskName, "IDLE1") == 0) {
+            if (tasks[i].xCoreID == 1) idle1 = tasks[i].ulRunTimeCounter;
+        }
+    }
+
+    uint32_t per_core = (total_runtime > 0) ? (total_runtime / 2) : 1;
+    uint8_t idle0_pct = (uint8_t)((idle0 * 100) / per_core);
+    uint8_t idle1_pct = (uint8_t)((idle1 * 100) / per_core);
+
+    c0_out = (idle0_pct < 100) ? (100 - idle0_pct) : 0;
+    c1_out = (idle1_pct < 100) ? (100 - idle1_pct) : 0;
+}
+
 // ============================================================
 // UI REFRESH TIMER — Opcija B display polling (dogovorjeno 2026-05)
 // ============================================================
@@ -365,6 +395,74 @@ static void ui_refresh_cb(lv_timer_t*) {
 
     // ── Noč/dan indikator (E3.3) ─────────────────────────────────
     screen_main_set_daynight(st.is_night, st.lux);
+
+    // ── Servisni zaslon — lux + noč/dan ──────────────────────────
+    {
+        LightLogicState st2 = light_logic_get_state();
+        screen_service_update_lux(st2.lux, st2.is_night);
+        screen_service_apply_updates();
+    }
+
+    // ── Servisni zaslon — TOF razdalje (6×) ──────────────────────
+    if (hal_display_getCurrentScreen() == DisplayScreen::SERVICE) {
+        TofDiagnostics tof = hal_tof_getDiagnostics();
+        screen_service_update_tof(tof.last_mm);
+        screen_service_apply_updates();
+    }
+
+    // ── Servisni zaslon — signali iz hal_gpio ────────────────────
+    {
+        static uint8_t s_sig_tick = 0;
+        s_sig_tick++;
+
+        if (hal_gpio_ok()) {
+            GpioState gs = hal_gpio_get_state();
+            screen_service_set_signal(0,
+                gs.celica1 ? "Prekinjena" : "OK", !gs.celica1);
+            screen_service_set_signal(1,
+                gs.celica2 ? "Prekinjena" : "OK", !gs.celica2);
+            screen_service_set_signal(2,
+                gs.rampagor ? "Gor" : "Dol",
+                true);
+            screen_service_set_signal(3,
+                gs.vrataod ? "Odprta" : "Zaprta",
+                true);
+            screen_service_set_signal(4,
+                gs.rampaluc ? "Aktivna" : "--",
+                !gs.rampaluc);
+        }
+
+        if (s_sig_tick >= 5) {
+            s_sig_tick = 0;
+            uint8_t c0 = 0, c1 = 0;
+            _calc_core_usage(c0, c1);
+            screen_service_update_sys(
+                ESP.getFreeHeap(),
+                ESP.getFreePsram(),
+                c0, c1,
+                millis() / 1000);
+            screen_service_apply_updates();
+        }
+    }
+
+    // ── Servisni zaslon — I2C health ─────────────────────────────
+    {
+        static uint8_t s_i2c_tick = 0;
+        s_i2c_tick++;
+        if (s_i2c_tick >= 10) {
+            s_i2c_tick = 0;
+            I2cHealthData hd;
+            hd.tca9548a_ok     = hal_tof_ok();
+            hd.mcp23017_ok     = hal_gpio_ok();
+            hd.sc16is752_1_ok  = hal_radar_get_status(RADAR_SENSOR_VHOD).active
+                               || hal_radar_get_status(RADAR_SENSOR_CESTA_L).active;
+            hd.sc16is752_2_ok  = hal_radar_get_status(RADAR_SENSOR_CESTA_D).active
+                               || hal_radar_get_status(RADAR_SENSOR_GARAZA).active;
+            { LightStats _ls = {}; hd.bh1750_ok = hal_light_get_stats(&_ls); }
+            screen_service_set_i2c_health(hd);
+            screen_service_apply_updates();
+        }
+    }
 }
 
 // ============================================================
