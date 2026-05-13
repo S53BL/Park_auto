@@ -1,40 +1,37 @@
 // ============================================================
 // screen_main.cpp — Glavni zaslon
 // Projekt : Avtomatizacija Pokritega Parkirišča
-// Verzija : 2.0.1-dev  |  Datum: 2026-04
-// Faza    : 0 — polna implementacija UI
+// Verzija : 2.1.0-dev  |  Datum: 2026-05
 //
-// POPRAVKI v2.0.1:
-//   - lv_timer_create za hold_prog_timer: dodan ekspliciten
-//     lv_timer_set_repeat_count(..., -1) — neskončno ponavljanje
-//     (LVGL 9.x privzeto je prav tako neskončno, ampak ekspliciten
-//     klic odpravi morebitne nejasnosti pri različnih verzijah)
-//   - screen_main.h zdaj vključuje hal_display.h ki vključuje <lvgl.h>,
-//     ni potrebno posebej vključiti <lvgl.h> v tej datoteki
+// SPREMEMBE v2.1.0 (E2 + E3):
+//   E2    — screen_main_apply_updates() ni več prazen placeholder.
+//           Parking posodobitev dela prek set_parking() + tof_phase indikator.
+//   E3.1  — SSR gumbi: nova ikona stanja (roka=ročno, ≡=auto, ×=disabled)
+//           Countdown < 60s: večja pisava + rumena barva
+//           Vizualna razlika ON_AUTO vs ON_MANUAL (barva badge)
+//   E3.2  — Parking kartice: TOF faza indikator (pika + besedilo faze)
+//           Horizontalni TOF razdalja prikazana kot "N cm"
+//   E3.3  — Noč/dan indikator v zgornji vrstici (luna/sonce + lux vrednost)
+//           screen_main_set_daynight() nova funkcija
+//
 // ============================================================
 
 #include "screen_main.h"
 #include "event_bus.h"
+#include "hal_tof.h"
 
-// SLOVENSKI FONTI (Montserrat + ČŠŽ) so v src/fonts/.
-// PlatformIO jih prevede samodejno kot ločene .c enote.
-// Extern deklaracije so v LV_FONT_CUSTOM_DECLARE v lv_conf.h.
-// ============================================================
-
-// ============================================================
-// LOGGING
-// ============================================================
 #include "logger.h"
 #define SMNI(fmt, ...) LOG_INFO ("SMAIN", fmt, ##__VA_ARGS__)
 #define SMND(fmt, ...) LOG_DEBUG("SMAIN", fmt, ##__VA_ARGS__)
 
 // ============================================================
-// BARVE — posodobljeno 2026-04 (Tailwind-inspired dark theme)
+// BARVE
 // ============================================================
 #define C_OFF_BG        lv_color_hex(0x1E2A2F)
 #define C_OFF_TXT       lv_color_hex(0x91FF66)
 #define C_ON_BG         lv_color_hex(0x27241F)
 #define C_ON_TXT        lv_color_hex(0xFFD466)
+#define C_ON_MANUAL_TXT lv_color_hex(0xFF9B3B)   // E3.1: ročni = oranžen
 #define C_DIS_BG        lv_color_hex(0x1A1A1A)
 #define C_DIS_TXT       lv_color_hex(0x64748B)
 #define C_PKG_EMPTY_BG  lv_color_hex(0x1F2937)
@@ -45,18 +42,30 @@
 #define C_SCREEN_BG     lv_color_hex(0x111827)
 #define C_CAR_OCC       lv_color_hex(0x34D399)
 #define C_CAR_EMPTY     lv_color_hex(0x64748B)
-
-// Prej inline — zdaj makroti
-#define C_SSR_BORDER        lv_color_hex(0x334155)
-#define C_HOLD_BAR_BG       lv_color_hex(0x1F2937)
-#define C_PKG_OCC_BORDER    lv_color_hex(0xFBBF24)
-#define C_PKG_OCC_NAME      lv_color_hex(0xF1F5F9)
-#define C_PKG_EMPTY_BORDER  lv_color_hex(0x334155)
-#define C_PKG_EMPTY_NAME    lv_color_hex(0xCBD5E1)
-#define C_PKG_TITLE         lv_color_hex(0x94A3B8)
-#define C_PKG_STATS         lv_color_hex(0xCBD5E1)
-#define C_RAD_ARC_BG        lv_color_hex(0x1F2937)
-#define C_RAD_LABEL         lv_color_hex(0xCBD5E1)
+#define C_SSR_BORDER    lv_color_hex(0x334155)
+#define C_HOLD_BAR_BG   lv_color_hex(0x1F2937)
+#define C_PKG_OCC_BORDER   lv_color_hex(0xFBBF24)
+#define C_PKG_OCC_NAME     lv_color_hex(0xF1F5F9)
+#define C_PKG_EMPTY_BORDER lv_color_hex(0x334155)
+#define C_PKG_EMPTY_NAME   lv_color_hex(0xCBD5E1)
+#define C_PKG_TITLE     lv_color_hex(0x94A3B8)
+#define C_PKG_STATS     lv_color_hex(0xCBD5E1)
+#define C_RAD_ARC_BG    lv_color_hex(0x1F2937)
+#define C_RAD_LABEL     lv_color_hex(0xCBD5E1)
+// E3.3 — noč/dan indikator
+#define C_NIGHT_BG      lv_color_hex(0x1A2035)
+#define C_NIGHT_TXT     lv_color_hex(0x93C5FD)
+#define C_DAY_BG        lv_color_hex(0x1F2A18)
+#define C_DAY_TXT       lv_color_hex(0xA3E635)
+// E3.2 — TOF faza barve
+#define C_PHASE_IDLE    lv_color_hex(0x334155)
+#define C_PHASE_DETECT  lv_color_hex(0xFBBF24)
+#define C_PHASE_SCAN    lv_color_hex(0x60A5FA)
+#define C_PHASE_DTW     lv_color_hex(0xA78BFA)
+// E3.1 — ikona badge barve
+#define C_BADGE_AUTO    lv_color_hex(0x1D4E3A)
+#define C_BADGE_MANUAL  lv_color_hex(0x4A2E12)
+#define C_BADGE_DIS     lv_color_hex(0x2A1F1F)
 
 // ============================================================
 // DIMENZIJE
@@ -64,15 +73,21 @@
 #define SCR_W  320
 #define PAD    6
 
+// E3.3: zgornja statusna vrstica (noč/dan + lux)
+#define TOPBAR_H    22
+
 #define SSR_BTN_W   ((SCR_W - PAD * 3) / 2)
 #define SSR_BTN_H   112
 #define SSR_SEC_H   (SSR_BTN_H * 2 + PAD * 3)
 #define SSR_BAR_H   4
 #define HOLD_MS     1200
 
-#define PKG_Y       (SSR_SEC_H + PAD)
+// SSR Y-start: pod topbar
+#define SSR_Y_START (TOPBAR_H + PAD)
+
+#define PKG_Y       (SSR_Y_START + SSR_SEC_H + PAD)
 #define PKG_W       ((SCR_W - PAD * 3) / 2)
-#define PKG_H       100
+#define PKG_H       110     // E3.2: malo višje — prostor za TOF faza indikator
 #define PKG_SEC_H   (PKG_H + PAD * 2)
 
 #define RAD_Y       (PKG_Y + PKG_SEC_H)
@@ -88,6 +103,7 @@ struct SsrWidget {
     lv_obj_t*      lbl_name;
     lv_obj_t*      lbl_countdown;
     lv_obj_t*      lbl_status;
+    lv_obj_t*      lbl_icon;       // E3.1: ikona stanja (ročno/auto/disabled)
     lv_obj_t*      bar_hold;
     lv_obj_t*      lbl_lock;
     lv_timer_t*    hold_fire_timer;
@@ -109,6 +125,8 @@ struct PkgWidget {
     lv_obj_t*          lbl_title;
     lv_obj_t*          lbl_name;
     lv_obj_t*          lbl_stats;
+    lv_obj_t*          lbl_phase;   // E3.2: TOF faza indikator
+    lv_obj_t*          lbl_horiz;   // E3.2: horizontalni TOF razdalja
     CarIcon            car;
     uint8_t            idx;
     ParkingDisplayData data;
@@ -130,10 +148,15 @@ static SsrWidget   s_ssr[4]            = {};
 static PkgWidget   s_pkg[2]            = {};
 static RadWidget   s_rad[4]            = {};
 static lv_timer_t* s_countdown_timer   = nullptr;
+// E3.3 — noč/dan topbar
+static lv_obj_t*   s_topbar            = nullptr;
+static lv_obj_t*   s_topbar_icon       = nullptr;
+static lv_obj_t*   s_topbar_lux        = nullptr;
 static bool        s_created           = false;
 
-static const char* SSR_NAMES[4]   = { "Glavna\nveriga", "Glavna\ndodatno", "Pred\nlopo", "Pred\ngaražo" };
+static const char* SSR_NAMES[4]   = { "Glavna\nveriga", "Glavna\ndodatno", "Pred\ngaražo", "Pred\nlopo" };
 static const char* RADAR_NAMES[4] = { "Vhod", "Cesta L", "Cesta D", "Garaža" };
+static const char* PHASE_NAMES[4] = { "·", "DETECT", "SCAN", "DTW" };
 
 // ============================================================
 // POMOŽNE
@@ -144,40 +167,80 @@ static void fmt_cd(char* buf, size_t len, uint32_t sec) {
 }
 
 // ============================================================
-// SSR — STILIZACIJA
+// SSR — STILIZACIJA (E3.1 dopolnjena)
 // ============================================================
 
 static void ssr_style(SsrWidget& w) {
     lv_color_t bg, tc;
-    const char* st;
+    const char* st_txt;
+    const char* icon_txt;
+
     switch (w.data.state) {
         case DisplaySsrState::ON:
-            bg = C_ON_BG; tc = C_ON_TXT;
-            st = w.data.is_manual ? "Ročno · +30 min" : "Vključeno";
+            bg = C_ON_BG;
+            tc = w.data.is_manual ? C_ON_MANUAL_TXT : C_ON_TXT;
+            st_txt  = w.data.is_manual ? "Ročno" : "Auto";
+            icon_txt = w.data.is_manual ? "R" : "A";   // E3.1: ikona
             break;
         case DisplaySsrState::SSR_DISABLED:
             bg = C_DIS_BG; tc = C_DIS_TXT;
-            st = "Onemogočeno";
+            st_txt  = "Onemogočeno";
+            icon_txt = "×";
             break;
         default:
             bg = C_OFF_BG; tc = C_OFF_TXT;
-            st = "Izključeno";
+            st_txt  = "Izključeno";
+            icon_txt = "";
             break;
     }
+
     lv_obj_set_style_bg_color(w.btn, bg, LV_PART_MAIN);
+
+    // Disabled gumb dobi svetlejši pressed stil (za re-enable feedback)
+    if (w.data.state == DisplaySsrState::SSR_DISABLED) {
+        lv_obj_set_style_bg_color(w.btn,
+            lv_color_hex(0x2A2A2A),
+            LV_PART_MAIN | LV_STATE_PRESSED);
+    }
+
     lv_obj_set_style_text_color(w.lbl_name,      tc, LV_PART_MAIN);
-    lv_obj_set_style_text_color(w.lbl_countdown, tc, LV_PART_MAIN);
     lv_obj_set_style_text_color(w.lbl_status,    tc, LV_PART_MAIN);
     lv_obj_set_style_bg_color(w.bar_hold, tc, LV_PART_INDICATOR);
 
+    // E3.1 — ikona badge
+    lv_label_set_text(w.lbl_icon, icon_txt);
+    lv_obj_set_style_text_color(w.lbl_icon, tc, LV_PART_MAIN);
+    if (w.data.state == DisplaySsrState::ON) {
+        lv_obj_set_style_bg_color(w.lbl_icon,
+            w.data.is_manual ? C_BADGE_MANUAL : C_BADGE_AUTO, LV_PART_MAIN);
+        lv_obj_remove_flag(w.lbl_icon, LV_OBJ_FLAG_HIDDEN);
+    } else if (w.data.state == DisplaySsrState::SSR_DISABLED) {
+        lv_obj_set_style_bg_color(w.lbl_icon, C_BADGE_DIS, LV_PART_MAIN);
+        lv_obj_remove_flag(w.lbl_icon, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(w.lbl_icon, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    // E3.1 — countdown: < 60s = večja pisava + močnejša barva
     if (w.data.state == DisplaySsrState::ON && w.data.countdown_s > 0) {
         char buf[8]; fmt_cd(buf, sizeof(buf), w.data.countdown_s);
         lv_label_set_text(w.lbl_countdown, buf);
+        if (w.data.countdown_s < 60) {
+            lv_obj_set_style_text_font(w.lbl_countdown,
+                &font_montserrat_28_sl, LV_PART_MAIN);
+            lv_obj_set_style_text_color(w.lbl_countdown,
+                lv_color_hex(0xFF4444), LV_PART_MAIN);
+        } else {
+            lv_obj_set_style_text_font(w.lbl_countdown,
+                &font_montserrat_24_sl, LV_PART_MAIN);
+            lv_obj_set_style_text_color(w.lbl_countdown, tc, LV_PART_MAIN);
+        }
         lv_obj_remove_flag(w.lbl_countdown, LV_OBJ_FLAG_HIDDEN);
     } else {
         lv_obj_add_flag(w.lbl_countdown, LV_OBJ_FLAG_HIDDEN);
     }
-    lv_label_set_text(w.lbl_status, st);
+
+    lv_label_set_text(w.lbl_status, st_txt);
 
     if (w.data.state == DisplaySsrState::SSR_DISABLED)
         lv_obj_remove_flag(w.lbl_lock, LV_OBJ_FLAG_HIDDEN);
@@ -190,18 +253,20 @@ static void ssr_style(SsrWidget& w) {
 // ============================================================
 
 static void ssr_hold_fire_cb(lv_timer_t* t) {
-    // lv_timer_get_user_data() — obstaja v LVGL 9.2.2 (lv_timer.h)
     SsrWidget* w = (SsrWidget*)lv_timer_get_user_data(t);
     if (!w) return;
     if (w->hold_prog_timer) {
         lv_timer_delete(w->hold_prog_timer);
         w->hold_prog_timer = nullptr;
     }
-    w->hold_fire_timer = nullptr;  // LVGL sam izbriše enkraten timer po klicu
+    w->hold_fire_timer = nullptr;
     lv_bar_set_value(w->bar_hold, 0, LV_ANIM_OFF);
     lv_obj_add_flag(w->bar_hold, LV_OBJ_FLAG_HIDDEN);
-    SMND("SSR[%d] HOLD → BUTTON_SSR_DISABLE payload=%d", w->idx, w->idx);
-    EventBus::publish(EventType::BUTTON_SSR_DISABLE, w->idx);
+
+    bool is_disabled = (w->data.state == DisplaySsrState::SSR_DISABLED);
+    SMND("SSR[%d] HOLD → BUTTON_SSR_DISABLE payload=%d (trenutno: %s)",
+         w->idx, w->idx, is_disabled ? "DISABLED→re-enable" : "normal→disable");
+    EventBus::publish(EventType::BUTTON_SSR_DISABLE, (uint32_t)w->idx);
 }
 
 static void ssr_hold_prog_cb(lv_timer_t* t) {
@@ -215,12 +280,21 @@ static void ssr_hold_prog_cb(lv_timer_t* t) {
 }
 
 static void ssr_countdown_cb(lv_timer_t*) {
+    // Lokalni tick samo za vizualni prikaz med polling cikli
+    // Dejanska vrednost pride iz ui_refresh_cb vsakih 1000ms
     for (int i = 0; i < 4; i++) {
         SsrWidget& w = s_ssr[i];
         if (w.data.state != DisplaySsrState::ON || w.data.countdown_s == 0) continue;
         w.data.countdown_s--;
         char buf[8]; fmt_cd(buf, sizeof(buf), w.data.countdown_s);
         lv_label_set_text(w.lbl_countdown, buf);
+        // E3.1: barva pri prehodu pod 60s
+        if (w.data.countdown_s == 59) {
+            lv_obj_set_style_text_font(w.lbl_countdown,
+                &font_montserrat_28_sl, LV_PART_MAIN);
+            lv_obj_set_style_text_color(w.lbl_countdown,
+                lv_color_hex(0xFF4444), LV_PART_MAIN);
+        }
     }
 }
 
@@ -246,34 +320,47 @@ static void ssr_event_cb(lv_event_t* e) {
     SsrWidget* w = (SsrWidget*)lv_event_get_user_data(e);
     if (!w) return;
 
+    bool is_disabled = (w->data.state == DisplaySsrState::SSR_DISABLED);
+
+    // ── PRESSED ──────────────────────────────────────────────
     if (code == LV_EVENT_PRESSED) {
-        if (w->data.state == DisplaySsrState::SSR_DISABLED) return;
+        // Disabled gumb: VEDNO registriramo hold (za re-enable)
+        // Normal gumb: registriramo hold (za disable)
         w->press_ms = millis();
         ssr_cancel_hold(*w);
 
-        // Enkraten timer — sproži BUTTON_SSR_DISABLE po HOLD_MS
         w->hold_fire_timer = lv_timer_create(ssr_hold_fire_cb, HOLD_MS, w);
         lv_timer_set_repeat_count(w->hold_fire_timer, 1);
-
-        // Neskončen timer — osvežuje progress bar vsako 50ms
         w->hold_prog_timer = lv_timer_create(ssr_hold_prog_cb, 50, w);
-        lv_timer_set_repeat_count(w->hold_prog_timer, -1);  // eksplicitno neskončno
+        lv_timer_set_repeat_count(w->hold_prog_timer, -1);
+    }
 
-    } else if (code == LV_EVENT_RELEASED) {
+    // ── RELEASED ali SHORT_CLICKED ───────────────────────────
+    // Oba eventa pokrijemo — AXS15231B touch pošlje različna zaporedja
+    else if (code == LV_EVENT_RELEASED || code == LV_EVENT_SHORT_CLICKED) {
         bool was_short = (w->hold_fire_timer != nullptr);
         ssr_cancel_hold(*w);
-        if (was_short && w->data.state != DisplaySsrState::SSR_DISABLED) {
-            SMND("SSR[%d] SHORT TAP → BUTTON_SSR payload=%d", w->idx, w->idx);
-            EventBus::publish(EventType::BUTTON_SSR, w->idx);
-        }
 
-    } else if (code == LV_EVENT_PRESS_LOST) {
+        // Short tap na disabled gumbu → prezri (samo hold deluje)
+        if (was_short && !is_disabled) {
+            SMND("SSR[%d] SHORT TAP → BUTTON_SSR payload=%d", w->idx, w->idx);
+            EventBus::publish(EventType::BUTTON_SSR, (uint32_t)w->idx);
+        }
+    }
+
+    // ── PRESS_LOST (touch oddrsnil brez dviga) ────────────────
+    else if (code == LV_EVENT_PRESS_LOST) {
+        bool was_short = (w->hold_fire_timer != nullptr);
         ssr_cancel_hold(*w);
+        if (was_short && !is_disabled) {
+            SMND("SSR[%d] PRESS_LOST→tap → BUTTON_SSR payload=%d", w->idx, w->idx);
+            EventBus::publish(EventType::BUTTON_SSR, (uint32_t)w->idx);
+        }
     }
 }
 
 // ============================================================
-// SSR — KREACIJA
+// SSR — KREACIJA (E3.1: dodan lbl_icon)
 // ============================================================
 
 static void ssr_create(uint8_t idx, lv_obj_t* parent, int x, int y) {
@@ -296,6 +383,20 @@ static void ssr_create(uint8_t idx, lv_obj_t* parent, int x, int y) {
     lv_obj_add_flag(w.btn, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(w.btn, ssr_event_cb, LV_EVENT_ALL, &w);
 
+    // ── Pressed vizualni odziv ────────────────────────────────
+    lv_obj_set_style_bg_color(w.btn,
+        lv_color_hex(0x2E3A3F),
+        LV_PART_MAIN | LV_STATE_PRESSED);
+    lv_obj_set_style_bg_opa(w.btn,
+        LV_OPA_COVER,
+        LV_PART_MAIN | LV_STATE_PRESSED);
+    lv_obj_set_style_border_color(w.btn,
+        lv_color_hex(0x6A8A9A),
+        LV_PART_MAIN | LV_STATE_PRESSED);
+    lv_obj_set_style_border_width(w.btn,
+        2,
+        LV_PART_MAIN | LV_STATE_PRESSED);
+
     w.lbl_name = lv_label_create(w.btn);
     lv_label_set_text(w.lbl_name, SSR_NAMES[idx]);
     lv_obj_set_style_text_color(w.lbl_name, C_OFF_TXT, LV_PART_MAIN);
@@ -303,6 +404,19 @@ static void ssr_create(uint8_t idx, lv_obj_t* parent, int x, int y) {
     lv_obj_align(w.lbl_name, LV_ALIGN_TOP_LEFT, 8, 8);
     lv_label_set_long_mode(w.lbl_name, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(w.lbl_name, SSR_BTN_W / 2);
+
+    // E3.1 — ikona badge (gor desno)
+    w.lbl_icon = lv_label_create(w.btn);
+    lv_label_set_text(w.lbl_icon, "");
+    lv_obj_set_style_text_font(w.lbl_icon, &font_montserrat_14_sl, LV_PART_MAIN);
+    lv_obj_set_style_text_color(w.lbl_icon, C_OFF_TXT, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(w.lbl_icon, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(w.lbl_icon, C_BADGE_AUTO, LV_PART_MAIN);
+    lv_obj_set_style_radius(w.lbl_icon, 4, LV_PART_MAIN);
+    lv_obj_set_style_pad_hor(w.lbl_icon, 4, LV_PART_MAIN);
+    lv_obj_set_style_pad_ver(w.lbl_icon, 2, LV_PART_MAIN);
+    lv_obj_align(w.lbl_icon, LV_ALIGN_TOP_RIGHT, -6, 6);
+    lv_obj_add_flag(w.lbl_icon, LV_OBJ_FLAG_HIDDEN);
 
     w.lbl_countdown = lv_label_create(w.btn);
     lv_label_set_text(w.lbl_countdown, "00:00");
@@ -381,7 +495,7 @@ static void pkg_event_cb(lv_event_t* e) {
 }
 
 // ============================================================
-// PARKING — KREACIJA + STILIZACIJA
+// PARKING — APPLY (E3.2 dopolnjena)
 // ============================================================
 
 static void pkg_apply(PkgWidget& w) {
@@ -403,7 +517,39 @@ static void pkg_apply(PkgWidget& w) {
         lv_label_set_text(w.lbl_stats, "");
         car_set_color(w.car, C_CAR_EMPTY);
     }
+
+    // E3.2 — TOF faza indikator
+    uint8_t phase = w.data.tof_phase;
+    lv_color_t phase_col;
+    switch (phase) {
+        case 1:  phase_col = C_PHASE_DETECT; break;
+        case 2:  phase_col = C_PHASE_SCAN;   break;
+        case 3:  phase_col = C_PHASE_DTW;    break;
+        default: phase_col = C_PHASE_IDLE;   break;
+    }
+    // Pokaži fazo samo na aktivnem mestu ali ko ni IDLE
+    if (w.data.tof_active && phase > 0) {
+        lv_label_set_text(w.lbl_phase, PHASE_NAMES[phase]);
+        lv_obj_set_style_text_color(w.lbl_phase, phase_col, LV_PART_MAIN);
+        lv_obj_remove_flag(w.lbl_phase, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(w.lbl_phase, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    // E3.2 — horizontalni TOF razdalja
+    if (w.data.horiz_mm > 0 && w.data.horiz_mm < 8000) {
+        char buf[12];
+        snprintf(buf, sizeof(buf), "%u cm", w.data.horiz_mm / 10);
+        lv_label_set_text(w.lbl_horiz, buf);
+        lv_obj_remove_flag(w.lbl_horiz, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(w.lbl_horiz, LV_OBJ_FLAG_HIDDEN);
+    }
 }
+
+// ============================================================
+// PARKING — KREACIJA (E3.2: dodana lbl_phase, lbl_horiz)
+// ============================================================
 
 static void pkg_create(uint8_t idx, lv_obj_t* parent, int x, int y) {
     PkgWidget& w = s_pkg[idx];
@@ -441,13 +587,29 @@ static void pkg_create(uint8_t idx, lv_obj_t* parent, int x, int y) {
     lv_label_set_text(w.lbl_stats, "");
     lv_obj_set_style_text_color(w.lbl_stats, C_PKG_STATS, LV_PART_MAIN);
     lv_obj_set_style_text_font(w.lbl_stats, &font_montserrat_14_sl, LV_PART_MAIN);
-    lv_obj_align(w.lbl_stats, LV_ALIGN_BOTTOM_LEFT, 8, -6);
+    lv_obj_align(w.lbl_stats, LV_ALIGN_BOTTOM_LEFT, 8, -20);  // malo višje — prostor za faza
+
+    // E3.2 — TOF faza indikator (spodaj levo)
+    w.lbl_phase = lv_label_create(w.card);
+    lv_label_set_text(w.lbl_phase, "");
+    lv_obj_set_style_text_font(w.lbl_phase, &font_montserrat_14_sl, LV_PART_MAIN);
+    lv_obj_set_style_text_color(w.lbl_phase, C_PHASE_IDLE, LV_PART_MAIN);
+    lv_obj_align(w.lbl_phase, LV_ALIGN_BOTTOM_LEFT, 8, -5);
+    lv_obj_add_flag(w.lbl_phase, LV_OBJ_FLAG_HIDDEN);
+
+    // E3.2 — horizontalni TOF razdalja (spodaj desno)
+    w.lbl_horiz = lv_label_create(w.card);
+    lv_label_set_text(w.lbl_horiz, "");
+    lv_obj_set_style_text_font(w.lbl_horiz, &font_montserrat_14_sl, LV_PART_MAIN);
+    lv_obj_set_style_text_color(w.lbl_horiz, C_PKG_STATS, LV_PART_MAIN);
+    lv_obj_align(w.lbl_horiz, LV_ALIGN_BOTTOM_RIGHT, -8, -5);
+    lv_obj_add_flag(w.lbl_horiz, LV_OBJ_FLAG_HIDDEN);
 
     car_create(w, PKG_W - 68, 16, C_CAR_EMPTY);
 }
 
 // ============================================================
-// RADAR — KREACIJA + STILIZACIJA
+// RADAR — KREACIJA + STILIZACIJA (nespremenjeno)
 // ============================================================
 
 static void rad_apply(RadWidget& w) {
@@ -498,6 +660,35 @@ static void rad_create(uint8_t idx, lv_obj_t* parent, int x, int y) {
 }
 
 // ============================================================
+// E3.3 — TOPBAR KREACIJA
+// ============================================================
+
+static void topbar_create(lv_obj_t* parent) {
+    s_topbar = lv_obj_create(parent);
+    lv_obj_set_size(s_topbar, SCR_W, TOPBAR_H);
+    lv_obj_set_pos(s_topbar, 0, 0);
+    lv_obj_set_style_bg_color(s_topbar, C_NIGHT_BG, LV_PART_MAIN);
+    lv_obj_set_style_radius(s_topbar, 0, LV_PART_MAIN);
+    lv_obj_set_style_border_width(s_topbar, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(s_topbar, 0, LV_PART_MAIN);
+    lv_obj_clear_flag(s_topbar, LV_OBJ_FLAG_SCROLLABLE);
+
+    // Ikona (luna/sonce)
+    s_topbar_icon = lv_label_create(s_topbar);
+    lv_label_set_text(s_topbar_icon, "))) NOC");   // placeholder — bo zamenjano ob posodobitvi
+    lv_obj_set_style_text_font(s_topbar_icon, &font_montserrat_14_sl, LV_PART_MAIN);
+    lv_obj_set_style_text_color(s_topbar_icon, C_NIGHT_TXT, LV_PART_MAIN);
+    lv_obj_align(s_topbar_icon, LV_ALIGN_LEFT_MID, 8, 0);
+
+    // Lux vrednost
+    s_topbar_lux = lv_label_create(s_topbar);
+    lv_label_set_text(s_topbar_lux, "-- lx");
+    lv_obj_set_style_text_font(s_topbar_lux, &font_montserrat_14_sl, LV_PART_MAIN);
+    lv_obj_set_style_text_color(s_topbar_lux, C_NIGHT_TXT, LV_PART_MAIN);
+    lv_obj_align(s_topbar_lux, LV_ALIGN_RIGHT_MID, -8, 0);
+}
+
+// ============================================================
 // JAVNE FUNKCIJE
 // ============================================================
 
@@ -507,30 +698,40 @@ void screen_main_create(lv_obj_t* parent) {
     lv_obj_set_style_pad_all(parent, 0, LV_PART_MAIN);
     lv_obj_clear_flag(parent, LV_OBJ_FLAG_SCROLLABLE);
 
+    // E3.3 — noč/dan topbar (zgoraj)
+    topbar_create(parent);
+
+    // SSR gumbi (2×2 mreža, pod topbar)
     for (int row = 0; row < 2; row++)
         for (int col = 0; col < 2; col++) {
             uint8_t idx = (uint8_t)(row * 2 + col);
             ssr_create(idx, parent,
                        PAD + col * (SSR_BTN_W + PAD),
-                       PAD + row * (SSR_BTN_H + PAD));
+                       SSR_Y_START + PAD + row * (SSR_BTN_H + PAD));
         }
     s_countdown_timer = lv_timer_create(ssr_countdown_cb, 1000, nullptr);
 
+    // Parking kartici
     for (int i = 0; i < 2; i++)
         pkg_create((uint8_t)i, parent, PAD + i * (PKG_W + PAD), PKG_Y);
 
+    // Radar arci
     for (int i = 0; i < 4; i++)
         rad_create((uint8_t)i, parent, PAD + i * (RAD_W + PAD), RAD_Y);
 
     s_created = true;
     SMNI("screen_main_create OK  SSR=%dx%d  PKG=%dx%d  RAD_ARC=%dpx",
          SSR_BTN_W, SSR_BTN_H, PKG_W, PKG_H, RAD_ARC_SZ);
-    SMNI("Layout: SSR_SEC_H=%d PKG_Y=%d RAD_Y=%d SCR_total=%d",
-         SSR_SEC_H, PKG_Y, RAD_Y, RAD_Y + RAD_ARC_SZ + 20);
+    SMNI("Layout: TOPBAR=%d SSR_Y=%d PKG_Y=%d RAD_Y=%d",
+         TOPBAR_H, SSR_Y_START, PKG_Y, RAD_Y);
 }
 
+// E2 — ni več prazen placeholder
+// hal_display.cpp pokliče screen_main_set_ssr/parking/radar_arc direktno
+// iz ui_refresh_cb (LVGL timer kontekst) — screen_main_apply_updates()
+// ostane kot prazna funkcija za kompatibilnost (ni klicev nanj v resnici).
 void screen_main_apply_updates() {
-    // Placeholder — implementiraj skupaj z hal_display getter funkcijami
+    // Ni potrebno — ui_refresh_cb v hal_display.cpp kliče setterje direktno.
 }
 
 void screen_main_set_ssr(uint8_t idx, const SsrDisplayData& data) {
@@ -581,4 +782,26 @@ void screen_main_set_radar_arc(uint8_t idx, const RadarArcData& data) {
 
     lv_arc_set_value(w.arc, data.energy);
     lv_obj_set_style_arc_color(w.arc, color, LV_PART_INDICATOR);
+}
+
+// E3.3 — noč/dan indikator posodobitev
+void screen_main_set_daynight(bool is_night, float lux) {
+    if (!s_created || !s_topbar) return;
+
+    // Ikona: luna ali sonce (ASCII approximation — bo zamenjano z font ikono če je na voljo)
+    lv_label_set_text(s_topbar_icon, is_night ? "))) NOC" : "* * DAN");
+    lv_obj_set_style_bg_color(s_topbar, is_night ? C_NIGHT_BG : C_DAY_BG, LV_PART_MAIN);
+    lv_obj_set_style_text_color(s_topbar_icon,
+        is_night ? C_NIGHT_TXT : C_DAY_TXT, LV_PART_MAIN);
+    lv_obj_set_style_text_color(s_topbar_lux,
+        is_night ? C_NIGHT_TXT : C_DAY_TXT, LV_PART_MAIN);
+
+    // Lux vrednost
+    char buf[16];
+    if (lux < 0.1f) {
+        lv_label_set_text(s_topbar_lux, "-- lx");
+    } else {
+        snprintf(buf, sizeof(buf), "%.0f lx", lux);
+        lv_label_set_text(s_topbar_lux, buf);
+    }
 }

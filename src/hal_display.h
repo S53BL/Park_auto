@@ -37,6 +37,15 @@ struct ParkingDisplayData {
     char     vehicle_name[32];
     float    dtw_distance;
     uint32_t parking_count;
+    // E2 dopolnitev — TOF diagnostika za faza indikator
+    uint8_t  tof_phase;      // 0=IDLE 1=DETECT 2=SCANNING 3=DTW_WAIT
+    bool     tof_active;     // to parkirno mesto je trenutno aktivno
+    uint16_t horiz_mm;       // razdalja horizontalnega TOF (0 = ni meritve)
+};
+
+struct DayNightData {
+    bool  is_night;
+    float lux;
 };
 
 struct RadarDisplayData {

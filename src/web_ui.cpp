@@ -32,6 +32,8 @@
 #include "hal_gpio.h"
 #include "hal_tof.h"
 #include "hal_light.h"
+#include "light_logic.h"
+#include "event_bus.h"
 
 #include <LittleFS.h>
 #include <ESPAsyncWebServer.h>
@@ -153,13 +155,38 @@ static void _handleStatus(AsyncWebServerRequest* req) {
     // --- GPIO stanje (MCP23017) ---
     GpioState gpio = hal_gpio_get_state();
 
-    // --- SSR stanje (4 SSR-ji, indeks 1–4) ---
+    // --- SSR stanje (iz light_logic) ---
     JsonArray ssrArr = doc["ssr"].to<JsonArray>();
-    for (uint8_t i = 1; i <= 4; i++) {
-        JsonObject s = ssrArr.add<JsonObject>();
-        s["id"]         = i;
-        s["on"]         = gpio.ssr[i];
-        s["countdown_s"]= 0;   // TODO Blok D: light_logic_get_state().ssr_countdown_s[i]
+    if (light_logic_ok()) {
+        LightLogicState ll = light_logic_get_state();
+        for (uint8_t i = 1; i <= 4; i++) {
+            JsonObject s = ssrArr.add<JsonObject>();
+            s["id"]          = i;
+            s["on"]          = (ll.ssr[i].state == SsrLogicState::ON_AUTO ||
+                                ll.ssr[i].state == SsrLogicState::ON_MANUAL);
+            s["countdown_s"] = ll.ssr[i].countdown_s;
+            s["disabled"]    = ll.ssr[i].disabled;
+            s["is_auto"]     = ll.ssr[i].is_auto;
+            const char* ss;
+            switch (ll.ssr[i].state) {
+                case SsrLogicState::ON_AUTO:     ss = "ON_AUTO";   break;
+                case SsrLogicState::ON_MANUAL:   ss = "ON_MANUAL"; break;
+                case SsrLogicState::SSR_DISABLED:ss = "DISABLED";  break;
+                default:                         ss = "OFF";       break;
+            }
+            s["state_str"] = ss;
+        }
+    } else {
+        // light_logic še ni inicializiran — fallback na gpio stanje
+        for (uint8_t i = 1; i <= 4; i++) {
+            JsonObject s = ssrArr.add<JsonObject>();
+            s["id"]          = i;
+            s["on"]          = gpio.ssr[i];
+            s["countdown_s"] = 0;
+            s["disabled"]    = false;
+            s["is_auto"]     = false;
+            s["state_str"]   = "UNKNOWN";
+        }
     }
 
     // --- TOF senzorji (6 kanalov: H_A, P1_A, P2_A, H_B, P1_B, P2_B) ---
@@ -645,24 +672,114 @@ static void _handleRestart(AsyncWebServerRequest* req) {
 }
 
 // ============================================================
-// SECTION 3 — HANDLER-JI: /api/ssr  (ZAZNAMEK — Blok E)
+// SECTION 3 — HANDLER-JI: /api/ssr  (E4)
 // ============================================================
-// NE implementiraj zdaj — implementirati ko se lotimo web integracije (Blok E).
-//
-//   GET  /api/ssr → vrne stanje vseh 4 SSR
-//   POST /api/ssr → {ssr: N, action: "toggle"|"disable"|"enable"}
-//
-//   Implementacija:
-//     #include "light_logic.h"
-//     GET handler: LightLogicState st = light_logic_get_state();
-//                  JSON array s ssr[1..4]: state/countdown_s/disabled/is_auto
-//     POST handler: parsaj action, kliči EventBus::publish(
-//                   action=="disable" ? BUTTON_SSR_DISABLE : BUTTON_SSR,
-//                   ssr_idx - 1)  // -1 ker EventBus payload je 0-based!
-//
-//   OPOMBA: web endpoint uporablja ssr indekse 1–4 (human readable).
-//   EventBus payload je 0–3 (screen_main konvencija).
-//   Pretvorba: EventBus payload = web ssr_idx - 1.
+
+// GET /api/ssr — vrne stanje vseh 4 SSR
+static void _handleSsrGet(AsyncWebServerRequest* req) {
+    _stats.req_total++;
+    _stats.req_api++;
+    LOG_DEBUG(TAG, "GET /api/ssr");
+
+    if (!light_logic_ok()) {
+        _sendError(req, 503, "light_logic not ready");
+        return;
+    }
+
+    LightLogicState st = light_logic_get_state();
+    JsonDocument doc;
+    JsonArray arr = doc["ssr"].to<JsonArray>();
+
+    for (uint8_t i = 1; i <= 4; i++) {
+        JsonObject s = arr.add<JsonObject>();
+        s["id"]          = i;
+        s["state"]       = (uint8_t)st.ssr[i].state;
+        // State string za lažje branje v UI
+        const char* state_str;
+        switch (st.ssr[i].state) {
+            case SsrLogicState::ON_AUTO:     state_str = "ON_AUTO";   break;
+            case SsrLogicState::ON_MANUAL:   state_str = "ON_MANUAL"; break;
+            case SsrLogicState::SSR_DISABLED:state_str = "DISABLED";  break;
+            default:                         state_str = "OFF";       break;
+        }
+        s["state_str"]   = state_str;
+        s["on"]          = (st.ssr[i].state == SsrLogicState::ON_AUTO ||
+                            st.ssr[i].state == SsrLogicState::ON_MANUAL);
+        s["countdown_s"] = st.ssr[i].countdown_s;
+        s["disabled"]    = st.ssr[i].disabled;
+        s["is_auto"]     = st.ssr[i].is_auto;
+    }
+
+    doc["is_night"]    = st.is_night;
+    doc["lux"]         = st.lux;
+    doc["any_motion"]  = st.any_motion;
+
+    _sendJson(req, 200, doc);
+}
+
+// POST /api/ssr — toggle / disable / enable
+// Body: {"ssr": N, "action": "toggle"|"disable"|"enable"}
+// N = 1–4 (human readable), EventBus payload = N-1 (0-based)
+static void _handleSsrPost(AsyncWebServerRequest* req, uint8_t* data,
+                           size_t len, size_t index, size_t total) {
+    _stats.req_total++;
+    _stats.req_api++;
+    if (index + len < total) return;  // čakaj na vse chunke
+
+    LOG_DEBUG(TAG, "POST /api/ssr body=%u bytes", (unsigned)len);
+
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, data, len);
+    if (err) {
+        _sendError(req, 400, "invalid JSON");
+        return;
+    }
+
+    if (!doc["ssr"].is<int>()) {
+        _sendError(req, 400, "missing 'ssr' field (1-4)");
+        return;
+    }
+    if (!doc["action"].is<const char*>()) {
+        _sendError(req, 400, "missing 'action' field (toggle|disable|enable)");
+        return;
+    }
+
+    int ssr_id = doc["ssr"].as<int>();
+    if (ssr_id < 1 || ssr_id > 4) {
+        _sendError(req, 400, "ssr must be 1-4");
+        return;
+    }
+
+    String action = doc["action"].as<String>();
+    action.toLowerCase();
+
+    // EventBus payload je 0-based (screen_main konvencija)
+    uint32_t payload = (uint32_t)(ssr_id - 1);
+
+    if (action == "toggle") {
+        LOG_INFO(TAG, "POST /api/ssr: toggle SSR%d (payload=%lu)", ssr_id, (unsigned long)payload);
+        EventBus::publish(EventType::BUTTON_SSR, payload);
+    } else if (action == "disable") {
+        LOG_INFO(TAG, "POST /api/ssr: disable SSR%d (payload=%lu)", ssr_id, (unsigned long)payload);
+        EventBus::publish(EventType::BUTTON_SSR_DISABLE, payload);
+    } else if (action == "enable") {
+        // "enable" = ponovni dolgi pritisk na disabled SSR = BUTTON_SSR_DISABLE
+        // light_logic toggle: DISABLED → OFF (re-enable)
+        LOG_INFO(TAG, "POST /api/ssr: enable SSR%d (payload=%lu)", ssr_id, (unsigned long)payload);
+        EventBus::publish(EventType::BUTTON_SSR_DISABLE, payload);
+    } else {
+        _sendError(req, 400, "unknown action (use toggle|disable|enable)");
+        return;
+    }
+
+    // Vrni trenutno stanje (light_logic se bo posodobil asinhrono)
+    JsonDocument resp;
+    resp["ok"]     = true;
+    resp["ssr"]    = ssr_id;
+    resp["action"] = action;
+    resp["msg"]    = "queued";
+    _sendJson(req, 200, resp);
+}
 
 // ============================================================
 // SECTION 3 — HANDLER-JI: /files
@@ -889,6 +1006,14 @@ static void _registerApiHandlers() {
         _handleVehiclesRename
     );
     _server.on("/api/vehicles", HTTP_DELETE, _handleVehiclesDelete);
+
+    // --- SSR (E4) ---
+    _server.on("/api/ssr", HTTP_GET, _handleSsrGet);
+    _server.on("/api/ssr", HTTP_POST,
+        [](AsyncWebServerRequest* req) {},
+        nullptr,
+        _handleSsrPost
+    );
 
     // --- Restart ---
     _server.on("/api/restart", HTTP_POST, _handleRestart);

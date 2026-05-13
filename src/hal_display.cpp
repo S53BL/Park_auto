@@ -62,6 +62,7 @@ public:
 #include "screen_main.h"
 #include "light_logic.h"
 #include "hal_radar.h"
+#include "hal_tof.h"
 extern void screen_main_create(lv_obj_t* parent);
 extern void screen_main_apply_updates();
 
@@ -247,14 +248,18 @@ static void ui_refresh_cb(lv_timer_t*) {
 
     LightLogicState st = light_logic_get_state();
 
-    // Posodobi SSR gumbe (indeksi 0–3 na zaslonu = SSR 1–4)
+    // ── SSR gumbi (indeksi 0–3 na zaslonu = SSR 1–4) ──────────────
     for (uint8_t i = 1; i <= 4; i++) {
         SsrDisplayData d;
         switch (st.ssr[i].state) {
             case SsrLogicState::ON_AUTO:
+                d.state       = DisplaySsrState::ON;
+                d.is_manual   = false;
+                d.countdown_s = st.ssr[i].countdown_s;
+                break;
             case SsrLogicState::ON_MANUAL:
                 d.state       = DisplaySsrState::ON;
-                d.is_manual   = !st.ssr[i].is_auto;
+                d.is_manual   = true;
                 d.countdown_s = st.ssr[i].countdown_s;
                 break;
             case SsrLogicState::SSR_DISABLED:
@@ -268,13 +273,18 @@ static void ui_refresh_cb(lv_timer_t*) {
                 d.is_manual   = false;
                 break;
         }
-        screen_main_set_ssr(i - 1, d);  // zaslon idx = SSR idx - 1
+        screen_main_set_ssr(i - 1, d);
     }
 
-    // Posodobi arc vizualizacijo radarjev (4 arc-i spodaj)
+    // ── Radar arci (4 arci spodaj) ───────────────────────────────
     for (uint8_t ri = 0; ri < 4; ri++) {
         const RadarSensorStatus& rs = hal_radar_get_status((RadarSensorId)ri);
         RadarArcData arc;
+        arc.dist_cm   = rs.last_frame.detect_dist_cm;
+        arc.config_ok = rs.config_ok;
+        arc.verified  = rs.config_verified;
+        arc.energy    = rs.last_frame.moving_energy > rs.last_frame.static_energy
+                      ? rs.last_frame.moving_energy : rs.last_frame.static_energy;
 
         if (!rs.active) {
             arc.state = RadarArcState::INACTIVE;
@@ -288,14 +298,32 @@ static void ui_refresh_cb(lv_timer_t*) {
                 default: arc.state = RadarArcState::IDLE;       break;
             }
         }
-        arc.energy    = rs.last_frame.moving_energy > rs.last_frame.static_energy
-                      ? rs.last_frame.moving_energy : rs.last_frame.static_energy;
-        arc.dist_cm   = rs.last_frame.detect_dist_cm;
-        arc.config_ok = rs.config_ok;
-        arc.verified  = rs.config_verified;
-
         screen_main_set_radar_arc(ri, arc);
     }
+
+    // ── Parking kartici (E2) ──────────────────────────────────────
+    // TOF faze + zasedeno/prazno iz hal_tof diagnostike.
+    // vehicle_recog je placeholder (Blok F — implementira pozneje).
+    {
+        TofDiagnostics tof = hal_tof_getDiagnostics();
+        for (uint8_t p = 0; p < 2; p++) {
+            ParkingDisplayData pk = {};
+            pk.occupied      = false;    // Blok F: vehicle_recog_is_occupied(p)
+            pk.dtw_distance  = 0.0f;     // Blok F: vehicle_recog_dtw_dist(p)
+            pk.parking_count = 0;        // Blok F: vehicle_recog_count(p)
+            // TOF faza — katera parkirna mesta je aktivna
+            pk.tof_phase     = (uint8_t)tof.current_phase;
+            pk.tof_active    = ((uint8_t)tof.active_place == p &&
+                                tof.current_phase != TOF_PHASE_IDLE);
+            // Horizontalni TOF (razdalja do vozila): H_A = idx 0, H_B = idx 3
+            pk.horiz_mm      = (p == 0) ? tof.last_mm[0] : tof.last_mm[3];
+            strncpy(pk.vehicle_name, "Prazno", sizeof(pk.vehicle_name) - 1);
+            screen_main_set_parking(p, pk);
+        }
+    }
+
+    // ── Noč/dan indikator (E3.3) ─────────────────────────────────
+    screen_main_set_daynight(st.is_night, st.lux);
 }
 
 // ============================================================

@@ -30,6 +30,10 @@
 
 #include "screen_service.h"
 #include <freertos/semphr.h>
+#include "hal_gpio.h"
+#include "hal_radar.h"
+#include "hal_tof.h"
+#include "config_mgr.h"
 
 // ============================================================
 // LOGGING
@@ -177,15 +181,16 @@ struct SysRow {
     lv_obj_t* lbl_val;
 };
 
-static SysRow s_sys[6];
+static SysRow s_sys[7];
 
-static const char* SYS_NAMES[6] = {
+static const char* SYS_NAMES[7] = {
     "Free SRAM",
     "Free PSRAM",
     "Core 0",
     "Core 1",
     "FPS",
-    "Uptime"
+    "Uptime",
+    "Cfg zamenjani"
 };
 
 // ============================================================
@@ -292,15 +297,30 @@ static void apply_lux() {
 }
 
 static void apply_tof() {
-    char buf[12];
+    // E3.4: preberi diagnostiko direktno za error_count
+    TofDiagnostics tofDiag = hal_tof_getDiagnostics();
+
+    char buf[20];
     for (int i = 0; i < 6; i++) {
         if (s_tof_mm[i] == 0) {
-            lv_label_set_text(s_tof[i].lbl_val, "--");
-            lv_obj_set_style_text_color(s_tof[i].lbl_val, C_TEXT_DIM, LV_PART_MAIN);
+            if (tofDiag.error_count[i] > 0) {
+                snprintf(buf, sizeof(buf), "ERR %u", tofDiag.error_count[i]);
+                lv_label_set_text(s_tof[i].lbl_val, buf);
+                lv_obj_set_style_text_color(s_tof[i].lbl_val, C_ERR, LV_PART_MAIN);
+            } else {
+                lv_label_set_text(s_tof[i].lbl_val, "--");
+                lv_obj_set_style_text_color(s_tof[i].lbl_val, C_TEXT_DIM, LV_PART_MAIN);
+            }
         } else {
-            snprintf(buf, sizeof(buf), "%u mm", s_tof_mm[i]);
+            if (tofDiag.error_count[i] > 0) {
+                // Razdalja + napake skupaj
+                snprintf(buf, sizeof(buf), "%u mm (%ue)", s_tof_mm[i], tofDiag.error_count[i]);
+                lv_obj_set_style_text_color(s_tof[i].lbl_val, C_WARN, LV_PART_MAIN);
+            } else {
+                snprintf(buf, sizeof(buf), "%u mm", s_tof_mm[i]);
+                lv_obj_set_style_text_color(s_tof[i].lbl_val, C_TEXT, LV_PART_MAIN);
+            }
             lv_label_set_text(s_tof[i].lbl_val, buf);
-            lv_obj_set_style_text_color(s_tof[i].lbl_val, C_TEXT, LV_PART_MAIN);
         }
     }
 }
@@ -363,6 +383,9 @@ static void apply_sys() {
 }
 
 static void apply_i2c() {
+    // Preberi Wire1 napake iz hal_gpio (E3.4)
+    uint32_t wire1_errs = hal_gpio_get_wire1_errors();
+
     bool ok_arr[5] = {
         s_i2c_health.tca9548a_ok,
         s_i2c_health.mcp23017_ok,
@@ -373,15 +396,45 @@ static void apply_i2c() {
     for (int i = 0; i < 5; i++) {
         lv_color_t col = ok_arr[i] ? C_OK : C_ERR;
         lv_obj_set_style_bg_color(s_chip[i].dot, col, LV_PART_MAIN);
-        lv_label_set_text(s_chip[i].lbl_status, ok_arr[i] ? "OK" : "ERR");
-        lv_obj_set_style_text_color(s_chip[i].lbl_status, col, LV_PART_MAIN);
+
+        // E3.4: Wire1 napake prikazane ob statusu
+        if (i == 1 && wire1_errs > 0) {
+            // MCP23017 — pokaži napake
+            char buf[20];
+            snprintf(buf, sizeof(buf), "ERR %lu", (unsigned long)wire1_errs);
+            lv_label_set_text(s_chip[i].lbl_status, buf);
+            lv_obj_set_style_text_color(s_chip[i].lbl_status, C_WARN, LV_PART_MAIN);
+        } else {
+            lv_label_set_text(s_chip[i].lbl_status, ok_arr[i] ? "OK" : "ERR");
+            lv_obj_set_style_text_color(s_chip[i].lbl_status, col, LV_PART_MAIN);
+        }
+    }
+}
+
+static void apply_radar_to_log() {
+    // Logira radar stanje vsakih 10 minut za diagnostiko
+    static uint32_t s_last_radar_log_ms = 0;
+    uint32_t now = millis();
+    if (now - s_last_radar_log_ms < 600000UL) return;  // 10 min
+    s_last_radar_log_ms = now;
+
+    for (uint8_t i = 0; i < 4; i++) {
+        const RadarSensorStatus& rs = hal_radar_get_status((RadarSensorId)i);
+        LOG_INFO("SSVC", "Radar[%d]: active=%d ok=%d frames=%lu errs=%lu det=%d e=%d/%d",
+                 i, (int)rs.active, (int)rs.config_ok,
+                 (unsigned long)rs.frames_ok,
+                 (unsigned long)(rs.parse_errors + rs.i2c_errors),
+                 (int)rs.last_frame.detection,
+                 (int)rs.last_frame.moving_energy,
+                 (int)rs.last_frame.static_energy);
     }
 }
 
 // Live uptime ticker — kliče se iz LVGL timer, samo Core1
 static void uptime_tick_cb(lv_timer_t*) {
     if (!s_created) return;
-    // Posodobi uptime iz millis() direktno (ne iz pending — preprost avto-tick)
+
+    // Uptime
     uint32_t up = millis() / 1000;
     uint32_t d  = up / 86400; up %= 86400;
     uint32_t h  = up / 3600;  up %= 3600;
@@ -389,14 +442,14 @@ static void uptime_tick_cb(lv_timer_t*) {
     uint32_t s2 = up % 60;
     char buf[20];
     if (d > 0)
-        snprintf(buf, sizeof(buf), "%lud %02lu:%02lu", (unsigned long)d,
-                 (unsigned long)h, (unsigned long)m);
+        snprintf(buf, sizeof(buf), "%lud %02lu:%02lu",
+                 (unsigned long)d, (unsigned long)h, (unsigned long)m);
     else
         snprintf(buf, sizeof(buf), "%02lu:%02lu:%02lu",
                  (unsigned long)h, (unsigned long)m, (unsigned long)s2);
     lv_label_set_text(s_sys[5].lbl_val, buf);
 
-    // Osvežimo tudi FPS (branje brez mutex — uint32_t, atomarno na ESP32)
+    // FPS
     uint32_t fps = hal_display_getFps();
     char fpsbuf[8];
     snprintf(fpsbuf, sizeof(fpsbuf), "%lu", (unsigned long)fps);
@@ -404,7 +457,7 @@ static void uptime_tick_cb(lv_timer_t*) {
     lv_obj_set_style_text_color(s_sys[4].lbl_val,
                                  fps < 10 ? C_WARN : C_TEXT, LV_PART_MAIN);
 
-    // SRAM — direktno, branje je atomarno dovolj za diagnostiko
+    // SRAM
     uint32_t fh = ESP.getFreeHeap();
     char sram_buf[16];
     snprintf(sram_buf, sizeof(sram_buf), "%lu KB", (unsigned long)(fh / 1024));
@@ -412,10 +465,38 @@ static void uptime_tick_cb(lv_timer_t*) {
     lv_obj_set_style_text_color(s_sys[0].lbl_val,
                                  fh < 30000 ? C_WARN : C_TEXT, LV_PART_MAIN);
 
+    // PSRAM
     uint32_t fp = ESP.getFreePsram();
     char psram_buf[16];
     snprintf(psram_buf, sizeof(psram_buf), "%lu KB", (unsigned long)(fp / 1024));
     lv_label_set_text(s_sys[1].lbl_val, psram_buf);
+
+    // E3.4 — config replaced count (vrstica 6 v SYS_NAMES)
+    if (config_mgr_ok()) {
+        uint8_t replaced = (uint8_t)config_mgr_replaced_count();
+        char rep_buf[8];
+        snprintf(rep_buf, sizeof(rep_buf), "%d", replaced);
+        if (replaced > 0) {
+            lv_label_set_text(s_sys[6].lbl_val, rep_buf);
+            lv_obj_set_style_text_color(s_sys[6].lbl_val, C_WARN, LV_PART_MAIN);
+        } else {
+            lv_label_set_text(s_sys[6].lbl_val, "0");
+            lv_obj_set_style_text_color(s_sys[6].lbl_val, C_TEXT, LV_PART_MAIN);
+        }
+    }
+
+    // E3.4 — periodičen radar log
+    apply_radar_to_log();
+
+    // E3.4 — I2C health refresh vsakih 2s (Wire1 napake)
+    uint32_t w1errs = hal_gpio_get_wire1_errors();
+    if (w1errs > 0) {
+        lv_obj_set_style_bg_color(s_chip[1].dot, C_WARN, LV_PART_MAIN);
+        char w1buf[16];
+        snprintf(w1buf, sizeof(w1buf), "WARN %lu", (unsigned long)w1errs);
+        lv_label_set_text(s_chip[1].lbl_status, w1buf);
+        lv_obj_set_style_text_color(s_chip[1].lbl_status, C_WARN, LV_PART_MAIN);
+    }
 }
 
 // ============================================================
@@ -535,15 +616,16 @@ void screen_service_create(lv_obj_t* parent) {
     make_section_header(parent, cy, "  SISTEM");
     cy += 26;
 
-    static const char* sys_units[6] = {
-        "--", "--", "--", "--", "--", "--"
-    };
     for (int i = 0; i < 6; i++) {
         make_row(parent, cy,
                  &s_sys[i].lbl_name, &s_sys[i].lbl_val,
-                 SYS_NAMES[i], sys_units[i], C_TEXT);
+                 SYS_NAMES[i], "--", C_TEXT);
         cy += ROW_H;
     }
+    make_row(parent, cy,
+             &s_sys[6].lbl_name, &s_sys[6].lbl_val,
+             SYS_NAMES[6], "--", C_TEXT);
+    cy += ROW_H;
     cy += PAD * 2;  // spodnji padding
 
     // Fiksiramo scroll vsebino
