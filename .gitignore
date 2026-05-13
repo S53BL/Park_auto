@@ -89,3 +89,6 @@ nide.zip
 src_txt/*
 Doc/*
 scripts/
+
+# Agent navodila in popravki
+src/files/*
