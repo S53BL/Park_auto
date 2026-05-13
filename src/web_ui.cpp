@@ -23,6 +23,7 @@
 // ============================================================
 
 #include "web_ui.h"
+#include "signal_led.h"
 #include "logger.h"
 #include "sd_mgr.h"
 #include "wifi_manager.h"
@@ -256,6 +257,15 @@ static void _handleStatus(AsyncWebServerRequest* req) {
 
     // --- Party mode ---
     doc["party_mode"] = false;   // TODO Blok C: led_mgr_is_party_mode()
+
+    // --- Signal LED statistika ---
+    SignalLedStats sig_stats = signal_led_get_stats();
+    JsonObject sigObj = doc["signal_led"].to<JsonObject>();
+    sigObj["mode"]             = signal_led_mode_name(sig_stats.current_mode);
+    sigObj["mode_changes"]     = sig_stats.mode_changes;
+    sigObj["ramp_activations"] = sig_stats.ramp_activations;
+    sigObj["preemptions"]      = sig_stats.preemptions;
+    sigObj["tick_count"]       = sig_stats.tick_count;
 
     // --- Parkirišče (TOF faza + vehicle_recog placeholder) ---
     JsonArray parkArr = doc["parking"].to<JsonArray>();

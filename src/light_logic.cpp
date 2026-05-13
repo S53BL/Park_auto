@@ -72,6 +72,7 @@
 // ============================================================
 
 #include "light_logic.h"
+#include "signal_led.h"
 #include "hal_light.h"
 #include "event_bus.h"
 #include "hal_gpio.h"
@@ -350,24 +351,29 @@ static void trigger_ssr1_off() {
 // EVENTBUS HANDLERJI
 // ============================================================
 
-// RAMP_UP (rampagor) — rampa je dvignjena = vozilo prihaja
-// Trigger za SSR1 s počasnim fill (vozilo pride iz daleč).
+// RAMP_UP (rampagor) — payload=1: rampa dvignjena; payload=0: rampa spuščena
 static void on_ramp_up(const Event& e) {
-    if (!e.payload) return;
-    if (!s_is_night) { LLD("RAMP_UP ignoriran — podnevi"); return; }
-    LLD("RAMP_UP → enqueue TRIGGER_ON_AUTO (počasen fill)");
-    // Enqueue — dejanska sekvenca se izvede v appTask kontekstu
-    // kjer ni Wire1 mutex contention z radarTask/eventBusTask
-    ssr_cmd_enqueue(SsrCmdType::TRIGGER_ON_AUTO, LIGHT_FADE_SLOW_MS);
+    if (e.payload) {
+        signal_led_ramp_start(RampDir::UP);
+        if (!s_is_night) { LLD("RAMP_UP: animacija (podnevi)"); return; }
+        LLD("RAMP_UP → enqueue TRIGGER_ON_AUTO (počasen fill)");
+        ssr_cmd_enqueue(SsrCmdType::TRIGGER_ON_AUTO, LIGHT_FADE_SLOW_MS);
+    } else {
+        signal_led_ramp_stop();
+    }
 }
 
-// RAMP_MOVING (raluc) — opozorilna luč utripa = rampa se premika
-// Trigger za SSR1 s počasnim fill — identičen kot RAMP_UP.
+// RAMP_MOVING (raluc) — payload=1: rampa se premika; payload=0: rampa se je ustavila
 static void on_ramp_moving(const Event& e) {
-    if (!e.payload) return;
-    if (!s_is_night) { LLD("RAMP_MOVING ignoriran — podnevi"); return; }
-    LLD("RAMP_MOVING → enqueue TRIGGER_ON_AUTO (počasen fill)");
-    ssr_cmd_enqueue(SsrCmdType::TRIGGER_ON_AUTO, LIGHT_FADE_SLOW_MS);
+    if (e.payload) {
+        signal_led_ramp_start(RampDir::DOWN);
+        if (!s_is_night) { LLD("RAMP_MOVING: animacija (podnevi)"); return; }
+        LLD("RAMP_MOVING → enqueue TRIGGER_ON_AUTO (počasen fill)");
+        ssr_cmd_enqueue(SsrCmdType::TRIGGER_ON_AUTO, LIGHT_FADE_SLOW_MS);
+    } else {
+        LLD("RAMP_MOVING(0) → rampa ustavljena, zaključujem animacijo");
+        signal_led_ramp_stop();
+    }
 }
 
 // RADAR_MOTION — gibanje zaznano na kateremkoli od 4 radar kanalov
@@ -406,6 +412,11 @@ static void on_radar_motion(const Event& e) {
     // Deluje 24/7 ker so SSR2/3/4 neodvisni od noč/dan (dogovorjeno 2026-05).
     for (uint8_t i = 2; i <= 4; i++) {
         s_ssr[i].last_motion_ms = now;
+    }
+
+    // Prikaz ure PODNEVI ob zaznavi gibanja (P4 — najnižja prioriteta).
+    if (!s_is_night) {
+        signal_led_clock_show();
     }
 
     // TODO: parking_assist feed — deluje 24/7
@@ -512,6 +523,18 @@ static void on_button_ssr_disable(const Event& e) {
     ssr_cmd_enqueue(SsrCmdType::BUTTON_DISABLE, ssr_idx);
 }
 
+// CELL_BROKEN — fotocelica prekinjena ali obnovljena
+// Payload: bit0=celica1, bit1=celica2, 0x00=obe OK
+static void on_cell_broken(const Event& e) {
+    bool celica1 = (e.payload & 0x01) != 0;
+    bool celica2 = (e.payload & 0x02) != 0;
+    if (!celica1 && !celica2) {
+        signal_led_photocell_stop();
+    } else {
+        signal_led_photocell_update(celica1, celica2, s_is_night);
+    }
+}
+
 // ============================================================
 // light_logic_init
 // ============================================================
@@ -556,9 +579,10 @@ bool light_logic_init() {
     EventBus::subscribe(EventType::NIGHT_THRESHOLD_CHANGED,  on_night_changed);
     EventBus::subscribe(EventType::BUTTON_SSR,               on_button_ssr);
     EventBus::subscribe(EventType::BUTTON_SSR_DISABLE,       on_button_ssr_disable);
+    EventBus::subscribe(EventType::CELL_BROKEN,              on_cell_broken);
 
     s_initialized = true;
-    LLI("light_logic_init OK — 6 EventBus subscriberjev registriranih");
+    LLI("light_logic_init OK — 7 EventBus subscriberjev registriranih");
     return true;
 }
 

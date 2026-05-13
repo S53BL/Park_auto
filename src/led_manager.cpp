@@ -62,6 +62,7 @@
 // ============================================================
 
 #include "led_manager.h"
+#include "signal_led.h"
 #include "config_mgr.h"
 #include "config.h"
 #include "logger.h"
@@ -299,6 +300,10 @@ bool led_mgr_init() {
     fill_signal_solid(CRGB::Black);
     FastLED.show();
 
+    if (!signal_led_init(s_leds_signal, LED_SIGNAL_COUNT)) {
+        LEDE("signal_led_init napaka — signalne animacije ne bodo delovale!");
+    }
+
     // Ustvari ukaz queue
     s_cmd_queue = xQueueCreate(CMD_QUEUE_SIZE, sizeof(LedCmdMsg));
     if (!s_cmd_queue) {
@@ -360,25 +365,38 @@ bool led_mgr_is_animating() {
 }
 
 void led_mgr_parking_assist(ParkPlace place, uint32_t dist_mm) {
-    // Payload: dist_mm (max 4000mm < UINT32_MAX — varno)
-    send_cmd(LedCmd::PARKING_ASSIST, dist_mm);
+    if (place == ParkPlace::A) {
+        signal_led_parking_update(dist_mm);
+    }
+    // send_cmd(LedCmd::PARKING_ASSIST, dist_mm);  // opuščeno
 }
 
 void led_mgr_parking_assist_off() {
-    send_cmd(LedCmd::PARKING_ASSIST_OFF, 0);
+    signal_led_parking_stop();
+    // send_cmd(LedCmd::PARKING_ASSIST_OFF, 0);  // opuščeno
 }
 
 void led_mgr_show_clock(uint32_t duration_ms) {
-    if (duration_ms == 0) duration_ms = config_get().clock_duration_s * 1000UL;
-    send_cmd(LedCmd::SHOW_CLOCK, duration_ms);
+    // duration_ms se ignorira — signal_led bere iz SIG_CLOCK_DURATION_MS (config.h)
+    (void)duration_ms;
+    signal_led_clock_show();
+    // send_cmd(LedCmd::SHOW_CLOCK, duration_ms);  // opuščeno
 }
 
 void led_mgr_celica_timer(bool active) {
-    send_cmd(active ? LedCmd::CELICA_TIMER_ON : LedCmd::CELICA_TIMER_OFF, 0);
+    // Stara API brez ločenih celica1/celica2 in is_night — predpostavi celica1=active
+    // Pravi klici gredo prek on_cell_broken() EventBus handlerja v light_logic.cpp
+    if (active) {
+        signal_led_photocell_update(true, false, false);
+    } else {
+        signal_led_photocell_stop();
+    }
+    // send_cmd(active ? LedCmd::CELICA_TIMER_ON : LedCmd::CELICA_TIMER_OFF, 0);  // opuščeno
 }
 
 void led_mgr_signal_off() {
-    send_cmd(LedCmd::SIGNAL_OFF, 0);
+    signal_led_off();
+    // send_cmd(LedCmd::SIGNAL_OFF, 0);  // opuščeno
 }
 
 bool led_mgr_ok() {
@@ -458,75 +476,16 @@ static bool anim_fade_tick() {
 }
 
 // ============================================================
-// ANIMACIJA — PARKING ASSIST (ledTask interno)
-// ============================================================
-// Osveži signalno LED glede na s_pa_dist_mm in config prage.
-
-static void anim_parking_assist_tick(const Config& cfg) {
-    uint32_t now = millis();
-
-    if (s_pa_dist_mm > (uint32_t)cfg.pa_thresh_green_mm) {
-        // Prosto — signalna LED OFF (vozilo daleč)
-        fill_signal_solid(CRGB::Black);
-    }
-    else if (s_pa_dist_mm > (uint32_t)cfg.pa_thresh_orange_mm) {
-        // Rumena cona
-        fill_signal_solid(PA_ORANGE);
-    }
-    else if (s_pa_dist_mm > (uint32_t)cfg.pa_thresh_red_mm) {
-        // Rdeča cona — brez utripanja (blizu stop)
-        fill_signal_solid(PA_RED);
-    }
-    else {
-        // Kritično blizu — rdeča + utripanje
-        if ((now - s_pa_blink_ms) >= PA_RED_BLINK_MS) {
-            s_pa_blink_ms = now;
-            s_pa_blink_on = !s_pa_blink_on;
-        }
-        fill_signal_solid(s_pa_blink_on ? PA_RED : CRGB::Black);
-    }
-}
-
-// ============================================================
-// CLOCK SHOW (ledTask interno)
-// ============================================================
-// Enostavna vizualizacija: prikaže uro kot N prižganih LED v MID coni.
-// N = trenutna ura (0–23) → mapet na 0–47 LED v MID coni.
-// Po izteku duration_ms: signalna LED OFF.
-
-static void anim_clock_tick() {
-    uint32_t now = millis();
-    if (now >= s_clock_end_ms) {
-        fill_signal_zone(LED_SIG_ZONE_MID_START, LED_SIG_ZONE_MID_END, CRGB::Black);
-        s_sig_state = AnimState::IDLE;
-        LEDD("CLOCK: prikaz končan");
-        return;
-    }
-
-    // Preberi uro iz system time
-    struct tm ti;
-    time_t t = time(nullptr);
-    localtime_r(&t, &ti);
-    int hour = ti.tm_hour % 12;  // 0–11
-    // Map 0–11 ur na 0–47 LED (4 LED na uro)
-    int lit = hour * 4;
-    fill_signal_zone(LED_SIG_ZONE_MID_START, LED_SIG_ZONE_MID_END, CRGB::Black);
-    fill_signal_zone(LED_SIG_ZONE_MID_START, LED_SIG_ZONE_MID_START + lit - 1, CRGB(0, 100, 255));
-}
-
-// ============================================================
-// CELICA TIMER BLINK (ledTask interno)
+// OPUŠČENO — 2026-05: preneseno v signal_led.cpp
+// Te funkcije so bile placeholder implementacije signalnih animacij.
+// signal_led.cpp implementira polne verzije vseh scenarijev.
 // ============================================================
 
-static void anim_celica_tick() {
-    uint32_t now = millis();
-    if ((now - s_celica_blink_ms) >= CELICA_BLINK_MS) {
-        s_celica_blink_ms = now;
-        s_celica_blink_on = !s_celica_blink_on;
-    }
-    fill_signal_zone(LED_SIG_ZONE_BOT_START, LED_SIG_ZONE_BOT_END,
-                     s_celica_blink_on ? CRGB(255, 140, 0) : CRGB::Black);
-}
+/*
+static void anim_parking_assist_tick(const Config& cfg) { ... }
+static void anim_clock_tick() { ... }
+static void anim_celica_tick() { ... }
+*/
 
 // ============================================================
 // PARTY MODE PREKLOP (ledTask interno — pod zahteva safe_show pred)
@@ -761,23 +720,10 @@ void ledTask(void* pvParams) {
         // -------------------------------------------------------
         // 3. Animacijski frame — signalna LED
         // -------------------------------------------------------
-        {
-            const Config cfg = config_get();
-            switch (s_sig_state) {
-                case AnimState::PARKING_ASSIST:
-                    anim_parking_assist_tick(cfg);
-                    break;
-                case AnimState::CLOCK_SHOW:
-                    anim_clock_tick();
-                    break;
-                case AnimState::CELICA_BLINK:
-                    anim_celica_tick();
-                    break;
-                case AnimState::IDLE:
-                default:
-                    break;
-            }
-        }
+        // signal_led_tick() je centralni dispečer za vse signalne scenarije.
+        // Piše direktno v s_leds_signal[] buffer.
+        // FastLED.show() (korak 4) bo te vrednosti poslal na IO40.
+        signal_led_tick();
 
         // -------------------------------------------------------
         // 4. FastLED.show() — samo če ni party mode
