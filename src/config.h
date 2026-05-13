@@ -253,7 +253,7 @@
 #define TASK_EVENTBUS_PRIO  5
 #define TASK_SENSOR_STACK   6144
 #define TASK_SENSOR_PRIO    4
-#define TASK_LED_STACK      4096
+#define TASK_LED_STACK      6144   // povečano 2026-05: signal_led ExplodeParticles + float aritmetika
 #define TASK_LED_PRIO       3
 #define TASK_LVGL_STACK     8192
 #define TASK_LVGL_PRIO      2

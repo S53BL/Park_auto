@@ -118,12 +118,12 @@ enum class LedCmd : uint8_t {
     SET_BRIGHTNESS,     // nastavi svetlost (payload = brightness)
     PARTY_ON,           // preklop v party mode
     PARTY_OFF,          // izhod iz party mode
-    PARKING_ASSIST,     // parking assist (payload = dist_mm)
-    PARKING_ASSIST_OFF, // ugasni parking assist
-    SHOW_CLOCK,         // prikaži uro (payload = duration_ms)
-    CELICA_TIMER_ON,    // celica timer utripa ON
-    CELICA_TIMER_OFF,   // celica timer OFF
-    SIGNAL_OFF,         // ugasni vse signalne LED
+    PARKING_ASSIST,     // OPUŠČENO — signal_led_parking_update() direktno
+    PARKING_ASSIST_OFF, // OPUŠČENO — signal_led_parking_stop() direktno
+    SHOW_CLOCK,         // OPUŠČENO — signal_led_clock_show() direktno
+    CELICA_TIMER_ON,    // OPUŠČENO — signal_led_photocell_update() direktno
+    CELICA_TIMER_OFF,   // OPUŠČENO — signal_led_photocell_stop() direktno
+    SIGNAL_OFF,         // OPUŠČENO — signal_led_off() direktno
 };
 
 struct LedCmdMsg {
@@ -140,9 +140,9 @@ enum class AnimState : uint8_t {
     FILLING,
     UNFILLING,
     FADING,
-    PARKING_ASSIST,
-    CLOCK_SHOW,
-    CELICA_BLINK,
+    PARKING_ASSIST,  // OPUŠČENO (2026-05) — signal_led_parking_update()
+    CLOCK_SHOW,      // OPUŠČENO (2026-05) — signal_led_clock_show()
+    CELICA_BLINK,    // OPUŠČENO (2026-05) — signal_led_photocell_update()
 };
 
 // ============================================================
@@ -152,6 +152,7 @@ enum class AnimState : uint8_t {
 // FastLED bufferji — alocirani v PSRAM (ps_malloc)
 static CRGB* s_leds_main   = nullptr;   // [LED_MAIN_LOGICAL]  = 90 LED
 static CRGB* s_leds_signal = nullptr;   // [LED_SIGNAL_COUNT]  = 144 LED
+static CLEDController* s_ctrl_signal = nullptr;   // za ločen show med party mode
 
 // FreeRTOS queue za ukaze (caller → ledTask)
 static QueueHandle_t s_cmd_queue = nullptr;
@@ -172,7 +173,10 @@ static uint32_t   s_fade_duration  = 0;
 static uint8_t    s_fade_start_br  = 0;
 
 // Animacijsko stanje — signalna LED
-static AnimState  s_sig_state      = AnimState::IDLE;
+// OPUŠČENO (2026-05): signal_led.cpp ima lasten state machine.
+// Spremenljivka ostaja ker jo referencirajo opuščeni case-i v LedCmd switch.
+// Ob naslednjem refactoringu: odstrani skupaj z AnimState vrednostmi spodaj.
+static AnimState  s_sig_state      = AnimState::IDLE;  // unused
 static uint32_t   s_pa_dist_mm     = 9999;
 static uint32_t   s_pa_blink_ms    = 0;
 static bool       s_pa_blink_on    = false;
@@ -226,20 +230,24 @@ static void fill_signal_zone(int start, int end, CRGB color) {
     }
 }
 
-// Pokliči FastLED.show() — SAMO če ni party mode!
-// Pokliči oba (main + signal) v enem klicu — FastLED interně ve kateri pin.
+// Pokliči FastLED.show() — med party mode samo IO40 (signal), ne IO39 (main).
 static void safe_show() {
     if (s_party_mode) {
-        // Ne piši na IO39 — WLED ga upravlja!
-        // Signalna LED (IO40) je varna — ni pod WLED.
-        // FastLED.show() bi poslal signal na OBA pina → nevaren za IO39.
-        // Rešitev: ločeni FastLED controlleri — en za IO39, en za IO40.
-        // V ledTask zanki med party mode: samo signal show, ne main.
-        // Za zdaj: ko je party mode, signalne LED prav tako zamrznemo —
-        // party mode je za zabavo, signalna LED ni kritična.
+        // IO39 (glavna matrika) je pod WLED med party mode — NE piši!
+        // FastLED.show() bi pisal na oba registrirana pina (IO39 + IO40)
+        // kar bi povzročilo signal conflict na IO39.
+        //
+        // IO40 (signalna LED) ni pod WLED — je varna in mora delovati
+        // tudi med party mode (rampa animacija ima P1 prioriteto,
+        // fotocelice in parking assist morajo biti vidni ne glede na modo).
+        //
+        // Rešitev: kliči show() samo na signal controllerju (IO40).
+        if (s_ctrl_signal) {
+            s_ctrl_signal->showLeds(s_brightness_signal);
+        }
         return;
     }
-    FastLED.show();
+    FastLED.show();  // prikaže oba pina skupaj (IO39 + IO40)
 }
 
 // ============================================================
@@ -281,7 +289,8 @@ bool led_mgr_init() {
     // FastLED.addLeds ne kopira podatkov — shranjuje pointer na s_leds_main.
     // Zato mora s_leds_main živeti ves čas programa (heap, ne stack).
     FastLED.addLeds<WS2815, LED_MAIN_PIN,   GRB>(s_leds_main,   LED_MAIN_LOGICAL);
-    FastLED.addLeds<WS2815, LED_SIGNAL_PIN, GRB>(s_leds_signal, LED_SIGNAL_COUNT);
+    s_ctrl_signal = &FastLED.addLeds<WS2815, LED_SIGNAL_PIN, GRB>(
+                        s_leds_signal, LED_SIGNAL_COUNT);
 
     // Nastavi začetno svetlost iz config
     const Config cfg = config_get();
@@ -630,6 +639,12 @@ void ledTask(void* pvParams) {
                     if (s_party_mode) do_party_off();
                     break;
 
+                // -----------------------------------------------
+                // OPUŠČENO (2026-05): wrapper funkcije kličejo
+                // signal_led_* direktno, ne prek queue.
+                // Case-i ostajajo za kompatibilnost — send_cmd se ne
+                // kliče več za te ukaze. Ob naslednjem refactoringu: odstrani.
+                // -----------------------------------------------
                 case LedCmd::PARKING_ASSIST:
                     s_pa_dist_mm = msg.payload;
                     s_sig_state  = AnimState::PARKING_ASSIST;
