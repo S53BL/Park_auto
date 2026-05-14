@@ -5,10 +5,12 @@ import shutil
 # ============================================
 # Skripta za pripravo Park_auto_last/ mape
 # 1. Zbrise Park_auto_last/ ce obstaja
-# 2. Kopira src/ v Park_auto_last/
+# 2. Kopira src/ v Park_auto_last/src/
 # 3. Kopira platformio.ini v Park_auto_last/
 # 4. Kopira include/ v Park_auto_last/include/
-# 5. Vsem datotekam doda .txt koncnico
+# 5. Kopira data/ v Park_auto_last/data/
+# 6. Kopira scripts/ v Park_auto_last/scripts/
+# 7. Vsem datotekam doda .txt koncnico
 # ============================================
 
 SRC_DIR = 'src'
@@ -19,9 +21,10 @@ if os.path.isdir(DST_DIR):
     print('Brisem ' + DST_DIR + '/ ...')
     shutil.rmtree(DST_DIR)
 
-# 2. Kopiraj src/ v Park_auto_last/
-print('Kopiram ' + SRC_DIR + '/ -> ' + DST_DIR + '/ ...')
-shutil.copytree(SRC_DIR, DST_DIR)
+# 2. Kopiraj src/ v Park_auto_last/src/
+dst_src = os.path.join(DST_DIR, SRC_DIR)
+print('Kopiram ' + SRC_DIR + '/ -> ' + dst_src + '/ ...')
+shutil.copytree(SRC_DIR, dst_src)
 
 # 3. Kopiraj platformio.ini v Park_auto_last/
 if os.path.isfile('platformio.ini'):
@@ -34,7 +37,19 @@ if os.path.isdir('include'):
     shutil.copytree('include', dst_include)
     print('  kopiram include/')
 
-# 5. Dodaj .txt vsem datotekam
+# 5. Kopiraj data/ v Park_auto_last/data/
+if os.path.isdir('data'):
+    dst_data = os.path.join(DST_DIR, 'data')
+    shutil.copytree('data', dst_data)
+    print('  kopiram data/')
+
+# 6. Kopiraj scripts/ v Park_auto_last/scripts/
+if os.path.isdir('scripts'):
+    dst_scripts = os.path.join(DST_DIR, 'scripts')
+    shutil.copytree('scripts', dst_scripts)
+    print('  kopiram scripts/')
+
+# 7. Dodaj .txt vsem datotekam
 count = 0
 for dp, dn, fn in os.walk(DST_DIR):
     for f in fn:

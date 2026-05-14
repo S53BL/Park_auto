@@ -1,5 +1,8 @@
-# LittleFS upload vsebina (generirano iz src/assets/)
-data/assets/*.gz
+# 💬 Zakomentirano 2026-05-14 — data/assets/ celoto trackamo za sledljivost
+#    Agent lahko pomotoma uredi .gz direktno v data/assets/ namesto v src/assets/,
+#    skripta compress_assets.py pa to ob naslednjem buildu povozi. Z trackanjem
+#    .gz datotek v gitu imamo možnost obnovitve in pregled nad spremembami.
+# data/assets/*.gz
 
 # PlatformIO
 .pio/
