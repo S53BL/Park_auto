@@ -3,6 +3,11 @@
 // GET /api/vehicles?place=A|B
 // POST /api/vehicles/rename  { id, place, name }
 // DELETE /api/vehicles?id=X&place=A
+//
+// POPRAVEK v2.1:
+//   - m.park_count → m.repetitions  (API vrača "repetitions")
+//   - m.last_seen  → m.lastSeen     (API vrača "lastSeen")
+//   - m.on_place prikazan z badge "NA MESTU" kadar je vozilo trenutno parkirano
 // ============================================================
 
 (function () {
@@ -62,7 +67,7 @@
     try {
       const d = await api.get('/api/vehicles?place=' + _place);
       _models = d.models || [];
-      if (st) st.textContent = d._stub ? 'Stub — vehicle_recog ni implementiran' : 'Mesto ' + _place;
+      if (st) st.textContent = 'Mesto ' + _place;
 
       if (_models.length === 0) {
         tbody.innerHTML = '';
@@ -74,20 +79,29 @@
         return;
       }
 
-      tbody.innerHTML = _models.map((m, idx) => `
+      tbody.innerHTML = _models.map((m, idx) => {
+        // API vrača: repetitions (ne park_count), lastSeen (ne last_seen)
+        const reps     = m.repetitions !== undefined ? m.repetitions : '–';
+        const lastSeen = m.lastSeen    !== undefined ? m.lastSeen    : '–';
+        const onPlace  = m.on_place === true;
+        const nameCell = onPlace
+          ? `<span class="veh-label">${m.name || 'neznan'}</span>
+             <span class="badge badge-green" style="margin-left:6px;font-size:10px">NA MESTU</span>`
+          : `<span class="veh-label">${m.name || 'neznan'}</span>`;
+
+        return `
         <tr id="veh-row-${idx}">
           <td class="mono dim">${m.id || idx}</td>
-          <td id="veh-name-${idx}">
-            <span class="veh-label">${m.name || 'neznan'}</span>
-          </td>
-          <td class="right dim">${m.park_count !== undefined ? m.park_count : '–'}</td>
-          <td class="right dim" style="white-space:nowrap">${m.last_seen || '–'}</td>
+          <td id="veh-name-${idx}">${nameCell}</td>
+          <td class="right dim">${reps}</td>
+          <td class="right dim" style="white-space:nowrap">${lastSeen}</td>
           <td class="right" style="white-space:nowrap">
             <button class="btn btn-sm" onclick="vehRenameStart(${idx},'${(m.name||'').replace(/'/g,"\\'")}')">↩ Preimenuj</button>
             <button class="btn btn-sm btn-danger" style="margin-left:4px"
                     onclick="vehDelete('${(m.id||idx).toString().replace(/'/g,"\\'")}')">✕</button>
           </td>
-        </tr>`).join('');
+        </tr>`;
+      }).join('');
     } catch(e) {
       tbody.innerHTML = `<tr><td colspan="5" class="text-dim" style="padding:10px">Napaka: ${e.message}</td></tr>`;
       if (st) st.textContent = 'Napaka';
@@ -130,7 +144,7 @@
       const r = await api.post('/api/vehicles/rename', {
         id: model ? model.id : idx, place: _place, name: newName
       });
-      if (st) st.textContent = r._stub ? 'Stub — rename ni implementiran' : 'Preimenovano ✓';
+      if (st) st.textContent = r.ok ? 'Preimenovano ✓' : 'Napaka pri preimenovanju';
       _load();
     } catch(e) {
       if (st) st.textContent = 'Napaka: ' + e.message;
@@ -143,7 +157,7 @@
       try {
         if (st) st.textContent = 'Brišem…';
         const r = await api.del('/api/vehicles?id=' + encodeURIComponent(id) + '&place=' + _place);
-        if (st) st.textContent = r._stub ? 'Stub — delete ni implementiran' : 'Izbrisano ✓';
+        if (st) st.textContent = r.ok ? 'Izbrisano ✓' : 'Napaka pri brisanju';
         _load();
       } catch(e) {
         if (st) st.textContent = 'Napaka: ' + e.message;
