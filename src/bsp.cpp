@@ -268,11 +268,13 @@ static void bsp_tasks_create() {
     // OPOMBA: Če se sistem obnaša nenavadno → vrni lvglTask v SRAM (MAKE_TASK).
     MAKE_PSRAM_TASK(lvglTask,     "LVGL",     TASK_LVGL_STACK,     TASK_LVGL_PRIO,     hTaskLvgl,     CORE_APP)
     MAKE_TASK(appTask,            "App",      TASK_APP_STACK,      TASK_APP_PRIO,      hTaskApp,      CORE_APP)
-    // wifiTask stack v PSRAM (2026-05, RAM optimizacija).
-    // Razlog: WiFi stack zasede 8KB SRAM. ESP32 WiFi driver teče v
-    //   svojem internem tasku — naš wifiTask je samo wrapper za WiFi.begin().
-    //   WiFi driver interno uporablja IRAM/DRAM neodvisno od wifiTask stack lokacije.
-    MAKE_PSRAM_TASK(wifiTask,     "WiFi",     TASK_WIFI_STACK,     TASK_WIFI_PRIO,     hTaskWifi,     CORE_WIFI)
+    // wifiTask stack MORA biti v internem SRAM, ne PSRAM.
+    // Razlog: WiFi init (esp_wifi_init) ob praznem NVS piše v flash →
+    //   flash write zahteva cache disable → PSRAM ni dostopen brez cache →
+    //   assertion fail. SRAM je vedno dostopen, tudi med cache disable.
+    // Komentar "WiFi driver teče v svojem internem tasku" je bil napačen —
+    //   naš wifiTask kliče esp_wifi_init() ki potrebuje DRAM stack.
+    MAKE_TASK(wifiTask,           "WiFi",     TASK_WIFI_STACK,     TASK_WIFI_PRIO,     hTaskWifi,     CORE_WIFI)
 
     #undef MAKE_PSRAM_TASK
     #undef MAKE_TASK
