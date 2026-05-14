@@ -267,7 +267,7 @@ static void bsp_tasks_create() {
     //   Prihranek: 8KB SRAM → min-ever se poveča za ~8KB.
     // OPOMBA: Če se sistem obnaša nenavadno → vrni lvglTask v SRAM (MAKE_TASK).
     MAKE_PSRAM_TASK(lvglTask,     "LVGL",     TASK_LVGL_STACK,     TASK_LVGL_PRIO,     hTaskLvgl,     CORE_APP)
-    MAKE_PSRAM_TASK(appTask,      "App",      TASK_APP_STACK,      TASK_APP_PRIO,      hTaskApp,      CORE_APP)
+    MAKE_TASK(appTask,            "App",      TASK_APP_STACK,      TASK_APP_PRIO,      hTaskApp,      CORE_APP)
     // wifiTask stack v PSRAM (2026-05, RAM optimizacija).
     // Razlog: WiFi stack zasede 8KB SRAM. ESP32 WiFi driver teče v
     //   svojem internem tasku — naš wifiTask je samo wrapper za WiFi.begin().

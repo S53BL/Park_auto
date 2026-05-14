@@ -65,6 +65,8 @@ public:
 #include "hal_tof.h"
 #include "hal_gpio.h"
 #include "hal_light.h"
+#include "vehicle_recog.h"  // vehicle_recog_get_state/name/model/dtw/baseline
+#include "event_bus.h"      // EventBus::subscribe za vehicle_recog evente
 extern void screen_main_create(lv_obj_t* parent);
 extern void screen_main_apply_updates();
 
@@ -372,23 +374,41 @@ static void ui_refresh_cb(lv_timer_t*) {
         screen_main_set_radar_arc(ri, arc);
     }
 
-    // ── Parking kartici (E2) ──────────────────────────────────────
-    // TOF faze + zasedeno/prazno iz hal_tof diagnostike.
-    // vehicle_recog je placeholder (Blok F — implementira pozneje).
+    // ── Parking kartici (B4) — vehicle_recog stanje ──────────────
     {
         TofDiagnostics tof = hal_tof_getDiagnostics();
         for (uint8_t p = 0; p < 2; p++) {
+            char pid = (p == 0) ? 'A' : 'B';
             ParkingDisplayData pk = {};
-            pk.occupied      = false;    // Blok F: vehicle_recog_is_occupied(p)
-            pk.dtw_distance  = 0.0f;     // Blok F: vehicle_recog_dtw_dist(p)
-            pk.parking_count = 0;        // Blok F: vehicle_recog_count(p)
-            // TOF faza — katera parkirna mesta je aktivna
-            pk.tof_phase     = (uint8_t)tof.current_phase;
-            pk.tof_active    = ((uint8_t)tof.active_place == p &&
-                                tof.current_phase != TOF_PHASE_IDLE);
-            // Horizontalni TOF (razdalja do vozila): H_A = idx 0, H_B = idx 3
-            pk.horiz_mm      = (p == 0) ? tof.last_mm[0] : tof.last_mm[3];
-            strncpy(pk.vehicle_name, "Prazno", sizeof(pk.vehicle_name) - 1);
+
+            pk.tof_phase  = (uint8_t)tof.current_phase;
+            pk.tof_active = ((uint8_t)tof.active_place == p
+                             && tof.current_phase != TOF_PHASE_IDLE);
+            pk.horiz_mm   = (p == 0) ? tof.last_mm[0] : tof.last_mm[3];
+
+            pk.vr_state       = (uint8_t)vehicle_recog_get_state(pid);
+            pk.baseline_valid = vehicle_recog_get_baseline(pid).valid;
+            pk.last_dtw       = vehicle_recog_get_last_dtw(pid);
+            pk.occupied       = (pk.vr_state == VR_STATE_OCCUPIED_KNOWN
+                              || pk.vr_state == VR_STATE_OCCUPIED_UNKNOWN);
+
+            const char* vname = vehicle_recog_get_vehicle_name(pid);
+            if (vname && *vname)
+                strncpy(pk.vehicle_name, vname, sizeof(pk.vehicle_name) - 1);
+
+            const char* mid = vehicle_recog_get_model_id(pid);
+            if (mid && *mid) {
+                uint16_t cnt = vehicle_recog_get_model_count(pid);
+                for (uint16_t j = 0; j < cnt; j++) {
+                    vr_model_summary_t s;
+                    if (vehicle_recog_get_model_summary(pid, j, &s)
+                        && strcmp(s.id, mid) == 0) {
+                        pk.parking_count = (uint32_t)s.repetitions;
+                        break;
+                    }
+                }
+            }
+
             screen_main_set_parking(p, pk);
         }
     }
@@ -610,6 +630,13 @@ bool hal_display_init() {
     // Za SSR countdown prikaz je 1s natančnost povsem sprejemljiva.
     lv_timer_create(ui_refresh_cb, UI_REFRESH_TIMER_MS, nullptr);
     DISPI("UI refresh timer OK (%dms)", UI_REFRESH_TIMER_MS);
+
+    // EventBus subscribe: vehicle_recog eventi → ui_refresh_cb pobere novo stanje
+    // pri naslednjem tiku (polling timer je dovolj hiter, flag ni potreben)
+    EventBus::subscribe(EventType::VEHICLE_RECOGNIZED,       [](const Event&) {});
+    EventBus::subscribe(EventType::VEHICLE_NEW_MODEL,        [](const Event&) {});
+    EventBus::subscribe(EventType::VEHICLE_DEPARTED,         [](const Event&) {});
+    EventBus::subscribe(EventType::PARKING_PLACE_CALIBRATED, [](const Event&) {});
 
     // 9. Prikaži glavni zaslon
     lv_scr_load(s_screen_main);

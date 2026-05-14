@@ -22,9 +22,13 @@ enum class EventType : uint16_t {
     RADAR_STILL         = 0x0011,
     RADAR_CLEAR         = 0x0012,
     RADAR_ERROR         = 0x0013,
-    // TOF / prepoznava
-    TOF_PROFILE_READY   = 0x0020,
-    VEHICLE_RECOGNIZED  = 0x0021,
+    // TOF / prepoznava vozil
+    TOF_PROFILE_READY       = 0x0020,
+    VEHICLE_RECOGNIZED      = 0x0021,  // DTW match — VehicleRecognizedEvent_t*
+    VEHICLE_NEW_MODEL       = 0x0022,  // nov model — VehicleRecognizedEvent_t*
+    VEHICLE_DEPARTED        = 0x0023,  // odhod — payload: 0=A, 1=B
+    PARKING_SCAN_ABORTED    = 0x0024,  // ParkingScanAbortedEvent_t*
+    PARKING_PLACE_CALIBRATED = 0x0025, // ParkingPlaceCalibratedEvent_t*
     // Svetloba
     NIGHT_THRESHOLD_CHANGED = 0x0030,
     // UI gumbi
@@ -39,9 +43,11 @@ enum class EventType : uint16_t {
     BUTTON_PARTY_BRIGHTNESS = 0x004B,
     BUTTON_PARTY_SPEED      = 0x004C,
     BUTTON_PARTY_PRESET     = 0x004D,
-    BUTTON_EDIT_VEHICLE_A = 0x0046,   // ←
-    BUTTON_EDIT_VEHICLE_B = 0x0047,   // ← 
-    BUTTON_SSR          = 0x0048,     // ← (kratek dotik, payload=ssr_idx)    
+    BUTTON_EDIT_VEHICLE_A     = 0x0046,  // 2s dolg pritisk, mesto A
+    BUTTON_EDIT_VEHICLE_B     = 0x0047,  // 2s dolg pritisk, mesto B
+    BUTTON_SSR                = 0x0048,  // kratek dotik, payload=ssr_idx
+    BUTTON_CALIBRATE_EMPTY_A  = 0x004E,  // 10s dolg pritisk + DA, mesto A
+    BUTTON_CALIBRATE_EMPTY_B  = 0x004F,  // 10s dolg pritisk + DA, mesto B
     // SSR stanje (za LCD posodobitev)
     SSR_STATE_CHANGED   = 0x0050,
     // Alarm

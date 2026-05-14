@@ -35,12 +35,17 @@ struct SsrDisplayData {
 struct ParkingDisplayData {
     bool     occupied;
     char     vehicle_name[32];
-    float    dtw_distance;
     uint32_t parking_count;
-    // E2 dopolnitev — TOF diagnostika za faza indikator
+    float    dtw_distance;
     uint8_t  tof_phase;      // 0=IDLE 1=DETECT 2=SCANNING 3=DTW_WAIT
     bool     tof_active;     // to parkirno mesto je trenutno aktivno
     uint16_t horiz_mm;       // razdalja horizontalnega TOF (0 = ni meritve)
+
+    // B4 — vehicle_recog stanje
+    // vr_place_state_t: 0=EMPTY_CAL, 1=EMPTY_UNCAL, 2=OCC_UNKNOWN, 3=OCC_KNOWN
+    uint8_t  vr_state;
+    bool     baseline_valid;
+    float    last_dtw;       // NAN = ni
 };
 
 struct DayNightData {

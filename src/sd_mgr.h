@@ -130,3 +130,16 @@ bool sd_mgr_save_raw_profile(const char* path, const char* data);
 
 // Prešteje datoteke v mapi (za vehicle_recog.cpp — max raw profilov)
 int sd_mgr_count_files(const char* path);
+
+// Doda podatke (append) na konec datoteke. Datoteko kreira če ne obstaja.
+// Thread-safe. Vrne true ob uspehu.
+bool sd_mgr_append_file(const char* path, const char* data, size_t len);
+
+// Kreira mapo in vse starševske mape (rekurzivno).
+// Varno klicati večkrat — vrne true če mapa obstaja ali je bila kreirana.
+bool sd_mgr_ensure_dir(const char* path);
+
+// V mapi path obdrži samo zadnjih n datotek (po abecednem vrstnem redu —
+// format YYYYMMDD_HHMMSS_ zagotavlja da je abecedni red enak kronološkemu).
+// Vse starejše datoteke pobriše. Vrne število pobrisanih datotek.
+int sd_mgr_keep_newest_n(const char* path, uint16_t n);

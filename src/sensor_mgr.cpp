@@ -19,6 +19,7 @@
 #include "hal_light.h"
 // #include "hal_gpio.h"
 #include "config_mgr.h"
+#include "vehicle_recog.h"   // vehicle_recog_feed_profile(), reconcile_state()
 
 // hal_radar_test.h — odstranjeno, test zaključen 2026-04
 
@@ -90,18 +91,35 @@ bool sensor_mgr_init() {
     // hal_tof init — TCA9548A + 6× VL53L1X na Wire1
     SMGI("hal_tof_init...");
     hal_tof_setProfileCallback([](const TofProfileResult& profile) {
-        SMGI("TOF_PROFILE_READY — mesto:%c točke:%d trajanje:%lu ms",
-             (profile.place == TOF_PLACE_A) ? 'A' : 'B',
-             profile.count,
+        char pid = (profile.place == TOF_PLACE_A) ? 'A' : 'B';
+        SMGI("TOF_PROFILE_READY — mesto:%c tocke:%d trajanje:%lu ms",
+             pid, (int)profile.count,
              (unsigned long)profile.scan_duration_ms);
-        // Payload: TOF_PLACE_A=0, TOF_PLACE_B=1
-        // Pointer na profil NI varen za async prenos prek EventBusa
-        // ker je profil na stacku sensor taska. Subscribers ki rabijo
-        // dejanske točke (vehicle_recog) se registrirajo na hal_tof
-        // profil callback direktno — ne prek EventBus payloada.
+
+        // KORAK 1: Posreduj cel profil vehicle_recog PRED EventBus publishom.
+        // vehicle_recog_feed_profile() kopira tocke v PSRAM interni buffer —
+        // po vrnitvi je profil (na hal_tof stacku) varno osvoboditi.
+        // Klic je sinhronen in hiter (~1-2 ms za 120 tock, samo memcpy).
+        vehicle_recog_feed_profile(profile);
+
+        // KORAK 2: EventBus publish TOF_PROFILE_READY (payload = 0=A, 1=B).
+        // vehicle_recog::on_event(TOF_PROFILE_READY) posodobi UI fazo na
+        // VR_PHASE_DTW_COMPUTE. DTW se izvede v vehicle_recog_tick() (appTask).
         uint32_t payload = (profile.place == TOF_PLACE_A) ? 0u : 1u;
         EventBus::publish(EventType::TOF_PROFILE_READY, payload);
     });
+    SMGI("TOF profil callback registriran");
+
+    // DOOR_OPENED: rampagor LOW → sproži hal_tof fazni avtomat IDLE/DTW_WAIT → DETECT.
+    // hal_tof bo začel meriti H_A in H_B vsake ~40 ms in prehod v SCANNING
+    // ko eden od H < VEH_ENTRY_THRESH_MM (350 cm).
+    // Klic je idempotenten — ce je hal_tof ze v DETECT, ignorira (z WARN logom).
+    EventBus::subscribe(EventType::DOOR_OPENED, [](const Event&) {
+        hal_tof_startDetect();
+        SMGI("DOOR_OPENED → hal_tof_startDetect()");
+    });
+    SMGI("DOOR_OPENED subscriber registriran");
+
     bool tof_ok = hal_tof_init();
     if (!tof_ok) {
         SMGW("hal_tof_init NAPAKA — sistem teče brez TOF (identifikacija vozil onemogočena)");
@@ -115,6 +133,21 @@ bool sensor_mgr_init() {
 }
 
 bool sensor_mgr_ok() { return s_init_ok; }
+
+bool sensor_mgr_read_place_now(char id, uint16_t* h, uint16_t* p1, uint16_t* p2) {
+    if (!h || !p1 || !p2) return false;
+    if (!hal_tof_ok()) return false;
+    TofPlace place = (id == 'A') ? TOF_PLACE_A : TOF_PLACE_B;
+    TofProfilePoint pt = hal_tof_readAll(place);
+    if (pt.H_mm == TOF_ERR || pt.P1_mm == TOF_ERR || pt.P2_mm == TOF_ERR) {
+        SMGW("read_place_now(%c): TOF_ERR na vsaj enem senzorju", id);
+        return false;
+    }
+    *h  = pt.H_mm;
+    *p1 = pt.P1_mm;
+    *p2 = pt.P2_mm;
+    return true;
+}
 
 void sensorTask(void* pvParams) {
     SMGI("sensorTask start — Core%d", xPortGetCoreID());
@@ -157,6 +190,16 @@ void sensorTask(void* pvParams) {
             //   napaka in recovery preskoči (glej komentar v hal_radar_recovery_check).
             if (hal_tof_getPhase() == TOF_PHASE_IDLE) {
                 hal_radar_recovery_check();
+                // Periodicno preverjanje prisotnosti (vsake TOF_WATCHDOG_INTERVAL_MS):
+                // Popravi vehicle_recog state machine glede na aktualne meritve
+                // (npr. zagon z vozilom na mestu, ali odhod ki ga VEHICLE_DEPARTED ni ujel).
+                uint16_t h, p1, p2;
+                const char places[2] = {'A', 'B'};
+                for (int i = 0; i < 2; i++) {
+                    if (sensor_mgr_read_place_now(places[i], &h, &p1, &p2)) {
+                        vehicle_recog_reconcile_state(places[i], h, p1, p2);
+                    }
+                }
             }
         }
 

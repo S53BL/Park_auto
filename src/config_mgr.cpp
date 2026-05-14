@@ -92,6 +92,9 @@
 #define NVS_K_DELTA_FLT     "delta_flt"     // delta_filter_mm
 #define NVS_K_PHASE_CFM     "phase_cfm"     // phase_confirm_cm
 #define NVS_K_STAB_S        "stab_s"        // stability_s (float as uint32)
+#define NVS_K_RAW_N         "vr_raw_n"      // raw_profiles_per_model
+#define NVS_K_PRES_MIN      "vr_pres_min"   // presence_check_min
+#define NVS_K_EMPTY_TOL     "vr_empty_tol"  // empty_tolerance_mm
 
 // Radar — per senzor (indeks 0-3 v imenu ključa)
 // "r" = radar, "md" = max_dist, "ms" = move_sens,
@@ -161,6 +164,12 @@ static const char* NVS_RADAR_US[] = {"r_us_0","r_us_1","r_us_2","r_us_3"};
 #define CFG_MAX_PHASE_CFM       500u
 #define CFG_MIN_STAB_S          0.5f
 #define CFG_MAX_STAB_S          10.0f
+#define CFG_MIN_RAW_N           10u
+#define CFG_MAX_RAW_N           100u
+#define CFG_MIN_PRES_MIN        1u
+#define CFG_MAX_PRES_MIN        60u
+#define CFG_MIN_EMPTY_TOL       50u
+#define CFG_MAX_EMPTY_TOL       500u
 
 // Radar polling (v2.0)
 #define CFG_MIN_RADAR_POLL_IV    10u
@@ -346,6 +355,9 @@ static void load_and_validate(Preferences& prefs) {
     VALIDATE_U32  (prefs, NVS_K_DELTA_FLT,  delta_filter_mm,    CFG_MIN_DELTA_FLT,  CFG_MAX_DELTA_FLT,  def.delta_filter_mm);
     VALIDATE_U32  (prefs, NVS_K_PHASE_CFM,  phase_confirm_cm,   CFG_MIN_PHASE_CFM,  CFG_MAX_PHASE_CFM,  def.phase_confirm_cm);
     VALIDATE_FLOAT(prefs, NVS_K_STAB_S,     stability_s,        CFG_MIN_STAB_S,     CFG_MAX_STAB_S,     def.stability_s);
+    VALIDATE_U8   (prefs, NVS_K_RAW_N,     raw_profiles_per_model, CFG_MIN_RAW_N,  CFG_MAX_RAW_N,      def.raw_profiles_per_model);
+    VALIDATE_U8   (prefs, NVS_K_PRES_MIN,  presence_check_min, CFG_MIN_PRES_MIN,   CFG_MAX_PRES_MIN,   def.presence_check_min);
+    VALIDATE_U32  (prefs, NVS_K_EMPTY_TOL, empty_tolerance_mm, CFG_MIN_EMPTY_TOL,  CFG_MAX_EMPTY_TOL,  def.empty_tolerance_mm);
 
     // --- Radar parametri --- per senzor
     for (int ri = 0; ri < 4; ri++) {
@@ -439,6 +451,9 @@ static void write_all_to_nvs(Preferences& prefs) {
     prefs.putUInt (NVS_K_DELTA_FLT,  s_config.delta_filter_mm);
     prefs.putUInt (NVS_K_PHASE_CFM,  s_config.phase_confirm_cm);
     prefs.putUInt (NVS_K_STAB_S,     float_to_u32(s_config.stability_s));
+    prefs.putUChar(NVS_K_RAW_N,     s_config.raw_profiles_per_model);
+    prefs.putUChar(NVS_K_PRES_MIN,  s_config.presence_check_min);
+    prefs.putUInt (NVS_K_EMPTY_TOL, s_config.empty_tolerance_mm);
     // Radar parametri
     for (int ri = 0; ri < 4; ri++) {
         prefs.putUChar(NVS_RADAR_MD[ri], s_config.radar_max_dist[ri]);

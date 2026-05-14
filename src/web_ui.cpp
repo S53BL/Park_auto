@@ -35,6 +35,7 @@
 #include "hal_light.h"
 #include "light_logic.h"
 #include "event_bus.h"
+#include "vehicle_recog.h"  // vehicle_recog_get_state/name/model/count/dtw
 
 #include <LittleFS.h>
 #include <ESPAsyncWebServer.h>
@@ -267,21 +268,45 @@ static void _handleStatus(AsyncWebServerRequest* req) {
     sigObj["preemptions"]      = sig_stats.preemptions;
     sigObj["tick_count"]       = sig_stats.tick_count;
 
-    // --- Parkirišče (TOF faza + vehicle_recog placeholder) ---
+    // --- Parkirišče (vehicle_recog stanje) ---
     JsonArray parkArr = doc["parking"].to<JsonArray>();
-    const char* phaseStr[4] = {"IDLE", "DETECT", "SCANNING", "DTW_WAIT"};
+    const char* phaseStr[4]   = {"IDLE", "DETECT", "SCANNING", "DTW_WAIT"};
+    const char* vrStateStr[4] = {"EMPTY_CAL", "EMPTY_UNCAL", "OCC_UNKNOWN", "OCC_KNOWN"};
     for (uint8_t p = 0; p < 2; p++) {
+        char pid = (p == 0) ? 'A' : 'B';
         JsonObject pk = parkArr.add<JsonObject>();
-        pk["place"]    = (p == 0) ? "A" : "B";
-        pk["phase"]    = (uint8_t)tofDiag.current_phase;
-        pk["phase_str"]= phaseStr[(uint8_t)tofDiag.current_phase];
-        pk["active"]   = ((uint8_t)tofDiag.active_place == p &&
-                          tofDiag.current_phase != TOF_PHASE_IDLE);
-        pk["occupied"] = false;              // TODO Blok F: vehicle_recog_identify()
-        pk["vehicle"]  = "";                 // TODO Blok F: vehicle name
-        pk["dtw_dist"] = 0.0f;              // TODO Blok F: DTW razdalja
-        pk["profile_pts"] = (p == 0) ? (uint8_t)tofDiag.profile_pts : 0;
+        pk["place"]         = (p == 0) ? "A" : "B";
+        bool tof_active = ((uint8_t)tofDiag.active_place == p
+                           && tofDiag.current_phase != TOF_PHASE_IDLE);
+        pk["tof_phase"]     = (uint8_t)tofDiag.current_phase;
+        pk["tof_phase_str"] = phaseStr[(uint8_t)tofDiag.current_phase];
+        pk["tof_active"]    = tof_active;
+        pk["profile_pts"]   = tof_active ? (uint8_t)tofDiag.profile_pts : 0;
+        vr_place_state_t vrs = vehicle_recog_get_state(pid);
+        pk["vr_state"]      = (uint8_t)vrs;
+        pk["vr_state_str"]  = vrStateStr[(uint8_t)vrs];
+        pk["occupied"]      = (vrs == VR_STATE_OCCUPIED_KNOWN
+                            || vrs == VR_STATE_OCCUPIED_UNKNOWN);
+        pk["vehicle_name"]  = vehicle_recog_get_vehicle_name(pid);
+        pk["model_id"]      = vehicle_recog_get_model_id(pid);
+        float dtw = vehicle_recog_get_last_dtw(pid);
+        if (!isnan(dtw)) pk["dtw_dist"] = dtw;
+        pk["model_count"]   = vehicle_recog_get_model_count(pid);
+        vr_baseline_t bl = vehicle_recog_get_baseline(pid);
+        pk["baseline_valid"] = bl.valid;
+        if (bl.valid) {
+            pk["baseline_h"]  = bl.h_mm;
+            pk["baseline_p1"] = bl.p1_mm;
+            pk["baseline_p2"] = bl.p2_mm;
+        }
+        vr_diagnostics_t vrd = vehicle_recog_get_diagnostics();
+        pk["vr_phase"] = (uint8_t)(p == 0 ? vrd.phase_A : vrd.phase_B);
     }
+    vr_diagnostics_t vrd_all = vehicle_recog_get_diagnostics();
+    JsonObject vrStats = doc["vr_stats"].to<JsonObject>();
+    vrStats["total_recognitions"] = vrd_all.total_recognitions;
+    vrStats["total_aborted"]      = vrd_all.total_aborted;
+    vrStats["total_new_models"]   = vrd_all.total_new_models;
 
     // --- Sistemski podatki (RAM, PSRAM, config mgr) ---
     JsonObject sysObj = doc["system"].to<JsonObject>();
@@ -413,13 +438,16 @@ static void _handleConfigGet(AsyncWebServerRequest* req) {
 
     // Tab: Identifikacija
     JsonObject ident = doc["ident"].to<JsonObject>();
-    ident["dtw_threshold"]      = cfg.dtw_threshold;
-    ident["sakoe_radius"]       = cfg.sakoe_radius;
-    ident["min_profile_points"] = cfg.min_profile_points;
-    ident["normalize_points"]   = cfg.normalize_points;
-    ident["delta_filter_mm"]    = cfg.delta_filter_mm;
-    ident["phase_confirm_cm"]   = cfg.phase_confirm_cm;
-    ident["stability_s"]        = cfg.stability_s;
+    ident["dtw_threshold"]          = cfg.dtw_threshold;
+    ident["sakoe_radius"]           = cfg.sakoe_radius;
+    ident["min_profile_points"]     = cfg.min_profile_points;
+    ident["normalize_points"]       = cfg.normalize_points;
+    ident["delta_filter_mm"]        = cfg.delta_filter_mm;
+    ident["phase_confirm_cm"]       = cfg.phase_confirm_cm;
+    ident["stability_s"]            = cfg.stability_s;
+    ident["raw_profiles_per_model"] = cfg.raw_profiles_per_model;
+    ident["presence_check_min"]     = cfg.presence_check_min;
+    ident["empty_tolerance_mm"]     = cfg.empty_tolerance_mm;
 
     _sendJson(req, 200, doc);
 }
@@ -475,17 +503,21 @@ static void _handleConfigPost(AsyncWebServerRequest* req, uint8_t* data,
     }
     if (doc["ident"].is<JsonObject>()) {
         JsonObject i = doc["ident"];
-        if (i["dtw_threshold"].is<float>())           cfg.dtw_threshold        = i["dtw_threshold"];
-        if (i["sakoe_radius"].is<uint8_t>())          cfg.sakoe_radius         = i["sakoe_radius"];
-        if (i["min_profile_points"].is<uint8_t>())    cfg.min_profile_points   = i["min_profile_points"];
-        if (i["normalize_points"].is<uint8_t>())      cfg.normalize_points     = i["normalize_points"];
-        if (i["delta_filter_mm"].is<uint32_t>())      cfg.delta_filter_mm      = i["delta_filter_mm"];
-        if (i["phase_confirm_cm"].is<uint32_t>())     cfg.phase_confirm_cm     = i["phase_confirm_cm"];
-        if (i["stability_s"].is<float>())             cfg.stability_s          = i["stability_s"];
+        if (i["dtw_threshold"].is<float>())           cfg.dtw_threshold           = i["dtw_threshold"];
+        if (i["sakoe_radius"].is<uint8_t>())          cfg.sakoe_radius            = i["sakoe_radius"];
+        if (i["min_profile_points"].is<uint8_t>())    cfg.min_profile_points      = i["min_profile_points"];
+        if (i["normalize_points"].is<uint8_t>())      cfg.normalize_points        = i["normalize_points"];
+        if (i["delta_filter_mm"].is<uint32_t>())      cfg.delta_filter_mm         = i["delta_filter_mm"];
+        if (i["phase_confirm_cm"].is<uint32_t>())     cfg.phase_confirm_cm        = i["phase_confirm_cm"];
+        if (i["stability_s"].is<float>())             cfg.stability_s             = i["stability_s"];
+        if (i["raw_profiles_per_model"].is<uint8_t>()) cfg.raw_profiles_per_model = i["raw_profiles_per_model"];
+        if (i["presence_check_min"].is<uint8_t>())    cfg.presence_check_min      = i["presence_check_min"];
+        if (i["empty_tolerance_mm"].is<uint32_t>())   cfg.empty_tolerance_mm      = i["empty_tolerance_mm"];
     }
 
     config_set(cfg);
     bool saved = config_save();
+    vehicle_recog_on_config_changed();
     LOG_INFO(TAG, "Config posodobljen in shranjen v NVS (ok=%d)", (int)saved);
 
     JsonDocument resp;
@@ -659,18 +691,62 @@ static void _handleRadarConfigBody(AsyncWebServerRequest* req, uint8_t* data,
 static void _handleVehiclesGet(AsyncWebServerRequest* req) {
     _stats.req_total++;
     _stats.req_api++;
-    String place = "A";
-    if (req->hasParam("place")) place = req->getParam("place")->value();
-    place.toUpperCase();
-    if (place != "A" && place != "B") {
+    String place_str = "A";
+    if (req->hasParam("place")) place_str = req->getParam("place")->value();
+    place_str.toUpperCase();
+    if (place_str != "A" && place_str != "B") {
         _sendError(req, 400, "place must be A or B");
         return;
     }
-    LOG_DEBUG(TAG, "GET /api/vehicles?place=%s (stub)", place.c_str());
+    char pid = place_str.charAt(0);
+
+    if (req->hasParam("profile")) {
+        String mid = req->getParam("profile")->value();
+        float data[VR_PROFILE_NORM_POINTS][VR_PROFILE_DIMS];
+        float var[VR_PROFILE_NORM_POINTS][VR_PROFILE_DIMS];
+        uint16_t plen = 0;
+        if (!vehicle_recog_get_model_profile(pid, mid.c_str(), data, var, &plen)) {
+            _sendError(req, 404, "model not found");
+            return;
+        }
+        JsonDocument doc;
+        doc["id"]     = mid;
+        doc["place"]  = place_str;
+        doc["length"] = plen;
+        JsonArray prof = doc["profile"].to<JsonArray>();
+        JsonArray vari = doc["variance"].to<JsonArray>();
+        for (uint16_t i = 0; i < plen; i++) {
+            JsonArray pt = prof.add<JsonArray>();
+            pt.add(data[i][0]); pt.add(data[i][1]); pt.add(data[i][2]);
+            JsonArray vt = vari.add<JsonArray>();
+            vt.add(var[i][0]);  vt.add(var[i][1]);  vt.add(var[i][2]);
+        }
+        _sendJson(req, 200, doc);
+        return;
+    }
+
+    LOG_DEBUG(TAG, "GET /api/vehicles?place=%c", pid);
+    uint16_t cnt = vehicle_recog_get_model_count(pid);
     JsonDocument doc;
-    doc["place"]   = place;
-    doc["models"]  = JsonArray();  // prazen — vehicle_recog.h ni implementiran
-    doc["_stub"]   = true;
+    doc["place"] = place_str;
+    JsonArray models = doc["models"].to<JsonArray>();
+    for (uint16_t i = 0; i < cnt; i++) {
+        vr_model_summary_t s;
+        if (!vehicle_recog_get_model_summary(pid, i, &s)) continue;
+        JsonObject m = models.add<JsonObject>();
+        m["id"]          = s.id;
+        m["name"]        = s.name;
+        m["repetitions"] = s.repetitions;
+        m["lastSeen"]    = s.lastSeen;
+        if (!isnan(s.lastDtwDistance)) m["lastDtw"] = s.lastDtwDistance;
+        const char* cur_id = vehicle_recog_get_model_id(pid);
+        m["on_place"] = (cur_id && strcmp(cur_id, s.id) == 0);
+    }
+    vr_place_state_t vrs = vehicle_recog_get_state(pid);
+    doc["vr_state"]     = (uint8_t)vrs;
+    doc["vehicle_name"] = vehicle_recog_get_vehicle_name(pid);
+    vr_baseline_t bl = vehicle_recog_get_baseline(pid);
+    doc["baseline_valid"] = bl.valid;
     _sendJson(req, 200, doc);
 }
 
@@ -679,23 +755,70 @@ static void _handleVehiclesRename(AsyncWebServerRequest* req, uint8_t* data,
     _stats.req_total++;
     _stats.req_api++;
     if (index + len < total) return;
-    LOG_DEBUG(TAG, "POST /api/vehicles/rename (stub)");
+
     JsonDocument doc;
-    doc["ok"]    = true;
-    doc["msg"]   = "rename not implemented (stub)";
-    doc["_stub"] = true;
-    _sendJson(req, 200, doc);
+    if (deserializeJson(doc, data, len)) {
+        _sendError(req, 400, "invalid JSON");
+        return;
+    }
+    if (!doc["place"].is<const char*>() ||
+        !doc["id"].is<const char*>()    ||
+        !doc["name"].is<const char*>()) {
+        _sendError(req, 400, "place, id, name required");
+        return;
+    }
+    const char* place_s  = doc["place"].as<const char*>();
+    const char* model_id = doc["id"].as<const char*>();
+    const char* new_name = doc["name"].as<const char*>();
+
+    if (!place_s || (place_s[0] != 'A' && place_s[0] != 'B')) {
+        _sendError(req, 400, "place must be A or B");
+        return;
+    }
+    if (!model_id || strlen(model_id) == 0 || !new_name || strlen(new_name) == 0) {
+        _sendError(req, 400, "id and name must be non-empty");
+        return;
+    }
+
+    bool ok = vehicle_recog_rename_model(place_s[0], model_id, new_name);
+    LOG_INFO(TAG, "vehicles/rename %c %s -> '%s' ok=%d",
+             place_s[0], model_id, new_name, (int)ok);
+
+    JsonDocument resp;
+    resp["ok"]    = ok;
+    resp["place"] = place_s;
+    resp["id"]    = model_id;
+    resp["name"]  = new_name;
+    if (!ok) resp["error"] = "model not found or rename failed";
+    _sendJson(req, ok ? 200 : 404, resp);
 }
 
 static void _handleVehiclesDelete(AsyncWebServerRequest* req) {
     _stats.req_total++;
     _stats.req_api++;
-    LOG_DEBUG(TAG, "DELETE /api/vehicles (stub)");
-    JsonDocument doc;
-    doc["ok"]    = true;
-    doc["msg"]   = "delete not implemented (stub)";
-    doc["_stub"] = true;
-    _sendJson(req, 200, doc);
+
+    if (!req->hasParam("id") || !req->hasParam("place")) {
+        _sendError(req, 400, "id and place query params required");
+        return;
+    }
+    String id_str    = req->getParam("id")->value();
+    String place_str = req->getParam("place")->value();
+    place_str.toUpperCase();
+    if (place_str != "A" && place_str != "B") {
+        _sendError(req, 400, "place must be A or B");
+        return;
+    }
+
+    bool ok = vehicle_recog_delete_model(place_str.charAt(0), id_str.c_str());
+    LOG_INFO(TAG, "vehicles/delete %c %s ok=%d",
+             place_str.charAt(0), id_str.c_str(), (int)ok);
+
+    JsonDocument resp;
+    resp["ok"]    = ok;
+    resp["place"] = place_str;
+    resp["id"]    = id_str;
+    if (!ok) resp["error"] = "model not found";
+    _sendJson(req, ok ? 200 : 404, resp);
 }
 
 // ============================================================

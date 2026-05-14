@@ -42,6 +42,7 @@
 #include "hal_tof.h"
 #include "hal_display.h"    // hal_display_setBacklight — bujenje ob peaku
 #include "hal_radar.h"      // hal_radar_get_status — peak_duration_ms iz unmanned_s
+#include "vehicle_recog.h"  // vr_place_state_t, vehicle_recog_get_*
 
 #include "logger.h"
 #define SMNI(fmt, ...) LOG_INFO ("SMAIN", fmt, ##__VA_ARGS__)
@@ -875,16 +876,223 @@ static void car_set_color(CarIcon& c, lv_color_t col) {
 }
 
 // ============================================================
-// PARKING — EVENT CALLBACK
+// PARKING — RENAME DIALOG (B4)
 // ============================================================
 
+static uint8_t s_rename_pkg_idx = 0;
+
+static void pkg_rename_ok_cb(lv_event_t* e) {
+    lv_event_code_t code = lv_event_get_code(e);
+    if (code != LV_EVENT_CLICKED) return;
+
+    lv_obj_t* ta = (lv_obj_t*)lv_event_get_user_data(e);
+    if (!ta) return;
+    const char* new_name = lv_textarea_get_text(ta);
+    if (!new_name || strlen(new_name) == 0) return;
+
+    char pid = (s_rename_pkg_idx == 0) ? 'A' : 'B';
+    const char* model_id = vehicle_recog_get_model_id(pid);
+    if (model_id && strlen(model_id) > 0) {
+        bool ok = vehicle_recog_rename_model(pid, model_id, new_name);
+        SMNI("PKG[%c] rename '%s' ok=%d", pid, new_name, (int)ok);
+    }
+
+    lv_obj_t* scr = lv_scr_act();
+    uint32_t child_cnt = lv_obj_get_child_count(scr);
+    if (child_cnt > 0) lv_obj_del(lv_obj_get_child(scr, child_cnt - 1));
+}
+
+static void pkg_open_rename_dialog(uint8_t pkg_idx) {
+    s_rename_pkg_idx = pkg_idx;
+    char pid = (pkg_idx == 0) ? 'A' : 'B';
+    const char* cur_name = vehicle_recog_get_vehicle_name(pid);
+
+    lv_obj_t* modal = lv_obj_create(lv_scr_act());
+    lv_obj_set_size(modal, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_style_bg_color(modal, lv_color_hex(0x0A0F1A), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(modal, 230, LV_PART_MAIN);
+    lv_obj_set_style_border_width(modal, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(modal, 0, LV_PART_MAIN);
+    lv_obj_clear_flag(modal, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t* ta = lv_textarea_create(modal);
+    lv_obj_set_size(ta, 300, 44);
+    lv_obj_align(ta, LV_ALIGN_TOP_MID, 0, 10);
+    lv_textarea_set_max_length(ta, 31);
+    lv_textarea_set_one_line(ta, true);
+    lv_textarea_set_text(ta, cur_name ? cur_name : "");
+    lv_obj_set_style_text_font(ta, &font_montserrat_18_sl, LV_PART_MAIN);
+    lv_obj_set_style_text_color(ta, lv_color_hex(0xF1F5F9), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(ta, lv_color_hex(0x1E2A2F), LV_PART_MAIN);
+    lv_obj_set_style_border_color(ta, lv_color_hex(0x60A5FA), LV_PART_MAIN);
+    lv_obj_set_style_border_width(ta, 2, LV_PART_MAIN);
+    lv_obj_set_style_radius(ta, 6, LV_PART_MAIN);
+
+    lv_obj_t* kb = lv_keyboard_create(modal);
+    lv_keyboard_set_mode(kb, LV_KEYBOARD_MODE_TEXT_UPPER);
+    lv_keyboard_set_textarea(kb, ta);
+    lv_obj_set_size(kb, LV_PCT(100), LV_PCT(60));
+    lv_obj_align(kb, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_set_style_bg_color(kb, lv_color_hex(0x1A2035), LV_PART_MAIN);
+
+    lv_obj_t* ok_btn = lv_btn_create(modal);
+    lv_obj_set_size(ok_btn, 60, 36);
+    lv_obj_align_to(ok_btn, ta, LV_ALIGN_OUT_RIGHT_MID, 6, 0);
+    lv_obj_set_style_bg_color(ok_btn, lv_color_hex(0x1D4E3A), LV_PART_MAIN);
+    lv_obj_set_style_radius(ok_btn, 6, LV_PART_MAIN);
+    lv_obj_add_event_cb(ok_btn, pkg_rename_ok_cb, LV_EVENT_CLICKED, ta);
+    lv_obj_t* ok_lbl = lv_label_create(ok_btn);
+    lv_label_set_text(ok_lbl, "OK");
+    lv_obj_center(ok_lbl);
+
+    lv_obj_t* cancel_btn = lv_btn_create(modal);
+    lv_obj_set_size(cancel_btn, 60, 36);
+    lv_obj_align_to(cancel_btn, ok_btn, LV_ALIGN_OUT_RIGHT_MID, 6, 0);
+    lv_obj_set_style_bg_color(cancel_btn, lv_color_hex(0x2A1F1F), LV_PART_MAIN);
+    lv_obj_set_style_radius(cancel_btn, 6, LV_PART_MAIN);
+    lv_obj_add_event_cb(cancel_btn, [](lv_event_t* ev) {
+        if (lv_event_get_code(ev) != LV_EVENT_CLICKED) return;
+        lv_obj_t* scr = lv_scr_act();
+        uint32_t n = lv_obj_get_child_count(scr);
+        if (n > 0) lv_obj_del(lv_obj_get_child(scr, n - 1));
+    }, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t* cancel_lbl = lv_label_create(cancel_btn);
+    lv_label_set_text(cancel_lbl, "\xC3\x97");
+    lv_obj_center(cancel_lbl);
+}
+
+// ============================================================
+// PARKING — CALIBRATE DIALOG (B4)
+// ============================================================
+
+static uint8_t s_cal_pkg_idx = 0;
+
+static void pkg_calibrate_confirm_cb(lv_event_t* e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    bool do_cal = (bool)(uintptr_t)lv_event_get_user_data(e);
+
+    if (do_cal) {
+        char pid = (s_cal_pkg_idx == 0) ? 'A' : 'B';
+        bool ok = vehicle_recog_calibrate_empty(pid);
+        SMNI("PKG[%c] calibrate_empty ok=%d", pid, (int)ok);
+    }
+
+    lv_obj_t* scr = lv_scr_act();
+    uint32_t n = lv_obj_get_child_count(scr);
+    if (n > 0) lv_obj_del(lv_obj_get_child(scr, n - 1));
+}
+
+static void pkg_open_calibrate_dialog(uint8_t pkg_idx) {
+    s_cal_pkg_idx = pkg_idx;
+    char pid = (pkg_idx == 0) ? 'A' : 'B';
+
+    lv_obj_t* modal = lv_obj_create(lv_scr_act());
+    lv_obj_set_size(modal, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_style_bg_color(modal, lv_color_hex(0x0A0F1A), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(modal, 230, LV_PART_MAIN);
+    lv_obj_set_style_border_width(modal, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(modal, 0, LV_PART_MAIN);
+    lv_obj_clear_flag(modal, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t* card = lv_obj_create(modal);
+    lv_obj_set_size(card, 260, 120);
+    lv_obj_align(card, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_style_bg_color(card, lv_color_hex(0x1E2A2F), LV_PART_MAIN);
+    lv_obj_set_style_radius(card, 10, LV_PART_MAIN);
+    lv_obj_set_style_border_color(card, lv_color_hex(0x334155), LV_PART_MAIN);
+    lv_obj_set_style_border_width(card, 1, LV_PART_MAIN);
+    lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t* title = lv_label_create(card);
+    char title_buf[48];
+    snprintf(title_buf, sizeof(title_buf), "Kalibriraj prazno mesto %c?", pid);
+    lv_label_set_text(title, title_buf);
+    lv_obj_set_style_text_font(title, &font_montserrat_16_sl, LV_PART_MAIN);
+    lv_obj_set_style_text_color(title, lv_color_hex(0xF1F5F9), LV_PART_MAIN);
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 10, 10);
+    lv_label_set_long_mode(title, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(title, 240);
+
+    lv_obj_t* hint = lv_label_create(card);
+    lv_label_set_text(hint, "Mesto mora biti prazno.");
+    lv_obj_set_style_text_font(hint, &font_montserrat_14_sl, LV_PART_MAIN);
+    lv_obj_set_style_text_color(hint, lv_color_hex(0x94A3B8), LV_PART_MAIN);
+    lv_obj_align(hint, LV_ALIGN_TOP_LEFT, 10, 36);
+
+    lv_obj_t* yes_btn = lv_btn_create(card);
+    lv_obj_set_size(yes_btn, 100, 36);
+    lv_obj_align(yes_btn, LV_ALIGN_BOTTOM_LEFT, 10, -10);
+    lv_obj_set_style_bg_color(yes_btn, lv_color_hex(0x1D4E3A), LV_PART_MAIN);
+    lv_obj_set_style_radius(yes_btn, 6, LV_PART_MAIN);
+    lv_obj_add_event_cb(yes_btn, pkg_calibrate_confirm_cb,
+                        LV_EVENT_CLICKED, (void*)(uintptr_t)1);
+    lv_obj_t* yes_lbl = lv_label_create(yes_btn);
+    lv_label_set_text(yes_lbl, "DA \xe2\x80\x94 Kalibriraj");
+    lv_obj_set_style_text_font(yes_lbl, &font_montserrat_14_sl, LV_PART_MAIN);
+    lv_obj_center(yes_lbl);
+
+    lv_obj_t* no_btn = lv_btn_create(card);
+    lv_obj_set_size(no_btn, 80, 36);
+    lv_obj_align(no_btn, LV_ALIGN_BOTTOM_RIGHT, -10, -10);
+    lv_obj_set_style_bg_color(no_btn, lv_color_hex(0x2A1F1F), LV_PART_MAIN);
+    lv_obj_set_style_radius(no_btn, 6, LV_PART_MAIN);
+    lv_obj_add_event_cb(no_btn, pkg_calibrate_confirm_cb,
+                        LV_EVENT_CLICKED, (void*)(uintptr_t)0);
+    lv_obj_t* no_lbl = lv_label_create(no_btn);
+    lv_label_set_text(no_lbl, "NE");
+    lv_obj_set_style_text_font(no_lbl, &font_montserrat_14_sl, LV_PART_MAIN);
+    lv_obj_center(no_lbl);
+}
+
+// ============================================================
+// PARKING — EVENT CALLBACK (B4: 2s + 10s long press)
+// ============================================================
+
+static uint32_t s_pkg_press_ms[2]   = {0, 0};
+static bool     s_pkg_edit_fired[2] = {false, false};
+static bool     s_pkg_cal_fired[2]  = {false, false};
+
 static void pkg_event_cb(lv_event_t* e) {
-    if (lv_event_get_code(e) != LV_EVENT_LONG_PRESSED) return;
+    lv_event_code_t code = lv_event_get_code(e);
     PkgWidget* w = (PkgWidget*)lv_event_get_user_data(e);
     if (!w) return;
-    EventBus::publish(
-        w->idx == 0 ? EventType::BUTTON_EDIT_VEHICLE_A
-                    : EventType::BUTTON_EDIT_VEHICLE_B, 0);
+    uint8_t i = w->idx;
+    char pid = (i == 0) ? 'A' : 'B';
+
+    if (code == LV_EVENT_PRESSED) {
+        s_pkg_press_ms[i]   = millis();
+        s_pkg_edit_fired[i] = false;
+        s_pkg_cal_fired[i]  = false;
+    }
+    else if (code == LV_EVENT_PRESSING) {
+        uint32_t held = millis() - s_pkg_press_ms[i];
+
+        if (held >= 2000 && !s_pkg_edit_fired[i]) {
+            vr_place_state_t st = vehicle_recog_get_state(pid);
+            if (st == VR_STATE_OCCUPIED_KNOWN || st == VR_STATE_OCCUPIED_UNKNOWN) {
+                s_pkg_edit_fired[i] = true;
+                SMNI("PKG[%c] 2s hold -> BUTTON_EDIT_VEHICLE", pid);
+                EventBus::publish(
+                    i == 0 ? EventType::BUTTON_EDIT_VEHICLE_A
+                           : EventType::BUTTON_EDIT_VEHICLE_B, 0);
+                pkg_open_rename_dialog(i);
+            }
+        }
+
+        if (held >= VR_CALIB_HOLD_MS && !s_pkg_cal_fired[i]) {
+            vr_place_state_t st = vehicle_recog_get_state(pid);
+            if (st == VR_STATE_EMPTY_CALIBRATED || st == VR_STATE_EMPTY_UNCALIBRATED) {
+                s_pkg_cal_fired[i] = true;
+                SMNI("PKG[%c] 10s hold -> calibrate dialog", pid);
+                pkg_open_calibrate_dialog(i);
+            }
+        }
+    }
+    else if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
+        s_pkg_press_ms[i]   = 0;
+        s_pkg_edit_fired[i] = false;
+        s_pkg_cal_fired[i]  = false;
+    }
 }
 
 // ============================================================
@@ -892,23 +1100,44 @@ static void pkg_event_cb(lv_event_t* e) {
 // ============================================================
 
 static void pkg_apply(PkgWidget& w) {
-    if (w.data.occupied) {
+    // vr_state: 0=EMPTY_CAL, 1=EMPTY_UNCAL, 2=OCC_UNKNOWN, 3=OCC_KNOWN
+    if (w.data.vr_state == VR_STATE_OCCUPIED_KNOWN) {
         lv_obj_set_style_bg_color(w.card, C_PKG_OCC_BG, LV_PART_MAIN);
         lv_obj_set_style_border_color(w.card, C_PKG_OCC_BORDER, LV_PART_MAIN);
-        lv_label_set_text(w.lbl_name, w.data.vehicle_name[0] ? w.data.vehicle_name : "?");
+        lv_label_set_text(w.lbl_name,
+            w.data.vehicle_name[0] ? w.data.vehicle_name : "Avto ?");
         lv_obj_set_style_text_color(w.lbl_name, C_PKG_OCC_NAME, LV_PART_MAIN);
-        char stats[40];
-        snprintf(stats, sizeof(stats), "%lu\xC3\x97  DTW %.1f",
-                 (unsigned long)w.data.parking_count, (double)w.data.dtw_distance);
-        lv_label_set_text(w.lbl_stats, stats);
         car_set_color(w.car, C_CAR_OCC);
-    } else {
+        char stats[40];
+        if (!isnan(w.data.last_dtw)) {
+            snprintf(stats, sizeof(stats), "%lu\xC3\x97  DTW %.1f",
+                     (unsigned long)w.data.parking_count, (double)w.data.last_dtw);
+        } else {
+            snprintf(stats, sizeof(stats), "novo");
+        }
+        lv_label_set_text(w.lbl_stats, stats);
+    }
+    else if (w.data.vr_state == VR_STATE_OCCUPIED_UNKNOWN) {
+        lv_obj_set_style_bg_color(w.card, C_PKG_OCC_BG, LV_PART_MAIN);
+        lv_obj_set_style_border_color(w.card, lv_color_hex(0x475569), LV_PART_MAIN);
+        lv_label_set_text(w.lbl_name, "---");
+        lv_obj_set_style_text_color(w.lbl_name, C_CAR_EMPTY, LV_PART_MAIN);
+        car_set_color(w.car, lv_color_hex(0x475569));
+        lv_label_set_text(w.lbl_stats, "");
+    }
+    else {
         lv_obj_set_style_bg_color(w.card, C_PKG_EMPTY_BG, LV_PART_MAIN);
         lv_obj_set_style_border_color(w.card, C_PKG_EMPTY_BORDER, LV_PART_MAIN);
         lv_label_set_text(w.lbl_name, "Prazno");
         lv_obj_set_style_text_color(w.lbl_name, C_PKG_EMPTY_NAME, LV_PART_MAIN);
-        lv_label_set_text(w.lbl_stats, "");
         car_set_color(w.car, C_CAR_EMPTY);
+        if (w.data.vr_state == VR_STATE_EMPTY_UNCALIBRATED) {
+            lv_label_set_text(w.lbl_stats, "\xe2\x9a\xa0 ni kalibr.");
+            lv_obj_set_style_text_color(w.lbl_stats,
+                lv_color_hex(0xFBBF24), LV_PART_MAIN);
+        } else {
+            lv_label_set_text(w.lbl_stats, "");
+        }
     }
 
     uint8_t phase = w.data.tof_phase;

@@ -80,6 +80,8 @@
 #include "config_mgr.h"
 #include "config.h"
 #include "logger.h"
+#include "vehicle_recog.h"
+#include "parking_log.h"
 #include <freertos/semphr.h>
 #include <freertos/queue.h>
 #include <esp_task_wdt.h>
@@ -947,10 +949,21 @@ void appTask(void* pvParams) {
         }
     }
 
+    // Identifikacija vozil — zahteva LittleFS (inicializiran v bsp) in config_mgr
+    if (!vehicle_recog_init()) {
+        LLI("vehicle_recog_init NAPAKA — identifikacija vozil onemogočena");
+    }
+    parking_log_init();
+
     LLI("appTask v zanki (tick: 100ms)");
     while (true) {
         esp_task_wdt_reset();
         light_logic_tick();
+        vehicle_recog_tick();
+
+        // parking_log_tick vsakih ~10 s (perioda je interha v tick())
+        parking_log_tick();
+
         vTaskDelay(pdMS_TO_TICKS(100));
     }
 }

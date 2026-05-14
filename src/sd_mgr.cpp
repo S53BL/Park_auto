@@ -464,3 +464,117 @@ int sd_mgr_count_files(const char* path) {
     give_mutex();
     return cnt;
 }
+
+bool sd_mgr_append_file(const char* path, const char* data, size_t len) {
+    if (!s_ready || !path || !data || len == 0) return false;
+    if (!take_mutex(500)) return false;
+
+    File f = SD_MMC.open(path, FILE_APPEND);
+    if (!f) {
+        SD_E("append_file: ne morem odpreti %s", path);
+        give_mutex();
+        return false;
+    }
+    size_t written = f.write((const uint8_t*)data, len);
+    f.close();
+    give_mutex();
+
+    if (written != len) {
+        SD_W("append_file: nepopoln zapis %s (%d/%d)", path, written, len);
+        return false;
+    }
+    return true;
+}
+
+bool sd_mgr_ensure_dir(const char* path) {
+    if (!s_ready || !path || path[0] != '/') return false;
+    if (!take_mutex(500)) return false;
+
+    // Preberi pot segment po segment in kreiraj vsak
+    char buf[128];
+    strncpy(buf, path, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = '\0';
+
+    bool ok = true;
+    for (int i = 1; buf[i] != '\0'; i++) {
+        if (buf[i] == '/') {
+            buf[i] = '\0';
+            if (!SD_MMC.exists(buf)) {
+                if (!SD_MMC.mkdir(buf)) {
+                    SD_W("ensure_dir: mkdir('%s') napaka", buf);
+                    ok = false;
+                    break;
+                }
+            }
+            buf[i] = '/';
+        }
+    }
+    if (ok && !SD_MMC.exists(path)) {
+        ok = SD_MMC.mkdir(path);
+        if (!ok) SD_W("ensure_dir: mkdir('%s') napaka", path);
+    }
+    give_mutex();
+    return ok;
+}
+
+int sd_mgr_keep_newest_n(const char* path, uint16_t n) {
+    if (!s_ready || !path || n == 0) return 0;
+    if (!take_mutex(500)) return 0;
+
+    // Poberi imana vseh datotek v mapi (max 200)
+    static char names[200][64];
+    int total = 0;
+
+    File root = SD_MMC.open(path);
+    if (!root || !root.isDirectory()) {
+        give_mutex();
+        return 0;
+    }
+
+    File entry = root.openNextFile();
+    while (entry && total < 200) {
+        if (!entry.isDirectory()) {
+            strncpy(names[total], entry.name(), 63);
+            names[total][63] = '\0';
+            total++;
+        }
+        entry.close();
+        entry = root.openNextFile();
+    }
+    root.close();
+
+    if (total <= (int)n) {
+        give_mutex();
+        return 0;
+    }
+
+    // Sortiraj abecedno (=kronološko ker format YYYYMMDD_HHMMSS_)
+    // Bubble sort — majhen N (max ~100), dovolj hitro
+    for (int i = 0; i < total - 1; i++) {
+        for (int j = 0; j < total - i - 1; j++) {
+            if (strcmp(names[j], names[j + 1]) > 0) {
+                char tmp[64];
+                strncpy(tmp, names[j], 63);
+                strncpy(names[j], names[j + 1], 63);
+                strncpy(names[j + 1], tmp, 63);
+            }
+        }
+    }
+
+    // Pobriši najstarejše (prvih total-n)
+    int del_count = total - (int)n;
+    int deleted = 0;
+    char full[192];
+    for (int i = 0; i < del_count; i++) {
+        snprintf(full, sizeof(full), "%s/%s", path, names[i]);
+        if (SD_MMC.remove(full)) {
+            deleted++;
+            SD_D("keep_newest_n: pobrisal %s", full);
+        } else {
+            SD_W("keep_newest_n: napaka brisanja %s", full);
+        }
+    }
+
+    give_mutex();
+    return deleted;
+}

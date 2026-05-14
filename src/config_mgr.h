@@ -135,6 +135,15 @@ struct Config {
     // Čas stabilnosti H senzorja pred začetkom skeniranja (sekunde).
     float    stability_s;           // default: 1.5,  min: 0.5,   max: 10.0
 
+    // Število raw profilov ki jih hranimo na SD na model (FIFO rotacija).
+    uint8_t  raw_profiles_per_model; // default: 30,  min: 10,   max: 100
+
+    // Interval periodičnega preverjanja prisotnosti vozila (minute).
+    uint8_t  presence_check_min;    // default: 10,   min: 1,    max: 60
+
+    // Toleranca za baseline primerjavo praznega mesta (mm).
+    uint16_t empty_tolerance_mm;    // default: 200,  min: 50,   max: 500
+
     // ----------------------------------------------------------
     // Tab: Radar konfiguracija — per senzor (indeksi 0-3)
     // ----------------------------------------------------------
@@ -198,6 +207,9 @@ inline Config config_defaults() {
     c.delta_filter_mm      = 15;
     c.phase_confirm_cm     = 350;
     c.stability_s          = 1.5f;
+    c.raw_profiles_per_model = 30;
+    c.presence_check_min   = 10;
+    c.empty_tolerance_mm   = 200;
     // Radar — utišane začetne vrednosti (kalibrirati po namestitvi)
     for (int i = 0; i < 4; i++) {
         c.radar_max_dist[i]    = 2;    // 1.5m
