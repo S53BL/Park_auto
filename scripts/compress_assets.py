@@ -1,6 +1,12 @@
 # compress_assets.py
 # PlatformIO pre-script: gzip kompresija src/assets/ → data/assets/
 # Kliče se pred vsakim buildom (extra_scripts = pre:scripts/compress_assets.py)
+#
+# SPREMEMBA v1.1 (2026-05-14):
+#   Dodan cleanup: pred generacijo zbriše iz data/assets/ vse datoteke ki
+#   nimajo para v src/assets/ — prepreči soobstoj zastarelih ostankov
+#   (npr. data/assets/index.html brez .gz iz starejše faze projekta).
+
 import os, gzip, shutil
 Import("env")
 
@@ -13,6 +19,38 @@ def compress_assets(*args, **kwargs):
         print("[compress_assets] src/assets/ ne obstaja — preskoči")
         return
     os.makedirs(DATA_DIR, exist_ok=True)
+
+    # ── Izgradi množico pričakovanih izhodnih datotek ────────────────────
+    # Za vsako datoteko v src/ vemo točno kaj bo nastalo v data/:
+    #   - NO_GZIP → fname (kopija)
+    #   - ostalo  → fname + ".gz"
+    expected = set()
+    for fname in os.listdir(SRC_DIR):
+        src_path = os.path.join(SRC_DIR, fname)
+        if not os.path.isfile(src_path) or fname.startswith('.'):
+            continue
+        ext = os.path.splitext(fname)[1].lower()
+        if ext in NO_GZIP:
+            expected.add(fname)
+        else:
+            expected.add(fname + ".gz")
+
+    # ── Cleanup: zbriši iz data/assets/ vse kar ni v expected ────────────
+    # Izjema: .gitkeep in skrite datoteke
+    removed = 0
+    for fname in os.listdir(DATA_DIR):
+        if fname.startswith('.'):
+            continue
+        if fname not in expected:
+            stale = os.path.join(DATA_DIR, fname)
+            if os.path.isfile(stale):
+                os.remove(stale)
+                print(f"[compress_assets] CLEANUP: odstranil zastarelo datoteko: {fname}")
+                removed += 1
+    if removed:
+        print(f"[compress_assets] cleanup: odstranjenih {removed} zastarelih datotek")
+
+    # ── Kompresija / kopiranje ────────────────────────────────────────────
     count = 0
     for fname in os.listdir(SRC_DIR):
         src_path = os.path.join(SRC_DIR, fname)
