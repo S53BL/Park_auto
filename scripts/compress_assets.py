@@ -2,17 +2,22 @@
 # PlatformIO pre-script: gzip kompresija src/assets/ → data/assets/
 # Kliče se pred vsakim buildom (extra_scripts = pre:scripts/compress_assets.py)
 #
-# SPREMEMBA v1.1 (2026-05-14):
-#   Dodan cleanup: pred generacijo zbriše iz data/assets/ vse datoteke ki
-#   nimajo para v src/assets/ — prepreči soobstoj zastarelih ostankov
-#   (npr. data/assets/index.html brez .gz iz starejše faze projekta).
+# SPREMEMBE:
+#   v1.1 (2026-05-14): Dodan cleanup zastarelih datotek iz data/assets/
+#   v1.2 (2026-05-14): index.html dodan v NO_GZIP — ostane nekompresiran.
+#     Razlog: web_ui.cpp kliče serveStatic().setDefaultFile("index.html") in
+#     LittleFS.exists("/assets/index.html") — oba zahtevata nekompresiran HTML.
+#     ESPAsyncWebServer NE išče index.html.gz samodejno za default file.
 
 import os, gzip, shutil
 Import("env")
 
 SRC_DIR  = os.path.join(env.subst("$PROJECT_DIR"), "src", "assets")
 DATA_DIR = os.path.join(env.subst("$PROJECT_DIR"), "data", "assets")
-NO_GZIP  = {".gz", ".jpg", ".jpeg", ".png", ".ico", ".woff", ".woff2"}
+
+# .html je v NO_GZIP ker web_ui.cpp išče index.html direktno (setDefaultFile).
+# Fonti (.woff2) so binarni in jih gzip ne stisne učinkovito.
+NO_GZIP  = {".gz", ".jpg", ".jpeg", ".png", ".ico", ".woff", ".woff2", ".html"}
 
 def compress_assets(*args, **kwargs):
     if not os.path.isdir(SRC_DIR):
@@ -36,7 +41,9 @@ def compress_assets(*args, **kwargs):
             expected.add(fname + ".gz")
 
     # ── Cleanup: zbriši iz data/assets/ vse kar ni v expected ────────────
-    # Izjema: .gitkeep in skrite datoteke
+    # Izjema: skrite datoteke (.gitkeep ipd.)
+    # Primer tega ki bo zbrisano: index.html.gz (ker .html je zdaj v NO_GZIP
+    # in expected vsebuje samo "index.html", ne "index.html.gz")
     removed = 0
     for fname in os.listdir(DATA_DIR):
         if fname.startswith('.'):
@@ -69,7 +76,7 @@ def compress_assets(*args, **kwargs):
             dst_kb = os.path.getsize(dst) // 1024
             print(f"[compress_assets] {fname} → {fname}.gz  ({src_kb} KB → {dst_kb} KB)")
             count += 1
-    print(f"[compress_assets] skupaj {count} datotek gzip kompresiranih v data/assets/")
+    print(f"[compress_assets] skupaj {count} datotek gzip + index.html nekompresiran v data/assets/")
 
 env.AddPreAction("buildprog", compress_assets)
 env.AddPreAction("uploadfs",  compress_assets)
