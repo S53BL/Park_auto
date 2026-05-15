@@ -8,9 +8,9 @@
 //
 // POTEK wifiTask():
 //   1. wifi_connect_best()  — scan vseh SSID, vzame prvega ki odgovori
-//   2. wifi_ntp_sync()      — configTime + čakanje na sync (max 15s)
-//   3. wifi_mdns_start()    — mDNS registracija
-//   4. web_ui_start()       — TODO: ko bo web_ui.cpp implementiran
+//   2. web_ui_begin()       — web server start (pred NTP, heap neframentiran)
+//   3. wifi_ntp_sync()      — configTime + čakanje na sync (max 15s)
+//   4. mDNS ODSTRANJEN      — statična IP 192.168.2.170
 //   5. Watchdog zanka       — vsakih 30s preveri, reconnect po potrebi
 //
 // ============================================================
@@ -23,7 +23,6 @@
 #include "logger.h"
 #include "event_bus.h"
 #include <WiFi.h>
-#include <ESPmDNS.h>
 #include <esp_sntp.h>
 #include <freertos/semphr.h>
 #include <time.h>
@@ -73,7 +72,6 @@
 
 static SemaphoreHandle_t s_mutex    = nullptr;
 static WifiStatus        s_status   = {};
-static bool              s_mdns_ok  = false;
 static uint32_t          s_last_ntp_check_ms = 0;
 
 // ============================================================
@@ -288,29 +286,6 @@ static void wifi_ntp_check() {
 }
 
 // ============================================================
-// mDNS
-// ============================================================
-
-static void wifi_mdns_start() {
-    if (MDNS.begin(WIFI_MDNS_HOSTNAME)) {
-        // Registriraj HTTP servis za autodiscovery
-        MDNS.addService("http", "tcp", WIFI_WEB_PORT);
-        s_mdns_ok = true;
-        WF_I("mDNS OK — http://%s.local (port %d)",
-             WIFI_MDNS_HOSTNAME, WIFI_WEB_PORT);
-    } else {
-        s_mdns_ok = false;
-        WF_W("mDNS NAPAKA — dostop samo prek IP: %s", WiFi.localIP().toString().c_str());
-    }
-}
-
-static void wifi_mdns_restart() {
-    MDNS.end();
-    vTaskDelay(pdMS_TO_TICKS(100));
-    wifi_mdns_start();
-}
-
-// ============================================================
 // WATCHDOG — periodično preverjanje povezave
 // ============================================================
 
@@ -397,9 +372,6 @@ static void wifi_reconnect() {
         uint32_t ip_int = (uint32_t)WiFi.localIP();
         EventBus::publish(EventType::WIFI_CONNECTED, ip_int);
 
-        // mDNS restart ob reconnectu
-        wifi_mdns_restart();
-
         // NTP resync po reconnectu
         if (!s_status.ntp_ok) {
             wifi_ntp_sync();
@@ -473,23 +445,26 @@ void wifiTask(void* pvParams) {
         // xTaskCreate za async_tcp zahteva 8 KB zaporednega SRAM.
         // NTP + mDNS alocirata SRAM bufferje ki fragmentirajo heap.
         // --------------------------------------------------------
-        WF_I("SRAM pred web_ui_begin: %u B free",
-             heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+        WF_I("=== SRAM pred web_ui_begin: %lu B (min-ever: %lu B) ===",
+             (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned long)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
         if (!web_ui_running()) {
             web_ui_begin();
         }
-        WF_I("SRAM po  web_ui_begin: %u B free",
-             heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+        WF_I("=== SRAM po  web_ui_begin: %lu B (min-ever: %lu B) ===",
+             (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned long)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
 
         // --------------------------------------------------------
         // FAZA 3 — NTP sinhronizacija
         // --------------------------------------------------------
+        WF_D("SRAM pred NTP sync: %lu B",
+             (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
         wifi_ntp_sync();
+        WF_D("SRAM po  NTP sync:  %lu B",
+             (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
 
-        // --------------------------------------------------------
-        // FAZA 4 — mDNS
-        // --------------------------------------------------------
-        wifi_mdns_start();
+        // FAZA 4 — mDNS ODSTRANJEN (statična IP 192.168.2.170, mDNS ni potreben)
 
         update_status(WifiState::NTP_SYNCED);
 
@@ -524,9 +499,10 @@ void wifiTask(void* pvParams) {
         // --------------------------------------------------------
         if ((now_ms - last_watchdog_ms) >= WATCHDOG_INTERVAL_MS) {
             last_watchdog_ms = now_ms;
-            WF_D("SRAM free: %u B  min-ever: %u B",
-                 heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
-                 heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+            WF_I("SRAM free: %lu B  min-ever: %lu B  PSRAM free: %lu B",
+                 (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                 (unsigned long)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                 (unsigned long)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
 
             if (!wifi_watchdog_check()) {
                 WF_W("Watchdog: izgubljena WiFi povezava — reconnect");

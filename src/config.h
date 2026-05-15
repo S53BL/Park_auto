@@ -336,7 +336,9 @@
 // ============================================================
 // 15. LOGGER
 // ============================================================
-#define LOG_RAM_BUF_SIZE        (50 * 1024)
+// LOG_RAM_BUF_SIZE: zmanjšano 50KB→16KB (2026-05, PSRAM čiščenje)
+// 200 vrstic × ~80 znakov = 16KB zadostuje za /api/logs live feed.
+#define LOG_RAM_BUF_SIZE        (16 * 1024)
 #define LOG_FLUSH_THRESHOLD     80
 #define LOG_WEB_LINES           200
 

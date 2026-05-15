@@ -63,7 +63,7 @@ static uint32_t          s_ram_size       = 0;
 static uint32_t          s_ram_write_pos  = 0;         // write pointer
 static bool              s_ram_wrapped    = false;     // ali je buffer že kroži
 
-static char              s_sd_buf[SD_FLUSH_BUF_SIZE];
+static char*             s_sd_buf         = nullptr;   // PSRAM — alocira logger_init()
 static uint32_t          s_sd_buf_pos     = 0;
 
 static SemaphoreHandle_t s_mutex          = nullptr;
@@ -135,6 +135,7 @@ static void ram_write(const char* line, size_t len) {
 // Zapiši v SD flush buffer — brez mutexa (caller drži)
 // Flush sproži sam sebe ko je buffer dovolj poln.
 static void sd_buf_write(const char* line, size_t len, bool force_flush) {
+    if (!s_sd_buf) return;   // alokacija ni uspela ob init
     if (!s_sd_attached || !sd_mgr_ready()) return;
     if (len == 0) return;
 
@@ -206,6 +207,20 @@ bool logger_init() {
         Serial.printf("[LOGGER][I] RAM buffer OK — %d bytes %s\n",
                       s_ram_size,
                       (s_ram_buf == (char*)ps_malloc(0) ? "(HEAP)" : "(PSRAM)"));
+    }
+
+    // SD flush buffer — v PSRAM (prihrani 8192 B SRAM)
+    s_sd_buf = (char*)ps_malloc(SD_FLUSH_BUF_SIZE);
+    if (!s_sd_buf) {
+        s_sd_buf = (char*)malloc(SD_FLUSH_BUF_SIZE);
+        Serial.printf("[LOGGER][W] s_sd_buf: PSRAM ni dostopen — v SRAM (%d B)\n",
+                      SD_FLUSH_BUF_SIZE);
+    }
+    if (!s_sd_buf) {
+        Serial.printf("[LOGGER][E] s_sd_buf alokacija NAPAKA — SD flush onemogočen!\n");
+    } else {
+        memset(s_sd_buf, 0, SD_FLUSH_BUF_SIZE);
+        Serial.printf("[LOGGER][I] s_sd_buf OK — %d B PSRAM\n", SD_FLUSH_BUF_SIZE);
     }
 
     s_ram_write_pos = 0;
@@ -424,9 +439,9 @@ size_t logger_get_recent(char* out, size_t out_len, uint16_t max_lines) {
     uint16_t limit = max_lines > 0 ? max_lines : (uint16_t)LOG_WEB_LINES;
 
     // Array pointer-jev na začetke vrstic (od najnovejše do najstarejše)
-    static const uint16_t MAX_PTRS = 300;
-    const char* line_starts[MAX_PTRS];
-    uint16_t    line_lens[MAX_PTRS];
+    const uint16_t MAX_PTRS = 200;         // ne static — stack (sensorTask = PSRAM)
+    const char* line_starts[MAX_PTRS];     // ne static
+    uint16_t    line_lens[MAX_PTRS];       // ne static
     uint16_t    found = 0;
 
     // Določi obseg iskanja

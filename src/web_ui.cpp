@@ -99,7 +99,8 @@ static void _addCorsHeaders(AsyncWebServerResponse* resp) {
 static void _handleStatus(AsyncWebServerRequest* req) {
     _stats.req_total++;
     _stats.req_api++;
-    LOG_DEBUG(TAG, "GET /api/status");
+    LOG_DEBUG(TAG, "GET /api/status | SRAM free: %lu B",
+              (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
 
     JsonDocument doc;
 
@@ -327,7 +328,8 @@ static void _handleStatus(AsyncWebServerRequest* req) {
 static void _handleLogsGet(AsyncWebServerRequest* req) {
     _stats.req_total++;
     _stats.req_api++;
-    LOG_DEBUG(TAG, "GET /api/logs");
+    LOG_DEBUG(TAG, "GET /api/logs | SRAM free: %lu B",
+              (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
 
     // Opcijski parametri: ?lines=N, ?level=ERROR|WARN|INFO|DEBUG
     uint16_t max_lines = WEB_LOG_MAX_LINES;
@@ -963,6 +965,8 @@ static void _handleSsrPost(AsyncWebServerRequest* req, uint8_t* data,
 static void _handleFilesGet(AsyncWebServerRequest* req) {
     _stats.req_total++;
     _stats.req_files++;
+    LOG_DEBUG(TAG, "GET /files | SRAM free: %lu B",
+              (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
 
     if (!sd_mgr_ready()) {
         _sendError(req, 503, "SD not available");
@@ -1270,7 +1274,7 @@ bool web_ui_begin() {
 
     LOG_INFO(TAG, "Web server zagnan: http://%s:%d/",
              wifi_manager_get_ip_str(), WEB_PORT);
-    LOG_INFO(TAG, "mDNS: http://%s.local/", WIFI_HOSTNAME);
+    // mDNS ODSTRANJEN — statična IP, mDNS ni potreben
 
     return true;
 }

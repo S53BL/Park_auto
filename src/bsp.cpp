@@ -245,7 +245,9 @@ static void bsp_tasks_create() {
             LOGE(nm " task napaka (%d) — restart!", (int)r);                    \
             delay(3000); ESP.restart();                                          \
         }                                                                        \
-        LOGI(nm " OK (stack:%d prio:%d Core%d SRAM)", stk, pri, core);
+        LOGI(nm " OK (stack:%d prio:%d Core%d SRAM) | SRAM free: %lu B",       \
+             stk, pri, core,                                                     \
+             (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
 
     // Stack v PSRAM — prihranimo ~18KB internega SRAM za WiFi/TCP/SD DMA
     #define MAKE_PSRAM_TASK(fn, nm, stk, pri, hdl, core)                             \
@@ -255,7 +257,9 @@ static void bsp_tasks_create() {
             LOGE(nm " PSRAM task napaka (%d) — restart!", (int)r);                  \
             delay(3000); ESP.restart();                                              \
         }                                                                            \
-        LOGI(nm " OK (stack:%d prio:%d Core%d PSRAM)", stk, pri, core);
+        LOGI(nm " OK (stack:%d prio:%d Core%d PSRAM) | SRAM free: %lu B",          \
+             stk, pri, core,                                                         \
+             (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
 
     MAKE_PSRAM_TASK(eventBusTask, "EventBus", TASK_EVENTBUS_STACK, TASK_EVENTBUS_PRIO, hTaskEventBus, CORE_APP)
     MAKE_PSRAM_TASK(sensorTask,   "Sensor",   TASK_SENSOR_STACK,   TASK_SENSOR_PRIO,   hTaskSensor,   CORE_APP)
@@ -288,12 +292,27 @@ static void bsp_tasks_create() {
 void bsp_init() {
     uint32_t t0 = millis();
     bsp_serial_init();
+
+    LOGI("SRAM pred i2c_init:   %lu B",
+         (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
     bsp_i2c_init();
+    LOGI("SRAM po  i2c_init:    %lu B",
+         (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+
     bsp_gpio_init();
+
+    LOGI("SRAM pred sd_init:    %lu B",
+         (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
     bsp_sd_init_internal();   // SD_MMC — pred task kreacijo, za GPIO
+    LOGI("SRAM po  sd_init:     %lu B",
+         (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
 
     // Config Manager — mora biti pred vsemi moduli ki berejo nastavitve
+    LOGI("SRAM pred config_mgr: %lu B",
+         (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
     config_mgr_init();
+    LOGI("SRAM po  config_mgr:  %lu B",
+         (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
     if (config_mgr_replaced_count() > 0) {
         LOGI("ConfigMgr: %d vrednosti zamenjanih z defaultom",
              config_mgr_replaced_count());
@@ -302,10 +321,13 @@ void bsp_init() {
     }
 
     bsp_wdt_init();
+
+    LOGI("SRAM pred task_create: %lu B",
+         (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
     bsp_tasks_create();
+    // (MAKE_TASK makro logira SRAM po vsakem tasku)
+
     s_boot_time = millis() - t0;
-    // Pričakovano po optimizaciji (2026-05): min-ever > 20000 B (prej ~10232 B).
-    // Če je min-ever < 15000 B → preveriti ali sta lvglTask in wifiTask v PSRAM.
     LOGI("Internal SRAM free: %lu B  min-ever: %lu B",
          (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
          (unsigned long)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
