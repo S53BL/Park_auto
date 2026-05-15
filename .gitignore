@@ -92,6 +92,7 @@ nide.zip
 src_txt/*
 Doc/*
 scripts/
+Park_auto_last/
 
 # Agent navodila in popravki
 src/files/*
