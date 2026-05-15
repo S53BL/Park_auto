@@ -248,7 +248,14 @@
 #define CORE_WIFI           0
 #define CORE_APP            1
 
-#define TASK_WIFI_STACK     8192
+// TASK_WIFI_STACK: zmanjšano 8192→4096 (2026-05, SRAM optimizacija)
+// Razlog: wifiTask dela samo WiFi.mode() + WiFi.begin() + watchdog loop.
+//   Brez heavy callback kode. Worst-case stack: ~2KB.
+//   4096B daje faktor varnosti 2× — zadostuje.
+//   Prihranek: 4096B SRAM → AsyncTCP task dobi dovolj prostora.
+// ⚠ SRAM stack je nujen (ne PSRAM) — WiFi NVS init piše v flash
+//   in zahteva DRAM stack (cache disable med flash write).
+#define TASK_WIFI_STACK     4096
 #define TASK_WIFI_PRIO      1
 // TASK_EVENTBUS_STACK: zmanjšano 6144→4096 (2026-05, optimizacija RAM)
 // Razlog: eventBusTask handlerji (on_button_ssr, on_radar_motion itd.)
