@@ -336,13 +336,13 @@
 // ============================================================
 // 15. LOGGER
 // ============================================================
-// LOG_RAM_BUF_SIZE: zmanjšano 50KB→16KB (2026-05, PSRAM čiščenje)
-// 200 vrstic × ~80 znakov = 16KB zadostuje za /api/logs live feed.
-#define LOG_RAM_BUF_SIZE        (16 * 1024)
-// LOG_FLUSH_THRESHOLD: zmanjšano 80→15 (2026-05, SD DMA spike fix)
-// Razlog: pri 80% (6553 B) → flush piše ~6.5 KB naenkrat = 13 SD sektorjev.
-// Pri 15% (1228 B) → flush piše ~1.2 KB = 3 SD sektorje → DMA spike 3× manjši.
-// Cena: flush se sproži pogosteje (vsakih ~1.2 KB namesto ~6.5 KB) — zanemarljivo.
+// LOG_RAM_BUF_SIZE: povečano 16KB→128KB (2026-05, Ideja 1 — SD kot backup medij)
+// Razlog: SD se ne piše med normalnim delovanjem → logi živijo cel dan v PSRAM.
+// 128 KB pri ~80 B/vrstica = ~1600 vrstic = dovolj za cel dan logov.
+// PSRAM ima ~6.5 MB prostora — 128 KB je zanemarljivo.
+#define LOG_RAM_BUF_SIZE        (128 * 1024)
+// LOG_FLUSH_THRESHOLD: neuporabljeno (sd_buf_write ni več v logger_log, 2026-05).
+// Vrednost ohranjena za logger_flush() ki ostane za eksplicitne klice.
 #define LOG_FLUSH_THRESHOLD     15
 #define LOG_WEB_LINES           200
 

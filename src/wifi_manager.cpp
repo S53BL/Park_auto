@@ -17,6 +17,7 @@
 
 #include "wifi_manager.h"
 #include "web_ui.h"
+#include "sd_midnight_flush.h"
 #include <esp_heap_caps.h>
 #include "wifi_config.h"
 #include "config.h"
@@ -233,12 +234,9 @@ static bool wifi_ntp_sync() {
 
     WF_I("NTP sync OK v %lu ms — lokalni čas: %s (CET/CEST)", elapsed, time_str);
 
-    // Obvesti logger in EventBus
-    // logger_flush() je NAMERNO ODSTRANJEN iz wifiTask (2026-05).
-    // Razlog: wifiTask stack 4096 B + SD_MMC.open() DMA = stack overflow tveganje.
-    //   wifiTask stack ob flush: 232 B free → kritično.
-    //   Flush opravi appTask prek light_logic_tick() vsakih 60s.
+    // Obvesti logger, EventBus in midnight flush task
     logger_set_ntp_synced(true);
+    sd_midnight_flush_notify_ntp();
     EventBus::publish(EventType::NTP_SYNCED, (uint32_t)now);
 
     if (take_mutex()) {
@@ -513,18 +511,10 @@ void wifiTask(void* pvParams) {
             wifi_ntp_check();
         }
 
-        // --------------------------------------------------------
-        // TODO: web_ui_handle() — ko bo web_ui.cpp implementiran
-        // ESPAsyncWebServer je async — ne potrebuje eksplicitnega handle().
-        // Tukaj bo šla logika WLED status polling za screen_party.cpp:
-        //   if (connected && (millis() - last_wled_poll > 5000)) {
-        //       wled_poll_status();
-        //       last_wled_poll = millis();
-        //   }
-        // --------------------------------------------------------
+        // Sinhroni WebServer zahteva periodični handleClient() klic
+        web_ui_tick();
 
-        // Majhen sleep — ne blokiramo Core0 WiFi stacka
-        vTaskDelay(pdMS_TO_TICKS(100));
+        vTaskDelay(pdMS_TO_TICKS(20));
     }
 }
 

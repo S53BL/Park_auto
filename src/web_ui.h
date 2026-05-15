@@ -1,48 +1,40 @@
 // ============================================================
 // web_ui.h — Web UI vmesnik (REST API + statične datoteke)
 // Projekt : Avtomatizacija Pokritega Parkirišča
-// Verzija : 1.0.0-dev  |  Datum: 2026-04
+// Verzija : 2.0.0  |  Datum: 2026-05
 // ============================================================
 //
 // ODGOVORNOST:
-//   ESPAsyncWebServer instanca in vse registracije handlerjev.
+//   Sinhroni WebServer instanca in vse registracije handlerjev.
 //   Servi statične datoteke iz LittleFS (/assets/) in implementira
 //   vse REST API endpointе opisane v WebUI_Arhitektura.md.
 //
 //   Modul teče izključno v wifiTask (Core0) — skladno z
 //   firmware_arhitektura.md (WiFi stack + web server na Core0).
+//   web_ui_tick() se mora klicati redno iz wifiTask zanke (~20ms).
 //
 // INICIALIZACIJSKI VRSTNI RED:
 //   1. web_ui_init()  — v bsp_init() PRED task kreacijo
 //                       (konfigurira LittleFS, preveri assets/)
 //   2. web_ui_begin() — v wifiTask TAKOJ PO WiFi.begin()
 //                       (zažene strežnik, registrira handlerje)
-//   3. web_ui_stop()  — opcijsko ob izpadu WiFi ali OTA resetu
+//   3. web_ui_tick()  — v wifiTask while(true) zanki vsakih 20ms
+//   4. web_ui_stop()  — opcijsko ob izpadu WiFi ali OTA resetu
 //
-// ODVISNOSTI (Faza 1):
+// ODVISNOSTI:
 //   sd_mgr.h        — /files: list, download (streaming), delete
 //   logger.h        — /api/logs: getBuffer, flush
 //   wifi_manager.h  — /api/status: IP, RSSI, NTP čas, uptime
 //   config.h        — WEB_PORT, WIFI_HOSTNAME
 //   ArduinoJson v7  — JsonDocument za vse JSON odgovore
 //   LittleFS        — statične datoteke (gzip assets)
-//   ESPAsyncWebServer — asinhroni web strežnik
-//
-// ODVISNOSTI (Faza 3 — stub zdaj):
-//   config_mgr.h    — /api/config: GET/POST/reset (NVS + LittleFS)
-//   sensor_mgr.h    — /api/status: senzorji, SSR, parking
-//   vehicle_recog.h — /api/vehicles: modeli vozil
+//   WebServer       — sinhroni web strežnik (arduino-esp32 core)
 //
 // NITNA VARNOST:
-//   ESPAsyncWebServer callback-i tečejo v task kontekstu Core0.
+//   WebServer handleClient() teče v wifiTask kontekstu (Core0).
 //   sd_mgr je thread-safe (interni mutex).
 //   logger je thread-safe (interni mutex).
 //   JsonDocument se kreira lokalno v vsakem handlerju — ni deljenega stanja.
-//
-// FAZA 1 — STUBS:
-//   /api/config  → vrne RAM struct s privzetimi vrednostmi, POST shrani v RAM
-//   /api/vehicles → vrne prazen JSON array za obe parkirni mesti
-//   /api/status  → WiFi + SD + uptime — brez senzorjev (tisti pridejo s HAL fazo)
 //
 // ============================================================
 
@@ -50,7 +42,6 @@
 
 #include <Arduino.h>
 #include <LittleFS.h>
-#include <ESPAsyncWebServer.h>
 
 // ============================================================
 // KONFIGURACIJA
@@ -77,7 +68,6 @@
 #define WEB_FILES_MAX_ENTRIES 64
 
 // OTA upload buffer (streaming — ne celoten bin v RAM)
-// ESPAsyncWebServer podpira chunked multipart upload
 #define WEB_OTA_MAX_SIZE (3 * 1024 * 1024)  // 3 MB = max OTA particija
 
 // ============================================================
@@ -98,16 +88,20 @@ bool web_ui_init();
 // Vrne false = napaka pri zagonu (npr. port že zaseden).
 bool web_ui_begin();
 
+// Procesira en HTTP request (sinhroni WebServer).
+// MORA se klicati redno iz wifiTask zanke — priporočeno vsakih 20ms.
+// Hitra funkcija: 0ms če ni requestov.
+void web_ui_tick();
+
 // Zaustavi strežnik (npr. pred OTA restartom).
 void web_ui_stop();
 
 // true = strežnik teče
 bool web_ui_running();
 
-// Vrne pointer na AsyncWebServer instanco.
-// Kliče ga lahko npr. screen_service.cpp za prikaz QR kode.
-// Vrne nullptr če web_ui_begin() še ni bil klican.
-AsyncWebServer* web_ui_get_server();
+// Stub za kompatibilnost — v sync verziji ni AsyncWebServer instance.
+// Vedno vrne nullptr.
+void* web_ui_get_server();
 
 // ============================================================
 // DIAGNOSTIKA

@@ -33,6 +33,7 @@
 #include "bsp.h"
 #include "hal_gpio.h"
 #include "web_ui.h"
+#include "sd_midnight_flush.h"
 #include "config_mgr.h"
 #include "led_manager.h"
 #include "light_logic.h"
@@ -332,6 +333,8 @@ void bsp_init() {
          (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
     bsp_tasks_create();
     // (MAKE_TASK makro logira SRAM po vsakem tasku)
+
+    sd_midnight_flush_start();
 
     s_boot_time = millis() - t0;
     LOGI("Internal SRAM free: %lu B  min-ever: %lu B",

@@ -396,9 +396,10 @@ void logger_log(LogLevel level, const char* tag,
             }
         }
 
-        // SD buffer (flush takoj ob ERROR)
-        bool force_flush = (level == LOG_LEVEL_ERROR);
-        sd_buf_write(line, (size_t)len, force_flush);
+        // SD pisanje med normalnim delovanjem ODSTRANJENO (2026-05, Ideja 1).
+        // Logi gredo SAMO v PSRAM RAM buffer (s_ram_buf) in Serial.
+        // SD flush enkrat na dan ob 00:01 prek sd_midnight_flush_task.
+        // logger_flush() ostane za eksplicitne klice (restart, OTA, /api/logs/flush).
 
         s_total_lines++;
         give_mutex();

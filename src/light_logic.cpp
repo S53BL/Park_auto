@@ -137,9 +137,6 @@ static uint32_t      s_ssr2_arm_ms  = 0;   // ko je bil SSR1 vklopljen
 // Inicializacijski flag
 static bool s_initialized = false;
 
-// Periodični log flush — prevzeto iz wifiTask (2026-05)
-// Interval: 60s. Teče v appTask ki ima SRAM stack → SD operacije so varne.
-static uint32_t s_last_log_flush_ms = 0;
 
 // ============================================================
 // SSR COMMAND QUEUE
@@ -612,15 +609,6 @@ void light_logic_tick() {
     // Periodični log flush (prevzeto iz wifiTask — 2026-05)
     // -------------------------------------------------------
     // appTask ima SRAM stack → SD_MMC.open() v sd_mgr_log_flush() je varen.
-    // wifiTask stack je bil premajhen za ta klic (268 B free ob flush-u).
-    {
-        uint32_t flush_now = millis();
-        if ((flush_now - s_last_log_flush_ms) >= 60000UL) {
-            s_last_log_flush_ms = flush_now;
-            logger_flush();
-        }
-    }
-
     const Config cfg = config_get();
 
     // -------------------------------------------------------
