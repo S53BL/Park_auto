@@ -503,6 +503,9 @@ void wifiTask(void* pvParams) {
                  (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
                  (unsigned long)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
                  (unsigned long)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+            WF_I("wifiTask stack: %lu B free / %d B total",
+                 (unsigned long)uxTaskGetStackHighWaterMark(nullptr) * sizeof(StackType_t),
+                 TASK_WIFI_STACK);
 
             if (!wifi_watchdog_check()) {
                 WF_W("Watchdog: izgubljena WiFi povezava — reconnect");

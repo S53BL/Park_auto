@@ -934,8 +934,8 @@ void appTask(void* pvParams) {
     LLI("appTask stack ob zagonu: %lu B free / %d B total",
         (unsigned long)uxTaskGetStackHighWaterMark(nullptr) * sizeof(StackType_t),
         TASK_APP_STACK);
-    // Pričakovano: vsaj 4000B free pri TASK_APP_STACK=8192
-    // Če je < 2000B → povečaj TASK_APP_STACK v config.h
+    // Pričakovano po norm_profile→PSRAM optimizaciji: > 3000 B free
+    // Če je < 1500 B → TASK_APP_STACK je premajhen, povečaj v config.h
 
     // Kratka pavza da se vsi taski inicializirajo
     // (EventBus, sensor_mgr, hal_gpio morajo biti ready)

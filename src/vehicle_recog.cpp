@@ -136,6 +136,11 @@ static uint16_t  s_dtw_N = 0;
 static char*          s_raw_json_buf = nullptr;
 static const size_t   RAW_JSON_BUF_SIZE = 14336;  // 14 KB zadostuje za 120 tock
 
+// norm_profile buffer v PSRAM — prihrani 960 B appTask stack (2026-05)
+// vehicle_recog_tick() kliče normalize_from_buf() ki piše v ta buffer.
+// Static je varno ker DTW teče serializirano (samo en profil naenkrat).
+static float* s_norm_profile_buf = nullptr;
+
 // Config snapshot — osvezuje vehicle_recog_on_config_changed()
 typedef struct {
     float     dtw_threshold;
@@ -214,6 +219,14 @@ bool vehicle_recog_init(void) {
         s_place_B.model_capacity, sizeof(vr_internal_model_t));
     if (!s_place_A.models || !s_place_B.models) {
         LOG_ERROR(VR_LOG_TAG, "ps_calloc za modele ni uspel — PSRAM?");
+        return false;
+    }
+
+    // Alociraj norm_profile buffer v PSRAM (prihrani 960 B appTask stack)
+    s_norm_profile_buf = (float*)ps_malloc(
+        (size_t)VR_PROFILE_NORM_POINTS * VR_PROFILE_DIMS * sizeof(float));
+    if (!s_norm_profile_buf) {
+        LOG_ERROR(VR_LOG_TAG, "ps_malloc za norm_profile ni uspel");
         return false;
     }
 
@@ -457,7 +470,9 @@ void vehicle_recog_tick(void) {
     }
 
     // ---- Normalizacija profila na N tock ----
-    float norm_profile[VR_PROFILE_NORM_POINTS][VR_PROFILE_DIMS];
+    // norm_profile je v PSRAM (s_norm_profile_buf) — prihrani 960 B stack
+    float (*norm_profile)[VR_PROFILE_DIMS] =
+        (float (*)[VR_PROFILE_DIMS])s_norm_profile_buf;
     normalize_from_buf(&s_profile_buf, norm_profile, s_cfg.norm_points);
 
     // ---- DTW proti vsem modelom ----
