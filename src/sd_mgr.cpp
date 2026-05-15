@@ -255,6 +255,10 @@ size_t sd_mgr_log_flush(const char* buf, size_t len) {
         return 0;
     }
 
+    // Pisanje v enem kosu — vrnjeno na original.
+    // Razlog: vTaskDelay(1) med sektorji je sproščal scheduler med držanjem
+    //   sd_mgr mutexa kar je povzročalo nepredvidljivo vedenje.
+    //   Pravi fix za SD DMA spike je bil odpraviti logger_flush() iz wifiTask.
     size_t written = f.write((const uint8_t*)buf, len);
     f.close();
 

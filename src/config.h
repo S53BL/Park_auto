@@ -339,7 +339,11 @@
 // LOG_RAM_BUF_SIZE: zmanjšano 50KB→16KB (2026-05, PSRAM čiščenje)
 // 200 vrstic × ~80 znakov = 16KB zadostuje za /api/logs live feed.
 #define LOG_RAM_BUF_SIZE        (16 * 1024)
-#define LOG_FLUSH_THRESHOLD     80
+// LOG_FLUSH_THRESHOLD: zmanjšano 80→15 (2026-05, SD DMA spike fix)
+// Razlog: pri 80% (6553 B) → flush piše ~6.5 KB naenkrat = 13 SD sektorjev.
+// Pri 15% (1228 B) → flush piše ~1.2 KB = 3 SD sektorje → DMA spike 3× manjši.
+// Cena: flush se sproži pogosteje (vsakih ~1.2 KB namesto ~6.5 KB) — zanemarljivo.
+#define LOG_FLUSH_THRESHOLD     15
 #define LOG_WEB_LINES           200
 
 // ============================================================

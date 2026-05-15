@@ -90,19 +90,157 @@ static void _addCorsHeaders(AsyncWebServerResponse* resp) {
 }
 
 // ============================================================
-// SECTION 3 — HANDLER-JI: /api/status
+// SECTION 3 — HANDLER-JI: /api/status/*
 // ============================================================
 //
-// Faza 1 vrne: WiFi info, SD status, uptime, firmware info.
-// Faza 3 doda: SSR stanje, senzorji, TOF, radar, parkirišče.
+// Stari /api/status (en ogromen ~3000-6000 B JsonDocument) JE UKINJEN.
+// Zamenjava: 3 lahki endpointi, vsak gradi ~400-800 B JsonDocument.
+// ============================================================
 
-static void _handleStatus(AsyncWebServerRequest* req) {
+// GET /api/status/light
+// Vsebina: SSR (4x) + is_night + lux + ramp + door + parking (2x, samo occupied+name+phase)
+// Kliče: diagnostika.js ob kliku "Osveži" — NI polling
+static void _handleStatusLight(AsyncWebServerRequest* req) {
     _stats.req_total++;
     _stats.req_api++;
-    LOG_DEBUG(TAG, "GET /api/status | SRAM free: %lu B",
+    LOG_DEBUG(TAG, "GET /api/status/light | SRAM: %lu B",
               (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
 
     JsonDocument doc;
+
+    // --- SSR (iz light_logic) ---
+    JsonArray ssrArr = doc["ssr"].to<JsonArray>();
+    if (light_logic_ok()) {
+        LightLogicState ll = light_logic_get_state();
+        for (uint8_t i = 1; i <= 4; i++) {
+            JsonObject s = ssrArr.add<JsonObject>();
+            s["id"]          = i;
+            s["on"]          = (ll.ssr[i].state == SsrLogicState::ON_AUTO ||
+                                ll.ssr[i].state == SsrLogicState::ON_MANUAL);
+            s["countdown_s"] = ll.ssr[i].countdown_s;
+            s["disabled"]    = ll.ssr[i].disabled;
+            const char* ss;
+            switch (ll.ssr[i].state) {
+                case SsrLogicState::ON_AUTO:      ss = "ON_AUTO";  break;
+                case SsrLogicState::ON_MANUAL:    ss = "ON_MANUAL"; break;
+                case SsrLogicState::SSR_DISABLED: ss = "DISABLED"; break;
+                default:                          ss = "OFF";      break;
+            }
+            s["state_str"] = ss;
+        }
+    } else {
+        // light_logic ni inicializiran — vrni prazen array
+        for (uint8_t i = 1; i <= 4; i++) {
+            JsonObject s = ssrArr.add<JsonObject>();
+            s["id"] = i; s["on"] = false; s["countdown_s"] = 0;
+            s["disabled"] = false; s["state_str"] = "UNKNOWN";
+        }
+    }
+
+    // --- GPIO + ramp/door ---
+    GpioState gpio = hal_gpio_get_state();
+    if (gpio.rampaluc)      doc["ramp"] = "moving";
+    else if (gpio.rampagor) doc["ramp"] = "up";
+    else                    doc["ramp"] = "down";
+    doc["door"] = gpio.vrataod ? "open" : "closed";
+
+    // --- Parking (samo essential: occupied + name + vr_state) ---
+    JsonArray parkArr = doc["parking"].to<JsonArray>();
+    const char* vrStateStr[4] = {"EMPTY_CAL","EMPTY_UNCAL","OCC_UNKNOWN","OCC_KNOWN"};
+    for (uint8_t p = 0; p < 2; p++) {
+        char pid = (p == 0) ? 'A' : 'B';
+        JsonObject pk = parkArr.add<JsonObject>();
+        pk["place"]        = (p == 0) ? "A" : "B";
+        vr_place_state_t vrs = vehicle_recog_get_state(pid);
+        pk["occupied"]     = (vrs == VR_STATE_OCCUPIED_KNOWN ||
+                              vrs == VR_STATE_OCCUPIED_UNKNOWN);
+        pk["vehicle_name"] = vehicle_recog_get_vehicle_name(pid);
+        pk["vr_state_str"] = vrStateStr[(uint8_t)vrs];
+        // TOF faza (skupna)
+        TofDiagnostics tofDiag = hal_tof_getDiagnostics();
+        bool tof_active = ((uint8_t)tofDiag.active_place == p &&
+                           tofDiag.current_phase != TOF_PHASE_IDLE);
+        pk["tof_active"] = tof_active;
+        const char* phaseStr[4] = {"IDLE","DETECT","SCANNING","DTW_WAIT"};
+        pk["tof_phase_str"] = phaseStr[(uint8_t)tofDiag.current_phase];
+    }
+
+    _sendJson(req, 200, doc);
+}
+
+// GET /api/status/sensors
+// Vsebina: TOF (6x) + Radar (4x) + Fotocelice (2x)
+// Kliče: diagnostika.js ob kliku "Osveži" — NI polling
+static void _handleStatusSensors(AsyncWebServerRequest* req) {
+    _stats.req_total++;
+    _stats.req_api++;
+    LOG_DEBUG(TAG, "GET /api/status/sensors | SRAM: %lu B",
+              (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+
+    JsonDocument doc;
+
+    // --- TOF (6 kanalov) ---
+    TofDiagnostics tofDiag = hal_tof_getDiagnostics();
+    const char* tofNames[6] = {"H_A","P1_A","P2_A","H_B","P1_B","P2_B"};
+    JsonArray tofArr = doc["tof"].to<JsonArray>();
+    for (uint8_t i = 0; i < 6; i++) {
+        JsonObject t = tofArr.add<JsonObject>();
+        t["id"]      = i;
+        t["name"]    = tofNames[i];
+        t["ok"]      = tofDiag.sensor_ok[i];
+        t["dist_mm"] = tofDiag.sensor_ok[i] ? tofDiag.last_mm[i] : TOF_ERR;
+        t["errors"]  = tofDiag.error_count[i];
+    }
+
+    // --- Radar (4 senzorji) ---
+    const char* radarNames[4] = {"Vhod","Cesta_L","Cesta_D","Garaza"};
+    const char* detStr[4]     = {"absent","moving","static","both"};
+    JsonArray radarArr = doc["radar"].to<JsonArray>();
+    for (uint8_t i = 0; i < RADAR_SENSOR_COUNT; i++) {
+        const RadarSensorStatus& rs = hal_radar_get_status((RadarSensorId)i);
+        JsonObject r = radarArr.add<JsonObject>();
+        r["id"]             = i;
+        r["name"]           = radarNames[i];
+        r["active"]         = rs.active;
+        uint8_t det = rs.last_frame.detection;
+        r["detection"]      = det < 4 ? detStr[det] : "unknown";
+        r["moving_dist_cm"] = rs.last_frame.moving_dist_cm;
+        r["moving_energy"]  = rs.last_frame.moving_energy;
+        r["static_dist_cm"] = rs.last_frame.static_dist_cm;
+        r["static_energy"]  = rs.last_frame.static_energy;
+        r["frames_ok"]      = rs.frames_ok;
+        r["errors"]         = rs.parse_errors + rs.i2c_errors;
+    }
+
+    // --- Fotocelice ---
+    GpioState gpio = hal_gpio_get_state();
+    JsonArray cellsArr = doc["cells"].to<JsonArray>();
+    JsonObject c1 = cellsArr.add<JsonObject>();
+    c1["id"] = 1; c1["name"] = "zunanja"; c1["broken"] = gpio.celica1;
+    JsonObject c2 = cellsArr.add<JsonObject>();
+    c2["id"] = 2; c2["name"] = "notranja"; c2["broken"] = gpio.celica2;
+
+    _sendJson(req, 200, doc);
+}
+
+// GET /api/status/system
+// Vsebina: RAM + PSRAM + WiFi + SD + firmware + webui stats
+// Kliče: system.js ob kliku "Osveži" — NI polling
+static void _handleStatusSystem(AsyncWebServerRequest* req) {
+    _stats.req_total++;
+    _stats.req_api++;
+    LOG_DEBUG(TAG, "GET /api/status/system | SRAM: %lu B",
+              (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+
+    JsonDocument doc;
+
+    // --- RAM / PSRAM ---
+    doc["free_heap"]       = (uint32_t)esp_get_free_heap_size();
+    doc["min_free_heap"]   = (uint32_t)esp_get_minimum_free_heap_size();
+    doc["free_psram"]      = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    doc["min_free_psram"]  = (uint32_t)heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM);
+    doc["config_ok"]       = config_mgr_ok();
+    doc["config_replaced"] = (uint8_t)config_mgr_replaced_count();
 
     // --- WiFi ---
     WifiStatus wifi = wifi_manager_get_status();
@@ -116,35 +254,32 @@ static void _handleStatus(AsyncWebServerRequest* req) {
     w["uptime_ms"]  = millis();
     w["reconnects"] = wifi.reconnect_count;
 
-    // --- SD kartica ---
+    // --- SD ---
     JsonObject sd = doc["sd"].to<JsonObject>();
-    sd["ready"]      = sd_mgr_ready();
-    sd["status"]     = sd_mgr_status_str();
-    uint64_t total   = sd_mgr_total_bytes();
-    uint64_t free_b  = sd_mgr_free_bytes();
-    sd["total_mb"]   = (uint32_t)(total  / (1024ULL * 1024ULL));
-    sd["free_mb"]    = (uint32_t)(free_b / (1024ULL * 1024ULL));
+    sd["ready"]    = sd_mgr_ready();
+    sd["status"]   = sd_mgr_status_str();
+    sd["total_mb"] = (uint32_t)(sd_mgr_total_bytes()  / (1024ULL * 1024ULL));
+    sd["free_mb"]  = (uint32_t)(sd_mgr_free_bytes()   / (1024ULL * 1024ULL));
 
-    // --- Logger statistika ---
+    // --- Logger ---
     LoggerStats ls = logger_get_stats();
     JsonObject lg = doc["logger"].to<JsonObject>();
     lg["total_lines"]   = ls.total_lines;
     lg["dropped_lines"] = ls.dropped_lines;
     lg["sd_flushes"]    = ls.sd_flush_count;
-    lg["ntp_synced"]    = ls.ntp_synced;
 
     // --- Firmware ---
     JsonObject fw = doc["firmware"].to<JsonObject>();
-    fw["version"]   = VERSION_STRING;
-    fw["uptime_s"]  = millis() / 1000UL;
+    fw["version"]    = VERSION_STRING;
+    fw["uptime_s"]   = millis() / 1000UL;
     const esp_app_desc_t* app = esp_app_get_description();
     if (app) {
-        fw["idf_ver"]   = app->idf_ver;
-        fw["build_date"]= app->date;
-        fw["build_time"]= app->time;
+        fw["idf_ver"]    = app->idf_ver;
+        fw["build_date"] = app->date;
+        fw["build_time"] = app->time;
     }
 
-    // --- Web UI statistika ---
+    // --- Web UI stats ---
     JsonObject wu = doc["webui"].to<JsonObject>();
     wu["req_total"]    = _stats.req_total;
     wu["req_api"]      = _stats.req_api;
@@ -154,169 +289,6 @@ static void _handleStatus(AsyncWebServerRequest* req) {
     wu["ota_success"]  = _stats.ota_success;
     wu["littlefs_ok"]  = _littlefs_ok;
     wu["assets_ok"]    = _assets_ok;
-
-    // --- GPIO stanje (MCP23017) ---
-    GpioState gpio = hal_gpio_get_state();
-
-    // --- SSR stanje (iz light_logic) ---
-    JsonArray ssrArr = doc["ssr"].to<JsonArray>();
-    if (light_logic_ok()) {
-        LightLogicState ll = light_logic_get_state();
-        for (uint8_t i = 1; i <= 4; i++) {
-            JsonObject s = ssrArr.add<JsonObject>();
-            s["id"]          = i;
-            s["on"]          = (ll.ssr[i].state == SsrLogicState::ON_AUTO ||
-                                ll.ssr[i].state == SsrLogicState::ON_MANUAL);
-            s["countdown_s"] = ll.ssr[i].countdown_s;
-            s["disabled"]    = ll.ssr[i].disabled;
-            s["is_auto"]     = ll.ssr[i].is_auto;
-            const char* ss;
-            switch (ll.ssr[i].state) {
-                case SsrLogicState::ON_AUTO:     ss = "ON_AUTO";   break;
-                case SsrLogicState::ON_MANUAL:   ss = "ON_MANUAL"; break;
-                case SsrLogicState::SSR_DISABLED:ss = "DISABLED";  break;
-                default:                         ss = "OFF";       break;
-            }
-            s["state_str"] = ss;
-        }
-    } else {
-        // light_logic še ni inicializiran — fallback na gpio stanje
-        for (uint8_t i = 1; i <= 4; i++) {
-            JsonObject s = ssrArr.add<JsonObject>();
-            s["id"]          = i;
-            s["on"]          = gpio.ssr[i];
-            s["countdown_s"] = 0;
-            s["disabled"]    = false;
-            s["is_auto"]     = false;
-            s["state_str"]   = "UNKNOWN";
-        }
-    }
-
-    // --- TOF senzorji (6 kanalov: H_A, P1_A, P2_A, H_B, P1_B, P2_B) ---
-    TofDiagnostics tofDiag = hal_tof_getDiagnostics();
-    const char* tofNames[6] = {"H_A", "P1_A", "P2_A", "H_B", "P1_B", "P2_B"};
-    JsonArray tofArr = doc["tof"].to<JsonArray>();
-    for (uint8_t i = 0; i < 6; i++) {
-        JsonObject t = tofArr.add<JsonObject>();
-        t["id"]      = i;
-        t["name"]    = tofNames[i];
-        t["ok"]      = tofDiag.sensor_ok[i];
-        t["dist_mm"] = tofDiag.sensor_ok[i] ? tofDiag.last_mm[i] : TOF_ERR;
-        t["errors"]  = tofDiag.error_count[i];
-    }
-
-    // --- Radar senzorji (4 LD2410C) ---
-    const char* radarNames[4] = {"Vhod", "Cesta_L", "Cesta_D", "Garaza"};
-    // detection: 0=nič, 1=premik, 2=statično, 3=oboje
-    const char* detectionStr[4] = {"absent", "moving", "static", "both"};
-    JsonArray radarArr = doc["radar"].to<JsonArray>();
-    for (uint8_t i = 0; i < RADAR_SENSOR_COUNT; i++) {
-        const RadarSensorStatus& rs = hal_radar_get_status((RadarSensorId)i);
-        JsonObject r = radarArr.add<JsonObject>();
-        r["id"]            = i;
-        r["name"]          = radarNames[i];
-        r["active"]        = rs.active;
-        uint8_t det = rs.last_frame.detection;
-        r["detection"]     = det < 4 ? detectionStr[det] : "unknown";
-        r["moving_dist_cm"]= rs.last_frame.moving_dist_cm;
-        r["moving_energy"] = rs.last_frame.moving_energy;
-        r["static_dist_cm"]= rs.last_frame.static_dist_cm;
-        r["static_energy"] = rs.last_frame.static_energy;
-        r["last_frame_ms"] = rs.last_frame_ms;
-    }
-
-    // --- Fotocelice ---
-    JsonArray cellsArr = doc["cells"].to<JsonArray>();
-    {
-        JsonObject c1 = cellsArr.add<JsonObject>();
-        c1["id"]       = 1;
-        c1["name"]     = "zunanja";
-        c1["broken"]   = gpio.celica1;  // true = prekinjena
-
-        JsonObject c2 = cellsArr.add<JsonObject>();
-        c2["id"]       = 2;
-        c2["name"]     = "notranja";
-        c2["broken"]   = gpio.celica2;
-    }
-
-    // --- Rampa ---
-    // rampagor: true = rampa dvignjena
-    // rampaluc: true = rampa se premika (retriggerable 2000ms timeout)
-    if (gpio.rampaluc) {
-        doc["ramp"] = "moving";
-    } else if (gpio.rampagor) {
-        doc["ramp"] = "up";
-    } else {
-        doc["ramp"] = "down";
-    }
-
-    // --- Vrata ---
-    doc["door"] = gpio.vrataod ? "open" : "closed";
-
-    // --- Svetloba ---
-    doc["is_night"]   = hal_light_get_is_night();
-    doc["lux"]        = hal_light_get_lux();
-
-    // --- Party mode ---
-    doc["party_mode"] = false;   // TODO Blok C: led_mgr_is_party_mode()
-
-    // --- Signal LED statistika ---
-    SignalLedStats sig_stats = signal_led_get_stats();
-    JsonObject sigObj = doc["signal_led"].to<JsonObject>();
-    sigObj["mode"]             = signal_led_mode_name(sig_stats.current_mode);
-    sigObj["mode_changes"]     = sig_stats.mode_changes;
-    sigObj["ramp_activations"] = sig_stats.ramp_activations;
-    sigObj["preemptions"]      = sig_stats.preemptions;
-    sigObj["tick_count"]       = sig_stats.tick_count;
-
-    // --- Parkirišče (vehicle_recog stanje) ---
-    JsonArray parkArr = doc["parking"].to<JsonArray>();
-    const char* phaseStr[4]   = {"IDLE", "DETECT", "SCANNING", "DTW_WAIT"};
-    const char* vrStateStr[4] = {"EMPTY_CAL", "EMPTY_UNCAL", "OCC_UNKNOWN", "OCC_KNOWN"};
-    for (uint8_t p = 0; p < 2; p++) {
-        char pid = (p == 0) ? 'A' : 'B';
-        JsonObject pk = parkArr.add<JsonObject>();
-        pk["place"]         = (p == 0) ? "A" : "B";
-        bool tof_active = ((uint8_t)tofDiag.active_place == p
-                           && tofDiag.current_phase != TOF_PHASE_IDLE);
-        pk["tof_phase"]     = (uint8_t)tofDiag.current_phase;
-        pk["tof_phase_str"] = phaseStr[(uint8_t)tofDiag.current_phase];
-        pk["tof_active"]    = tof_active;
-        pk["profile_pts"]   = tof_active ? (uint8_t)tofDiag.profile_pts : 0;
-        vr_place_state_t vrs = vehicle_recog_get_state(pid);
-        pk["vr_state"]      = (uint8_t)vrs;
-        pk["vr_state_str"]  = vrStateStr[(uint8_t)vrs];
-        pk["occupied"]      = (vrs == VR_STATE_OCCUPIED_KNOWN
-                            || vrs == VR_STATE_OCCUPIED_UNKNOWN);
-        pk["vehicle_name"]  = vehicle_recog_get_vehicle_name(pid);
-        pk["model_id"]      = vehicle_recog_get_model_id(pid);
-        float dtw = vehicle_recog_get_last_dtw(pid);
-        if (!isnan(dtw)) pk["dtw_dist"] = dtw;
-        pk["model_count"]   = vehicle_recog_get_model_count(pid);
-        vr_baseline_t bl = vehicle_recog_get_baseline(pid);
-        pk["baseline_valid"] = bl.valid;
-        if (bl.valid) {
-            pk["baseline_h"]  = bl.h_mm;
-            pk["baseline_p1"] = bl.p1_mm;
-            pk["baseline_p2"] = bl.p2_mm;
-        }
-        vr_diagnostics_t vrd = vehicle_recog_get_diagnostics();
-        pk["vr_phase"] = (uint8_t)(p == 0 ? vrd.phase_A : vrd.phase_B);
-    }
-    vr_diagnostics_t vrd_all = vehicle_recog_get_diagnostics();
-    JsonObject vrStats = doc["vr_stats"].to<JsonObject>();
-    vrStats["total_recognitions"] = vrd_all.total_recognitions;
-    vrStats["total_aborted"]      = vrd_all.total_aborted;
-    vrStats["total_new_models"]   = vrd_all.total_new_models;
-
-    // --- Sistemski podatki (RAM, PSRAM, config mgr) ---
-    JsonObject sysObj = doc["system"].to<JsonObject>();
-    sysObj["free_heap"]      = (uint32_t)esp_get_free_heap_size();
-    sysObj["min_free_heap"]  = (uint32_t)esp_get_minimum_free_heap_size();
-    sysObj["free_psram"]     = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
-    sysObj["min_free_psram"] = (uint32_t)heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM);
-    sysObj["config_ok"]      = config_mgr_ok();
-    sysObj["config_replaced"]= (uint8_t)config_mgr_replaced_count();
 
     _sendJson(req, 200, doc);
 }
@@ -704,10 +676,12 @@ static void _handleVehiclesGet(AsyncWebServerRequest* req) {
 
     if (req->hasParam("profile")) {
         String mid = req->getParam("profile")->value();
-        float data[VR_PROFILE_NORM_POINTS][VR_PROFILE_DIMS];
-        float var[VR_PROFILE_NORM_POINTS][VR_PROFILE_DIMS];
+        // Statična PSRAM bufferja — ne na async_tcp stacku (~1920 B prihranek)
+        // ⚠ Mutex ni potreben: /api/vehicles?profile= kliče se redko in ne vzporedno
+        static float s_prof_data_buf[VR_PROFILE_NORM_POINTS][VR_PROFILE_DIMS] __attribute__((section(".psram_data")));
+        static float s_prof_var_buf [VR_PROFILE_NORM_POINTS][VR_PROFILE_DIMS] __attribute__((section(".psram_data")));
         uint16_t plen = 0;
-        if (!vehicle_recog_get_model_profile(pid, mid.c_str(), data, var, &plen)) {
+        if (!vehicle_recog_get_model_profile(pid, mid.c_str(), s_prof_data_buf, s_prof_var_buf, &plen)) {
             _sendError(req, 404, "model not found");
             return;
         }
@@ -719,9 +693,9 @@ static void _handleVehiclesGet(AsyncWebServerRequest* req) {
         JsonArray vari = doc["variance"].to<JsonArray>();
         for (uint16_t i = 0; i < plen; i++) {
             JsonArray pt = prof.add<JsonArray>();
-            pt.add(data[i][0]); pt.add(data[i][1]); pt.add(data[i][2]);
+            pt.add(s_prof_data_buf[i][0]); pt.add(s_prof_data_buf[i][1]); pt.add(s_prof_data_buf[i][2]);
             JsonArray vt = vari.add<JsonArray>();
-            vt.add(var[i][0]);  vt.add(var[i][1]);  vt.add(var[i][2]);
+            vt.add(s_prof_var_buf[i][0]);  vt.add(s_prof_var_buf[i][1]);  vt.add(s_prof_var_buf[i][2]);
         }
         _sendJson(req, 200, doc);
         return;
@@ -1148,8 +1122,11 @@ static void _registerApiHandlers() {
         req->send(resp);
     });
 
-    // --- Status ---
-    _server.on("/api/status", HTTP_GET, _handleStatus);
+    // --- Status (razbito na 3 lahke endpointe — brez polling) ---
+    // /api/status (stari) JE UKINJEN — ne registriramo ga več
+    _server.on("/api/status/light",   HTTP_GET, _handleStatusLight);
+    _server.on("/api/status/sensors", HTTP_GET, _handleStatusSensors);
+    _server.on("/api/status/system",  HTTP_GET, _handleStatusSystem);
 
     // --- Logi ---
     _server.on("/api/logs", HTTP_GET, _handleLogsGet);

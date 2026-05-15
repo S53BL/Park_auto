@@ -18,7 +18,10 @@
     document.getElementById(DIV).innerHTML = `
 <div class="page-header">
   <h1>Sistem</h1>
-  <span class="subtitle" id="sys-ts">–</span>
+  <div style="display:flex;align-items:center;gap:10px">
+    <span class="subtitle" id="sys-ts">–</span>
+    <button class="btn" onclick="sysRefresh()">↻ Osveži</button>
+  </div>
 </div>
 
 <!-- RAM & PSRAM ─────────────────────────────── -->
@@ -166,10 +169,8 @@
 
     set('sys-ts', new Date().toLocaleTimeString('sl-SI'));
 
-    // ── RAM / PSRAM — iz d.system{} ──
-    // web_ui.cpp doda: system.free_heap, system.min_free_heap,
-    //                  system.free_psram, system.min_free_psram
-    const sys = d.system || {};
+    // ── RAM / PSRAM — /api/status/system vrača polja direktno v korenski objekt ──
+    const sys = d;  // ne d.system{} — novi endpoint nima pod-objekta
 
     const freeHeap  = sys.free_heap;
     const minHeap   = sys.min_free_heap;
@@ -247,12 +248,12 @@
   }
 
   async function _poll() {
+    const ts = document.getElementById('sys-ts');
     try {
-      const d = await api.get('/api/status');
+      const d = await api.get('/api/status/system');
       _update(d);
     } catch(e) {
-      const el = document.getElementById('sys-ts');
-      if (el) el.textContent = 'napaka: ' + e.message;
+      if (ts) ts.textContent = '⚠ ' + e.message;
     }
   }
 
@@ -336,6 +337,9 @@
   // ── Init ─────────────────────────────────────────────────
   window.page_system = function () {
     if (!document.getElementById('sys-ts')) _render();
-    registerPoller('system', _poll, 5000);
+    // Enkratna osvežitev ob odprtju, nato ročno prek gumba
+    _poll();
   };
+
+  window.sysRefresh = function() { _poll(); };
 })();

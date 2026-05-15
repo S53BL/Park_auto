@@ -72,6 +72,7 @@
 // ============================================================
 
 #include "light_logic.h"
+#include "bsp.h"
 #include "signal_led.h"
 #include "hal_light.h"
 #include "event_bus.h"

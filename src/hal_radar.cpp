@@ -794,6 +794,7 @@ static void radarTask(void* pvParams) {
 
     while (true) {
         esp_task_wdt_reset();
+
         uint32_t t_start = millis();
 
         // --- Polling blok ---

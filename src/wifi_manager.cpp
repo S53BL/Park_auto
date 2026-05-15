@@ -234,9 +234,12 @@ static bool wifi_ntp_sync() {
     WF_I("NTP sync OK v %lu ms — lokalni čas: %s (CET/CEST)", elapsed, time_str);
 
     // Obvesti logger in EventBus
+    // logger_flush() je NAMERNO ODSTRANJEN iz wifiTask (2026-05).
+    // Razlog: wifiTask stack 4096 B + SD_MMC.open() DMA = stack overflow tveganje.
+    //   wifiTask stack ob flush: 232 B free → kritično.
+    //   Flush opravi appTask prek light_logic_tick() vsakih 60s.
     logger_set_ntp_synced(true);
     EventBus::publish(EventType::NTP_SYNCED, (uint32_t)now);
-    logger_flush();   // flush z novimi timestamps
 
     if (take_mutex()) {
         s_status.ntp_ok = true;
@@ -333,7 +336,7 @@ static void wifi_reconnect() {
 
     // Publish disconnect event
     EventBus::publish(EventType::WIFI_DISCONNECTED, 0);
-    logger_flush();   // flush logov pred reconnectom
+    // logger_flush() ODSTRANJEN — appTask opravi flush, wifiTask nima dovolj stacka
 
     // Čakaj backoff interval (s watchdog reset-i)
     if (backoff_ms > 0) {

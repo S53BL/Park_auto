@@ -11,6 +11,7 @@
 // ============================================================
 
 #include "sensor_mgr.h"
+#include "bsp.h"
 #include "config.h"
 #include "event_bus.h"
 #include <esp_task_wdt.h>

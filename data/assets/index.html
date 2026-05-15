@@ -46,31 +46,26 @@
 <div id="topbar">
   <span class="logo">P·ESP32</span>
   <nav class="nav-tabs" id="nav">
-    <button class="nav-tab active" onclick="nav('status')">Status</button>
-    <button class="nav-tab"        onclick="nav('settings')">Nastavitve</button>
-    <button class="nav-tab"        onclick="nav('vehicles')">Vozila</button>
+    <button class="nav-tab active" onclick="nav('settings')">Nastavitve</button>
+    <button class="nav-tab"        onclick="nav('diagnostika')">Diagnostika</button>
     <button class="nav-tab"        onclick="nav('logs')">Logi</button>
     <button class="nav-tab"        onclick="nav('system')">Sistem</button>
   </nav>
-  <div id="wifi-dot" title="WiFi status"></div>
 </div>
 
 <!-- ── CONTENT ────────────────────────────────────────── -->
 <div id="content">
 
-  <!-- STATUS -->
-  <div id="page-status" class="page active"></div>
+  <!-- NASTAVITVE (prva stran ob odprtju) -->
+  <div id="page-settings" class="page active"></div>
 
-  <!-- NASTAVITVE -->
-  <div id="page-settings" class="page"></div>
+  <!-- DIAGNOSTIKA (pull na klik) -->
+  <div id="page-diagnostika" class="page"></div>
 
-  <!-- VOZILA -->
-  <div id="page-vehicles" class="page"></div>
-
-  <!-- LOGI -->
+  <!-- LOGI (polling 5s) -->
   <div id="page-logs" class="page"></div>
 
-  <!-- SISTEM -->
+  <!-- SISTEM (pull na klik) -->
   <div id="page-system" class="page"></div>
 
 </div>
@@ -93,24 +88,21 @@
 <!-- ── CORE SPA ROUTER ────────────────────────────────── -->
 <script>
 // ── Stanje ───────────────────────────────────────────────
-const _loaded  = {};           // kateri JS-ji so že naloženi
-const _timers  = {};           // setInterval handle-ji po strani
-let   _current = 'status';    // trenutna stran
+const _loaded  = {};
+const _timers  = {};
+let   _current = 'settings';   // prva stran je Nastavitve
 
-// Moduli: ime → pot JS datoteke
 const PAGES = {
-  status:   '/status.js',
-  settings: '/settings.js',
-  vehicles: '/vehicles.js',
-  logs:     '/logs.js',
-  system:   '/system.js',
+  settings:   '/settings.js',
+  diagnostika:'/diagnostika.js',
+  logs:       '/logs.js',
+  system:     '/system.js',
 };
 
 // ── Navigacija ───────────────────────────────────────────
 function nav(id) {
   if (id === _current) return;
 
-  // Skriji staro stran, ustavi njen polling
   document.getElementById('page-' + _current).classList.remove('active');
   document.querySelectorAll('.nav-tabs .nav-tab').forEach((btn, i) => {
     btn.classList.toggle('active', Object.keys(PAGES)[i] === id);
@@ -118,11 +110,8 @@ function nav(id) {
   if (_timers[_current]) { clearInterval(_timers[_current]); delete _timers[_current]; }
 
   _current = id;
-
-  // Pokaži novo stran
   document.getElementById('page-' + id).classList.add('active');
 
-  // Lazy-load JS za to stran (enkrat)
   if (!_loaded[id]) {
     _loaded[id] = true;
     const sc = document.createElement('script');
@@ -134,7 +123,6 @@ function nav(id) {
     };
     document.head.appendChild(sc);
   } else {
-    // JS je že naložen — pokliči init funkcijo strani
     if (typeof window['page_' + id] === 'function') window['page_' + id]();
   }
 }
@@ -142,7 +130,7 @@ function nav(id) {
 // ── Skupni polling registrar ─────────────────────────────
 window.registerPoller = function(pageId, fn, ms) {
   if (_timers[pageId]) clearInterval(_timers[pageId]);
-  fn(); // takoj ob aktivaciji
+  fn();
   _timers[pageId] = setInterval(fn, ms);
 };
 
@@ -150,21 +138,7 @@ window.clearPoller = function(pageId) {
   if (_timers[pageId]) { clearInterval(_timers[pageId]); delete _timers[pageId]; }
 };
 
-// ── WiFi status dot ──────────────────────────────────────
-async function _updateWifiDot() {
-  try {
-    const r = await fetch('/api/status', { signal: AbortSignal.timeout(3000) });
-    const d = await r.json();
-    const dot = document.getElementById('wifi-dot');
-    const ok = d.wifi && d.wifi.connected;
-    dot.className = ok ? 'ok' : 'err';
-    dot.title = ok ? 'WiFi: ' + (d.wifi.ip || '?') : 'WiFi: nepovezan';
-  } catch {
-    document.getElementById('wifi-dot').className = 'err';
-  }
-}
-
-// ── Confirm dialog (skupen) ──────────────────────────────
+// ── Confirm dialog ───────────────────────────────────────
 let _confirmCallback = null;
 window.showConfirm = function(title, msg, onOk, dangerLabel) {
   document.getElementById('confirm-title').textContent = title;
@@ -222,23 +196,17 @@ window.fmt = {
     return b + ' B';
   },
   countdown(s) {
-    // Sprejema sekunde (ne ms!) — skladno z API ki vrača countdown_s
     if (!s || s <= 0) return '--:--';
     return String(Math.floor(s/60)).padStart(2,'0') + ':' + String(s%60).padStart(2,'0');
   }
 };
 
-// ── Boot ─────────────────────────────────────────────────
+// ── Boot — naloži Nastavitve kot prvo stran ──────────────
 (function boot() {
-  // Naloži prvo stran (status) takoj
   const sc = document.createElement('script');
-  sc.src = PAGES.status;
-  sc.onload = () => { _loaded.status = true; if (typeof page_status === 'function') page_status(); };
+  sc.src = PAGES.settings;
+  sc.onload = () => { _loaded.settings = true; if (typeof page_settings === 'function') page_settings(); };
   document.head.appendChild(sc);
-
-  // WiFi dot polling
-  _updateWifiDot();
-  setInterval(_updateWifiDot, 10000);
 })();
 </script>
 

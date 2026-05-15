@@ -42,3 +42,4 @@ void bsp_tca_reset();
 
 // Boot čas v ms
 uint32_t bsp_boot_time_ms();
+

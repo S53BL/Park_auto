@@ -22,7 +22,7 @@
 (function () {
   const DIV          = 'page-logs';
   const DOM_LIMIT    = 500;     // max vrstic v log-output DOM-u
-  const POLL_MS      = 2000;    // interval pollinga RAM logov
+  const POLL_MS      = 5000;    // interval pollinga RAM logov
   const LINES_FETCH  = 500;     // koliko vrstic zahtevamo od API
 
   let _lastLines  = [];         // zadnje prejete vrstice (nefiltriran buffer)
