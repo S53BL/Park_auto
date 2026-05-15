@@ -63,9 +63,6 @@
 #define BACKOFF_MAX_MS              120000  // [ms] maksimalni backoff (2 min)
 #define BACKOFF_MULTIPLIER          2       // eksponentni faktor
 
-// Periodic log flush iz wifiTask
-#define LOG_FLUSH_INTERVAL_MS       60000   // [ms] flush logov na SD
-
 // ============================================================
 // INTERNO STANJE
 // ============================================================
@@ -480,19 +477,15 @@ void wifiTask(void* pvParams) {
     WF_I("Vstopam v watchdog zanko (interval: %ds)", WATCHDOG_INTERVAL_MS / 1000);
 
     uint32_t last_watchdog_ms  = millis();
-    uint32_t last_log_flush_ms = millis();
+    // last_log_flush_ms ODSTRANJEN — flush je preseljen v appTask (2026-05)
 
     while (true) {
         uint32_t now_ms = millis();
 
-        // --------------------------------------------------------
-        // Periodični log flush
-        // --------------------------------------------------------
-        if ((now_ms - last_log_flush_ms) >= LOG_FLUSH_INTERVAL_MS) {
-            last_log_flush_ms = now_ms;
-            WF_D("Periodični log flush...");
-            logger_flush();
-        }
+        // Periodični log flush je preseljen v appTask (light_logic.cpp)
+        // Razlog: wifiTask stack 4096 B je premalo za SD_MMC.open() klic.
+        //   wifiTask stack pri logger_flush: 268 B free → overflow tveganje.
+        //   appTask ima SRAM stack in nima tega omejitvijo.
 
         // --------------------------------------------------------
         // WiFi watchdog
