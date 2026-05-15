@@ -76,6 +76,12 @@ static uint32_t          s_dropped_lines  = 0;
 static uint32_t          s_flush_count    = 0;
 static uint32_t          s_flush_errors   = 0;
 
+// SD flush cooldown — po napaki počakamo 30s preden spet poskušamo.
+// Namen: prepreči rekurzivno zanko SD_E → force_flush → SD_E → crash.
+// Ko flush faila → nastavimo s_sd_flush_disabled_until_ms = now + 30000.
+// Med cooldownom se logi akumulirajo samo v s_sd_buf (PSRAM), ne gredo na SD.
+static uint32_t s_sd_flush_disabled_until_ms = 0;
+
 // ============================================================
 // POMOŽNE — INTERNE
 // ============================================================
@@ -170,12 +176,25 @@ static void sd_buf_write(const char* line, size_t len, bool force_flush) {
     // Sproži flush ob force (ERROR) ali threshold
     bool threshold_hit = (s_sd_buf_pos >= SD_FLUSH_TRIGGER);
     if (force_flush || threshold_hit) {
+        // Preveri cooldown — po SD napaki počakamo 30s preden spet poskušamo.
+        // Brez cooldowna: SD_E → force_flush → SD_E → loop → heap korupcija.
+        uint32_t now_cd = (uint32_t)millis();
+        if (s_sd_flush_disabled_until_ms > 0 &&
+            now_cd < s_sd_flush_disabled_until_ms) {
+            // Cooldown aktiven — preskočimo flush, logi ostanejo v s_sd_buf
+            return;
+        }
+
         size_t written = sd_mgr_log_flush(s_sd_buf, s_sd_buf_pos);
         if (written == 0) {
             s_flush_errors++;
+            // Aktiviraj 30s cooldown — prepreči rekurzivno zanko
+            s_sd_flush_disabled_until_ms = (uint32_t)millis() + 30000UL;
         } else {
             s_flush_count++;
             s_sd_buf_pos = 0;
+            // Uspešen flush — počisti cooldown
+            s_sd_flush_disabled_until_ms = 0;
         }
     }
 }
@@ -398,12 +417,19 @@ void logger_flush() {
     if (!take_mutex()) return;
 
     if (s_sd_buf_pos > 0) {
+        // Eksplicitni flush (iz appTask) — počisti cooldown in poskusi
+        // Razlog: appTask ima SRAM stack, SD DMA ima prostor ob normalnem delovanju.
+        // Periodični flush vsakih 60s bo uspel ko SRAM ni obremenjen.
+        s_sd_flush_disabled_until_ms = 0;
+
         size_t written = sd_mgr_log_flush(s_sd_buf, s_sd_buf_pos);
         if (written > 0) {
             s_flush_count++;
             s_sd_buf_pos = 0;
         } else {
             s_flush_errors++;
+            // Nastavi cooldown — naslednji eksplicitni flush bo spet poskusil
+            s_sd_flush_disabled_until_ms = (uint32_t)millis() + 30000UL;
         }
     }
     give_mutex();
