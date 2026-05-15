@@ -271,7 +271,12 @@ static void bsp_tasks_create() {
     //   Prihranek: 8KB SRAM → min-ever se poveča za ~8KB.
     // OPOMBA: Če se sistem obnaša nenavadno → vrni lvglTask v SRAM (MAKE_TASK).
     MAKE_PSRAM_TASK(lvglTask,     "LVGL",     TASK_LVGL_STACK,     TASK_LVGL_PRIO,     hTaskLvgl,     CORE_APP)
-    MAKE_TASK(appTask,            "App",      TASK_APP_STACK,      TASK_APP_PRIO,      hTaskApp,      CORE_APP)
+    // appTask stack v PSRAM (2026-05, SRAM razbremenitev).
+    // appTask poganja light_logic + vehicle_recog + parking_log.
+    // Nobena od teh funkcij ne zahteva SRAM stack (ni NVS/flash write, ni DMA).
+    // Prihranek: 6144 B SRAM → cbuf alokacija AsyncTCP dobi dovolj prostora.
+    // ⚠ wifiTask OSTANE v SRAM — tam je NVS init ki res zahteva DRAM stack.
+    MAKE_PSRAM_TASK(appTask,      "App",      TASK_APP_STACK,      TASK_APP_PRIO,      hTaskApp,      CORE_APP)
     // wifiTask stack MORA biti v internem SRAM, ne PSRAM.
     // Razlog: WiFi init (esp_wifi_init) ob praznem NVS piše v flash →
     //   flash write zahteva cache disable → PSRAM ni dostopen brez cache →
