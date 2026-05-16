@@ -42,6 +42,7 @@
 
 #include <Arduino.h>
 #include <LittleFS.h>
+#include <ESPAsyncWebServer.h>
 
 // ============================================================
 // KONFIGURACIJA
@@ -88,9 +89,8 @@ bool web_ui_init();
 // Vrne false = napaka pri zagonu (npr. port že zaseden).
 bool web_ui_begin();
 
-// Procesira en HTTP request (sinhroni WebServer).
-// MORA se klicati redno iz wifiTask zanke — priporočeno vsakih 20ms.
-// Hitra funkcija: 0ms če ni requestov.
+// NOP stub — AsyncTCP procesira konekcije sam, eksplicitni klic ni potreben.
+// Ohranjen za kompatibilnost — klic iz wifiTask zanke je neškodljiv.
 void web_ui_tick();
 
 // Zaustavi strežnik (npr. pred OTA restartom).
@@ -99,9 +99,8 @@ void web_ui_stop();
 // true = strežnik teče
 bool web_ui_running();
 
-// Stub za kompatibilnost — v sync verziji ni AsyncWebServer instance.
-// Vedno vrne nullptr.
-void* web_ui_get_server();
+// Vrne kazalec na AsyncWebServer instanco ali nullptr če strežnik ne teče.
+AsyncWebServer* web_ui_get_server();
 
 // ============================================================
 // DIAGNOSTIKA

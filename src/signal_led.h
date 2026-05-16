@@ -133,11 +133,14 @@ bool signal_led_init(CRGB* buf, uint16_t count);
 // Piše direktno v buf[] ki je bil predan ob signal_led_init().
 // led_manager.cpp pokliče FastLED.show() POTEM ko se ta funkcija vrne.
 //
+// Vrne true če je bil LED buffer dejansko spremenjen (animacija aktivna).
+// Vrne false v SIG_IDLE stanju — led_manager s tem implementira dirty flag.
+//
 // ⚠ Kliči SAMO iz ledTask (Core1). Nikoli iz ISR, EventBus handlerjev
 //   ali kateregakoli drugega taska — edina izjema bi bila če bi bil
 //   signal_led tick zaščiten z muxtexom, kar pa ni in ne sme biti
 //   (FastLED.show() blokira ~3ms, mutex bi povzročil priority inversion).
-void signal_led_tick();
+bool signal_led_tick();  // vrne true če je LED buffer spremenjen
 
 // ============================================================
 // JAVNI API — nastavljanje načinov

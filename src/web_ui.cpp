@@ -1,34 +1,31 @@
 // ============================================================
 // web_ui.cpp — Web UI implementacija (REST API + statične datoteke)
 // Projekt : Avtomatizacija Pokritega Parkirišča
-// Verzija : 2.0.0  |  Datum: 2026-05
+// Verzija : 3.1.0  |  Datum: 2026-05
 // ============================================================
 //
-// SPREMEMBA v2.0: ESPAsyncWebServer → sinhroni WebServer (arduino-esp32)
+// v3.1.0: zamenjava ESP32Async → me-no-dev (ram_problem4.md)
+// SPREMEMBA v3.0: VRNJENO na ESPAsyncWebServer (ESP32Async/ESPAsyncWebServer)
 //
-// RAZLOG:
-//   ESPAsyncWebServer zahteva:
-//     - AsyncTCP task stack: 6144 B SRAM
-//     - LwIP socket internali: ~4372 B SRAM
-//   Skupaj ~10 KB SRAM ki ga ne moremo prihraniti drugače.
-//   Za enega občasnega uporabnika (nadzor logov, nastavitve) je
-//   sinhroni WebServer funkcionalno identičen — latenca <200ms
-//   na LAN je neopazna.
+// ZAKAJ JE BIL SINHRONI WebServer NAPAKA (v2.0):
+//   Sinhroni WebServer zahteva periodični handleClient() klic.
+//   Moderni brskalnik odpre 6 vzporednih HTTP/1.1 konekcij ob nalaganju.
+//   LwIP sprejme vse 6 in jih drži dokler handleClient() ne pride do njih.
+//   6 konekcij × ~3 KB = ~18 KB > 13 KB prostega SRAM-a → ECONNRESET.
+//   To ni bug — je strukturna inkompatibilnost. Nobena koda je ne reši.
+//   Skupaj ~15 iteracij in tedni dela brez uspeha.
 //
-// ARHITEKTURA:
-//   WebServer teče in se handlera v wifiTask (Core 0).
-//   web_ui_tick() kliče _server.handleClient() — mora se klicati
-//   redno iz wifiTask zanke (~vsakih 50ms je dovolj).
-//   Brez dedicated TCP taska, brez SRAM connection bufferjev.
+// ZAKAJ DELUJE ZDAJ:
+//   SD midnight flush (sd_midnight_flush.cpp) odpravlja originalni vzrok:
+//   SD_MMC.open() se kliče samo enkrat na dan ob 00:01 — ni DMA spike.
+//   AsyncTCP procesira vsako konekcijo takoj kot callback — brez kopičenja.
+//   SRAM ~13 KB je mejno ampak zadostuje brez SD DMA konkurence.
 //
-// OMEJITVE sinhroni vs async:
-//   - Samo en request naenkrat (OK — en uporabnik)
-//   - File download (/files?path=X) streama chunk po chunk v loop-u —
-//     blokira wifiTask med prenosom (log datoteke so ~10-50KB, <1s)
-//   - OTA upload: sinhroni multipart — deluje, počasnejši za velike .bin
+// ⚠ OPOZORILO: Ne vračaj sinhroni WebServer. Razlog je dokumentiran zgoraj.
+//   Datoteka: ram_problem3.md, Sekcija 3 (Faza 2) in Sekcija 9 (L3).
 //
-// HANDLER LOGIKA: nespremenjena iz v1.0 — samo adapter layer.
-//   AsyncWebServerRequest* → _server.arg(), _server.send()
+// HANDLER LOGIKA: nespremenjena iz v2.0 — samo adapter layer obrnjen nazaj.
+//   _server.arg() / _server.send() → AsyncWebServerRequest* req
 // ============================================================
 
 #include "web_ui.h"
@@ -47,12 +44,12 @@
 #include "vehicle_recog.h"
 
 #include <LittleFS.h>
-#include <WebServer.h>          // sinhroni WebServer — zamenjava za ESPAsyncWebServer
+#include <ESPAsyncWebServer.h>
 #include <ArduinoJson.h>
 #include <esp_ota_ops.h>
 #include <Update.h>
+#include <freertos/semphr.h>
 #include <esp_heap_caps.h>
-#include <SD_MMC.h>             // za file streaming
 
 // ============================================================
 // SECTION 1 — GLOBALNE SPREMENLJIVKE
@@ -60,55 +57,44 @@
 
 static const char* TAG = "WEBUI";
 
-static WebServer   _server(WEB_PORT);
-static bool        _server_running  = false;
-static bool        _littlefs_ok     = false;
-static bool        _assets_ok       = false;
+static AsyncWebServer  _server(WEB_PORT);
+static bool            _server_running  = false;
+static bool            _littlefs_ok     = false;
+static bool            _assets_ok       = false;
 
-static WebUiStats  _stats = {};
+static WebUiStats      _stats = {};
 
 // ============================================================
 // SECTION 2 — POMOŽNE FUNKCIJE
 // ============================================================
 
-// Pošlje JSON error odgovor
-static void _sendError(int code, const char* msg) {
+static void _sendError(AsyncWebServerRequest* req, int code, const char* msg) {
     _stats.req_errors++;
-    JsonDocument doc;
-    doc["error"] = msg;
-    String body;
-    serializeJson(doc, body);
-    _server.send(code, "application/json", body);
+    char buf[128];
+    snprintf(buf, sizeof(buf), "{\"error\":\"%s\"}", msg);
+    req->send(code, "application/json", buf);
 }
 
-// Pošlje JsonDocument kot JSON odgovor
-// Serializes directly to String — za dokumente <4KB je to OK.
-// Večji odgovori (logi) gredo prek _sendString.
-static void _sendJson(int code, JsonDocument& doc) {
-    String body;
-    body.reserve(512);
-    serializeJson(doc, body);
-    _server.sendHeader("Cache-Control", "no-cache");
-    _server.send(code, "application/json", body);
+// Pošlje JsonDocument — stream direktno prek AsyncResponseStream, brez SRAM kopije
+static void _sendJson(AsyncWebServerRequest* req, int code, JsonDocument& doc) {
+    AsyncResponseStream* resp = req->beginResponseStream("application/json");
+    resp->addHeader("Cache-Control", "no-cache");
+    if (code != 200) resp->setCode(code);
+    serializeJson(doc, *resp);
+    req->send(resp);
 }
 
-// Pošlje navaden string (za /api/logs ki je že formatiran)
-static void _sendString(int code, const char* contentType, const String& body) {
-    _server.sendHeader("Cache-Control", "no-cache");
-    _server.send(code, contentType, body);
-}
-
-// Prebere body POST zahtevka (sinhroni WebServer ga ima v _server.arg("plain"))
-static String _getBody() {
-    if (_server.hasArg("plain")) return _server.arg("plain");
-    return String();
+static void _addCorsHeaders(AsyncWebServerResponse* resp) {
+    resp->addHeader("Access-Control-Allow-Origin", "*");
+    resp->addHeader("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS");
+    resp->addHeader("Access-Control-Allow-Headers", "Content-Type");
 }
 
 // ============================================================
 // SECTION 3 — HANDLER-JI: /api/status/*
 // ============================================================
 
-static void _handleStatusLight() {
+static void _handleStatusLight(AsyncWebServerRequest* req) {
     _stats.req_total++;
     _stats.req_api++;
     LOG_DEBUG(TAG, "GET /api/status/light | SRAM: %lu B",
@@ -168,10 +154,10 @@ static void _handleStatusLight() {
         pk["tof_phase_str"] = phaseStr[(uint8_t)tofDiag.current_phase];
     }
 
-    _sendJson(200, doc);
+    _sendJson(req, 200, doc);
 }
 
-static void _handleStatusSensors() {
+static void _handleStatusSensors(AsyncWebServerRequest* req) {
     _stats.req_total++;
     _stats.req_api++;
     LOG_DEBUG(TAG, "GET /api/status/sensors | SRAM: %lu B",
@@ -217,10 +203,10 @@ static void _handleStatusSensors() {
     JsonObject c2 = cellsArr.add<JsonObject>();
     c2["id"] = 2; c2["name"] = "notranja"; c2["broken"] = gpio.celica2;
 
-    _sendJson(200, doc);
+    _sendJson(req, 200, doc);
 }
 
-static void _handleStatusSystem() {
+static void _handleStatusSystem(AsyncWebServerRequest* req) {
     _stats.req_total++;
     _stats.req_api++;
     LOG_DEBUG(TAG, "GET /api/status/system | SRAM: %lu B",
@@ -278,70 +264,93 @@ static void _handleStatusSystem() {
     wu["littlefs_ok"]  = _littlefs_ok;
     wu["assets_ok"]    = _assets_ok;
 
-    _sendJson(200, doc);
+    _sendJson(req, 200, doc);
 }
 
 // ============================================================
 // SECTION 3 — HANDLER-JI: /api/logs
 // ============================================================
 
-static void _handleLogsGet() {
+static void _handleLogsGet(AsyncWebServerRequest* req) {
     _stats.req_total++;
     _stats.req_api++;
     LOG_DEBUG(TAG, "GET /api/logs | SRAM free: %lu B",
               (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
 
     uint16_t max_lines = WEB_LOG_MAX_LINES;
-    if (_server.hasArg("lines")) {
-        int n = _server.arg("lines").toInt();
+    if (req->hasParam("lines")) {
+        int n = req->getParam("lines")->value().toInt();
         if (n > 0 && n <= 1000) max_lines = (uint16_t)n;
     }
 
+    // Log buffer v PSRAM — ne SRAM
     char* buf = (char*)ps_malloc(WEB_LOG_BUF_SIZE);
     if (!buf) buf = (char*)malloc(WEB_LOG_BUF_SIZE);
     if (!buf) {
-        _sendError(503, "out of memory");
+        _sendError(req, 503, "out of memory");
         return;
     }
 
     size_t len = logger_get_recent(buf, WEB_LOG_BUF_SIZE, max_lines);
     buf[len] = '\0';
 
-    JsonDocument doc;
-    JsonArray arr = doc.to<JsonArray>();
+    bool has_filter = req->hasParam("level");
+    String lvl_filter = "";
+    if (has_filter) {
+        lvl_filter = req->getParam("level")->value();
+        lvl_filter.toUpperCase();
+    }
 
+    // Streaming prek AsyncResponseStream — brez JsonDocument, 0 B SRAM heap alokacije.
+    // FORMAT: ["vrstica1","vrstica2",...] — veljaven JSON array.
+    // Optimizacija ohranjena iz v2.0 — veljavna tudi z AsyncTCP.
+    AsyncResponseStream* resp = req->beginResponseStream("application/json");
+    resp->addHeader("Cache-Control", "no-cache");
+    resp->print("[");
+
+    bool first = true;
     char* line = buf;
     char* end  = buf + len;
+
     while (line < end) {
-        char* nl   = (char*)memchr(line, '\n', end - line);
+        char* nl    = (char*)memchr(line, '\n', end - line);
         size_t llen = nl ? (size_t)(nl - line) : (size_t)(end - line);
+
         if (llen > 0) {
             bool include = true;
-            if (_server.hasArg("level")) {
-                String lvl = _server.arg("level");
-                lvl.toUpperCase();
-                if      (lvl == "ERROR") include = (strstr(line, ":ERROR]") != nullptr);
-                else if (lvl == "WARN")  include = (strstr(line, ":WARN]")  != nullptr ||
-                                                    strstr(line, ":ERROR]") != nullptr);
-                else if (lvl == "INFO")  include = (strstr(line, ":ERROR]") != nullptr ||
-                                                    strstr(line, ":WARN]")  != nullptr ||
-                                                    strstr(line, ":INFO]")  != nullptr);
+            if (has_filter) {
+                if      (lvl_filter == "ERROR") include = (strstr(line, ":ERROR]") != nullptr);
+                else if (lvl_filter == "WARN")  include = (strstr(line, ":WARN]")  != nullptr ||
+                                                           strstr(line, ":ERROR]") != nullptr);
+                else if (lvl_filter == "INFO")  include = (strstr(line, ":ERROR]") != nullptr ||
+                                                           strstr(line, ":WARN]")  != nullptr ||
+                                                           strstr(line, ":INFO]")  != nullptr);
             }
+
             if (include) {
-                char tmp = nl ? *nl : '\0';
-                if (nl) *nl = '\0';
-                arr.add(line);
-                if (nl) *nl = tmp;
+                if (!first) resp->print(",");
+                first = false;
+                resp->print("\"");
+                for (size_t i = 0; i < llen; i++) {
+                    char c = line[i];
+                    if      (c == '"')  resp->print("\\\"");
+                    else if (c == '\\') resp->print("\\\\");
+                    else if (c == '\r') { /* skip */ }
+                    else if (c < 0x20)  resp->print(' ');
+                    else                resp->write((uint8_t)c);
+                }
+                resp->print("\"");
             }
         }
         line = nl ? nl + 1 : end;
     }
 
+    resp->print("]");
     free(buf);
-    _sendJson(200, doc);
+    req->send(resp);
 }
 
-static void _handleLogsFlush() {
+static void _handleLogsFlush(AsyncWebServerRequest* req) {
     _stats.req_total++;
     _stats.req_api++;
     LOG_INFO(TAG, "POST /api/logs/flush — manual flush");
@@ -349,14 +358,14 @@ static void _handleLogsFlush() {
     JsonDocument doc;
     doc["ok"]  = true;
     doc["msg"] = "flushed";
-    _sendJson(200, doc);
+    _sendJson(req, 200, doc);
 }
 
 // ============================================================
 // SECTION 3 — HANDLER-JI: /api/config
 // ============================================================
 
-static void _handleConfigGet() {
+static void _handleConfigGet(AsyncWebServerRequest* req) {
     _stats.req_total++;
     _stats.req_api++;
     LOG_DEBUG(TAG, "GET /api/config");
@@ -399,20 +408,21 @@ static void _handleConfigGet() {
     ident["presence_check_min"]     = cfg.presence_check_min;
     ident["empty_tolerance_mm"]     = cfg.empty_tolerance_mm;
 
-    _sendJson(200, doc);
+    _sendJson(req, 200, doc);
 }
 
-static void _handleConfigPost() {
+static void _handleConfigPost(AsyncWebServerRequest* req, uint8_t* data,
+                              size_t len, size_t index, size_t total) {
     _stats.req_total++;
     _stats.req_api++;
+    if (index + len < total) return;  // čakaj na vse chunke
 
-    String body = _getBody();
-    LOG_INFO(TAG, "POST /api/config, body=%u bytes", (unsigned)body.length());
+    LOG_INFO(TAG, "POST /api/config, body=%u bytes", (unsigned)total);
 
     JsonDocument doc;
-    DeserializationError err = deserializeJson(doc, body);
+    DeserializationError err = deserializeJson(doc, data, len);
     if (err) {
-        _sendError(400, "invalid JSON");
+        _sendError(req, 400, "invalid JSON");
         return;
     }
 
@@ -465,10 +475,10 @@ static void _handleConfigPost() {
     JsonDocument resp;
     resp["ok"]  = true;
     resp["msg"] = saved ? "saved to NVS" : "saved to RAM only (NVS error)";
-    _sendJson(200, resp);
+    _sendJson(req, 200, resp);
 }
 
-static void _handleConfigReset() {
+static void _handleConfigReset(AsyncWebServerRequest* req) {
     _stats.req_total++;
     _stats.req_api++;
     LOG_INFO(TAG, "POST /api/config/reset");
@@ -476,14 +486,14 @@ static void _handleConfigReset() {
     JsonDocument doc;
     doc["ok"]  = true;
     doc["msg"] = "config reset to defaults";
-    _sendJson(200, doc);
+    _sendJson(req, 200, doc);
 }
 
 // ============================================================
 // SECTION 3b — HANDLER-JI: /api/radar
 // ============================================================
 
-static void _handleRadarGet() {
+static void _handleRadarGet(AsyncWebServerRequest* req) {
     _stats.req_total++;
     _stats.req_api++;
     JsonDocument doc;
@@ -518,17 +528,18 @@ static void _handleRadarGet() {
     doc["persistence_n"]        = cfg.radar_persistence_n;
     doc["poll_interval_ms"]     = cfg.radar_poll_interval_ms;
     doc["max_consec_overflows"] = cfg.radar_max_consec_overflows;
-    _sendJson(200, doc);
+    _sendJson(req, 200, doc);
 }
 
-static void _handleRadarConfigPost() {
+static void _handleRadarConfigBody(AsyncWebServerRequest* req, uint8_t* data,
+                                   size_t len, size_t index, size_t total) {
     _stats.req_total++;
     _stats.req_api++;
+    if (index != 0) return;
 
-    String body = _getBody();
     JsonDocument doc;
-    if (deserializeJson(doc, body)) {
-        _sendError(400, "neveljaven JSON");
+    if (deserializeJson(doc, data, len)) {
+        _sendError(req, 400, "neveljaven JSON");
         return;
     }
 
@@ -537,14 +548,14 @@ static void _handleRadarConfigPost() {
 
     if (doc["persistence_n"].is<int>()) {
         uint8_t pn = (uint8_t)doc["persistence_n"].as<int>();
-        if (pn > 10) { _sendError(400, "persistence_n izven obsega (0-10)"); return; }
+        if (pn > 10) { _sendError(req, 400, "persistence_n izven obsega (0-10)"); return; }
         cfg_global.radar_persistence_n = pn;
         global_changed = true;
     }
     if (doc["poll_interval_ms"].is<int>()) {
         uint32_t piv = (uint32_t)doc["poll_interval_ms"].as<int>();
         if (piv < RADAR_POLL_INTERVAL_MIN_MS || piv > RADAR_POLL_INTERVAL_MAX_MS) {
-            _sendError(400, "poll_interval_ms izven obsega (10-100)"); return;
+            _sendError(req, 400, "poll_interval_ms izven obsega (10-100)"); return;
         }
         cfg_global.radar_poll_interval_ms = piv;
         global_changed = true;
@@ -552,7 +563,7 @@ static void _handleRadarConfigPost() {
     if (doc["max_consec_overflows"].is<int>()) {
         uint32_t mcov = (uint32_t)doc["max_consec_overflows"].as<int>();
         if (mcov < 1 || mcov > 100) {
-            _sendError(400, "max_consec_overflows izven obsega (1-100)"); return;
+            _sendError(req, 400, "max_consec_overflows izven obsega (1-100)"); return;
         }
         cfg_global.radar_max_consec_overflows = mcov;
         global_changed = true;
@@ -566,16 +577,16 @@ static void _handleRadarConfigPost() {
         resp["persistence_n"]        = cfg_global.radar_persistence_n;
         resp["poll_interval_ms"]     = cfg_global.radar_poll_interval_ms;
         resp["max_consec_overflows"] = cfg_global.radar_max_consec_overflows;
-        _sendJson(200, resp);
+        _sendJson(req, 200, resp);
         return;
     }
 
     if (!doc["sensor"].is<int>()) {
-        _sendError(400, "sensor manjka");
+        _sendError(req, 400, "sensor manjka");
         return;
     }
     uint8_t sid = (uint8_t)doc["sensor"].as<int>();
-    if (sid >= 4) { _sendError(400, "sensor izven obsega"); return; }
+    if (sid >= 4) { _sendError(req, 400, "sensor izven obsega"); return; }
 
     Config cfg = config_get();
     if (doc["max_dist"].is<int>())    cfg.radar_max_dist[sid]    = (uint8_t)doc["max_dist"].as<int>();
@@ -585,7 +596,7 @@ static void _handleRadarConfigPost() {
 
     if (cfg.radar_max_dist[sid] > 8 || cfg.radar_move_sens[sid] > 100 ||
         cfg.radar_static_sens[sid] > 100) {
-        _sendError(400, "vrednost izven obsega"); return;
+        _sendError(req, 400, "vrednost izven obsega"); return;
     }
 
     config_set(cfg);
@@ -606,32 +617,32 @@ static void _handleRadarConfigPost() {
     resp["config_ok"]       = rs.config_ok;
     resp["config_verified"] = rs.config_verified;
     if (!reconfig_ok) resp["warn"] = "konfiguracija na radar ni uspela — bo poskusil ob restartu";
-    _sendJson(200, resp);
+    _sendJson(req, 200, resp);
 }
 
 // ============================================================
 // SECTION 3 — HANDLER-JI: /api/vehicles
 // ============================================================
 
-static void _handleVehiclesGet() {
+static void _handleVehiclesGet(AsyncWebServerRequest* req) {
     _stats.req_total++;
     _stats.req_api++;
 
     String place_str = "A";
-    if (_server.hasArg("place")) place_str = _server.arg("place");
+    if (req->hasParam("place")) place_str = req->getParam("place")->value();
     place_str.toUpperCase();
     if (place_str != "A" && place_str != "B") {
-        _sendError(400, "place must be A or B"); return;
+        _sendError(req, 400, "place must be A or B"); return;
     }
     char pid = place_str.charAt(0);
 
-    if (_server.hasArg("profile")) {
-        String mid = _server.arg("profile");
+    if (req->hasParam("profile")) {
+        String mid = req->getParam("profile")->value();
         static float s_prof_data_buf[VR_PROFILE_NORM_POINTS][VR_PROFILE_DIMS] __attribute__((section(".psram_data")));
         static float s_prof_var_buf [VR_PROFILE_NORM_POINTS][VR_PROFILE_DIMS] __attribute__((section(".psram_data")));
         uint16_t plen = 0;
         if (!vehicle_recog_get_model_profile(pid, mid.c_str(), s_prof_data_buf, s_prof_var_buf, &plen)) {
-            _sendError(404, "model not found"); return;
+            _sendError(req, 404, "model not found"); return;
         }
         JsonDocument doc;
         doc["id"]     = mid;
@@ -645,7 +656,7 @@ static void _handleVehiclesGet() {
             JsonArray vt = vari.add<JsonArray>();
             vt.add(s_prof_var_buf[i][0]);  vt.add(s_prof_var_buf[i][1]);  vt.add(s_prof_var_buf[i][2]);
         }
-        _sendJson(200, doc);
+        _sendJson(req, 200, doc);
         return;
     }
 
@@ -671,30 +682,31 @@ static void _handleVehiclesGet() {
     doc["vehicle_name"] = vehicle_recog_get_vehicle_name(pid);
     vr_baseline_t bl = vehicle_recog_get_baseline(pid);
     doc["baseline_valid"] = bl.valid;
-    _sendJson(200, doc);
+    _sendJson(req, 200, doc);
 }
 
-static void _handleVehiclesRename() {
+static void _handleVehiclesRename(AsyncWebServerRequest* req, uint8_t* data,
+                                  size_t len, size_t index, size_t total) {
     _stats.req_total++;
     _stats.req_api++;
+    if (index + len < total) return;
 
-    String body = _getBody();
     JsonDocument doc;
-    if (deserializeJson(doc, body)) {
-        _sendError(400, "invalid JSON"); return;
+    if (deserializeJson(doc, data, len)) {
+        _sendError(req, 400, "invalid JSON"); return;
     }
     if (!doc["place"].is<const char*>() || !doc["id"].is<const char*>() || !doc["name"].is<const char*>()) {
-        _sendError(400, "place, id, name required"); return;
+        _sendError(req, 400, "place, id, name required"); return;
     }
     const char* place_s  = doc["place"].as<const char*>();
     const char* model_id = doc["id"].as<const char*>();
     const char* new_name = doc["name"].as<const char*>();
 
     if (!place_s || (place_s[0] != 'A' && place_s[0] != 'B')) {
-        _sendError(400, "place must be A or B"); return;
+        _sendError(req, 400, "place must be A or B"); return;
     }
     if (!model_id || strlen(model_id) == 0 || !new_name || strlen(new_name) == 0) {
-        _sendError(400, "id and name must be non-empty"); return;
+        _sendError(req, 400, "id and name must be non-empty"); return;
     }
 
     bool ok = vehicle_recog_rename_model(place_s[0], model_id, new_name);
@@ -706,21 +718,21 @@ static void _handleVehiclesRename() {
     resp["id"]    = model_id;
     resp["name"]  = new_name;
     if (!ok) resp["error"] = "model not found or rename failed";
-    _sendJson(ok ? 200 : 404, resp);
+    _sendJson(req, ok ? 200 : 404, resp);
 }
 
-static void _handleVehiclesDelete() {
+static void _handleVehiclesDelete(AsyncWebServerRequest* req) {
     _stats.req_total++;
     _stats.req_api++;
 
-    if (!_server.hasArg("id") || !_server.hasArg("place")) {
-        _sendError(400, "id and place query params required"); return;
+    if (!req->hasParam("id") || !req->hasParam("place")) {
+        _sendError(req, 400, "id and place query params required"); return;
     }
-    String id_str    = _server.arg("id");
-    String place_str = _server.arg("place");
+    String id_str    = req->getParam("id")->value();
+    String place_str = req->getParam("place")->value();
     place_str.toUpperCase();
     if (place_str != "A" && place_str != "B") {
-        _sendError(400, "place must be A or B"); return;
+        _sendError(req, 400, "place must be A or B"); return;
     }
 
     bool ok = vehicle_recog_delete_model(place_str.charAt(0), id_str.c_str());
@@ -731,14 +743,14 @@ static void _handleVehiclesDelete() {
     resp["place"] = place_str;
     resp["id"]    = id_str;
     if (!ok) resp["error"] = "model not found";
-    _sendJson(ok ? 200 : 404, resp);
+    _sendJson(req, ok ? 200 : 404, resp);
 }
 
 // ============================================================
 // SECTION 3 — HANDLER-JI: /api/restart
 // ============================================================
 
-static void _handleRestart() {
+static void _handleRestart(AsyncWebServerRequest* req) {
     _stats.req_total++;
     _stats.req_api++;
     LOG_INFO(TAG, "POST /api/restart — restart zahteval web UI");
@@ -746,7 +758,7 @@ static void _handleRestart() {
     JsonDocument doc;
     doc["ok"]  = true;
     doc["msg"] = "restarting in 500ms";
-    _sendJson(200, doc);
+    _sendJson(req, 200, doc);
 
     logger_flush();
     vTaskDelay(pdMS_TO_TICKS(500));
@@ -757,13 +769,13 @@ static void _handleRestart() {
 // SECTION 3 — HANDLER-JI: /api/ssr
 // ============================================================
 
-static void _handleSsrGet() {
+static void _handleSsrGet(AsyncWebServerRequest* req) {
     _stats.req_total++;
     _stats.req_api++;
     LOG_DEBUG(TAG, "GET /api/ssr");
 
     if (!light_logic_ok()) {
-        _sendError(503, "light_logic not ready"); return;
+        _sendError(req, 503, "light_logic not ready"); return;
     }
 
     LightLogicState st = light_logic_get_state();
@@ -791,29 +803,30 @@ static void _handleSsrGet() {
     doc["is_night"]   = st.is_night;
     doc["lux"]        = st.lux;
     doc["any_motion"] = st.any_motion;
-    _sendJson(200, doc);
+    _sendJson(req, 200, doc);
 }
 
-static void _handleSsrPost() {
+static void _handleSsrPost(AsyncWebServerRequest* req, uint8_t* data,
+                           size_t len, size_t index, size_t total) {
     _stats.req_total++;
     _stats.req_api++;
+    if (index + len < total) return;
 
-    String body = _getBody();
-    LOG_DEBUG(TAG, "POST /api/ssr body=%u bytes", (unsigned)body.length());
+    LOG_DEBUG(TAG, "POST /api/ssr body=%u bytes", (unsigned)len);
 
     JsonDocument doc;
-    DeserializationError err = deserializeJson(doc, body);
-    if (err) { _sendError(400, "invalid JSON"); return; }
+    DeserializationError err = deserializeJson(doc, data, len);
+    if (err) { _sendError(req, 400, "invalid JSON"); return; }
 
     if (!doc["ssr"].is<int>()) {
-        _sendError(400, "missing 'ssr' field (1-4)"); return;
+        _sendError(req, 400, "missing 'ssr' field (1-4)"); return;
     }
     if (!doc["action"].is<const char*>()) {
-        _sendError(400, "missing 'action' field (toggle|disable|enable)"); return;
+        _sendError(req, 400, "missing 'action' field (toggle|disable|enable)"); return;
     }
 
     int ssr_id = doc["ssr"].as<int>();
-    if (ssr_id < 1 || ssr_id > 4) { _sendError(400, "ssr must be 1-4"); return; }
+    if (ssr_id < 1 || ssr_id > 4) { _sendError(req, 400, "ssr must be 1-4"); return; }
 
     String action = doc["action"].as<String>();
     action.toLowerCase();
@@ -830,7 +843,7 @@ static void _handleSsrPost() {
         LOG_INFO(TAG, "POST /api/ssr: enable SSR%d", ssr_id);
         EventBus::publish(EventType::BUTTON_SSR_DISABLE, payload);
     } else {
-        _sendError(400, "unknown action (use toggle|disable|enable)"); return;
+        _sendError(req, 400, "unknown action (use toggle|disable|enable)"); return;
     }
 
     JsonDocument resp;
@@ -838,57 +851,50 @@ static void _handleSsrPost() {
     resp["ssr"]    = ssr_id;
     resp["action"] = action;
     resp["msg"]    = "queued";
-    _sendJson(200, resp);
+    _sendJson(req, 200, resp);
 }
 
 // ============================================================
 // SECTION 3 — HANDLER-JI: /files
 // ============================================================
 
-static void _handleFilesGet() {
+static void _handleFilesGet(AsyncWebServerRequest* req) {
     _stats.req_total++;
     _stats.req_files++;
     LOG_DEBUG(TAG, "GET /files | SRAM free: %lu B",
               (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
 
     if (!sd_mgr_ready()) {
-        _sendError(503, "SD not available"); return;
+        _sendError(req, 503, "SD not available"); return;
     }
 
-    if (_server.hasArg("path")) {
-        String path = _server.arg("path");
+    if (req->hasParam("path")) {
+        String path = req->getParam("path")->value();
         LOG_INFO(TAG, "GET /files?path=%s", path.c_str());
 
         if (!path.startsWith("/") || path.indexOf("..") >= 0) {
-            _sendError(400, "invalid path"); return;
+            _sendError(req, 400, "invalid path"); return;
         }
 
-        // Streaming file download — sinhroni chunked send
-        // WebServer.streamFile() je ekvivalent AsyncWebServer beginResponse(SD_MMC, path)
-        // ⚠ Drži wifiTask med prenosom — OK za log datoteke (<50KB, <1s na LAN)
-        File f = SD_MMC.open(path.c_str(), FILE_READ);
-        if (!f) {
-            _sendError(404, "file not found"); return;
-        }
-        _server.sendHeader("Content-Disposition",
-                           String("attachment; filename=\"") + path.substring(path.lastIndexOf('/') + 1) + "\"");
-        _server.sendHeader("Cache-Control", "no-cache");
-        _server.streamFile(f, "application/octet-stream");
-        f.close();
+        // Streaming file download — AsyncWebServer streama chunked iz SD_MMC File
+        AsyncWebServerResponse* resp = req->beginResponse(
+            SD_MMC, path, "application/octet-stream", true /* download */);
+        resp->addHeader("Cache-Control", "no-cache");
+        req->send(resp);
         return;
     }
 
     String dirPath = WEB_SD_ROOT_PATH;
-    if (_server.hasArg("dir")) {
-        dirPath = _server.arg("dir");
+    if (req->hasParam("dir")) {
+        dirPath = req->getParam("dir")->value();
         if (!dirPath.startsWith("/") || dirPath.indexOf("..") >= 0) {
-            _sendError(400, "invalid dir"); return;
+            _sendError(req, 400, "invalid dir"); return;
         }
     }
 
     SdFileInfo* entries = (SdFileInfo*)ps_malloc(sizeof(SdFileInfo) * WEB_FILES_MAX_ENTRIES);
     if (!entries) entries = (SdFileInfo*)malloc(sizeof(SdFileInfo) * WEB_FILES_MAX_ENTRIES);
-    if (!entries) { _sendError(503, "out of memory"); return; }
+    if (!entries) { _sendError(req, 503, "out of memory"); return; }
 
     int cnt = sd_mgr_list_files(dirPath.c_str(), entries, WEB_FILES_MAX_ENTRIES);
 
@@ -907,74 +913,78 @@ static void _handleFilesGet() {
     doc["disk_free_mb"]  = (uint32_t)(sd_mgr_free_bytes()  / (1024ULL * 1024ULL));
 
     free(entries);
-    _sendJson(200, doc);
+    _sendJson(req, 200, doc);
 }
 
-static void _handleFilesDelete() {
+static void _handleFilesDelete(AsyncWebServerRequest* req) {
     _stats.req_total++;
     _stats.req_files++;
 
-    if (!sd_mgr_ready()) { _sendError(503, "SD not available"); return; }
-    if (!_server.hasArg("path")) { _sendError(400, "missing path parameter"); return; }
+    if (!sd_mgr_ready()) { _sendError(req, 503, "SD not available"); return; }
+    if (!req->hasParam("path")) { _sendError(req, 400, "missing path parameter"); return; }
 
-    String path = _server.arg("path");
+    String path = req->getParam("path")->value();
     LOG_INFO(TAG, "DELETE /files?path=%s", path.c_str());
 
     if (!path.startsWith("/") || path.indexOf("..") >= 0) {
-        _sendError(400, "invalid path"); return;
+        _sendError(req, 400, "invalid path"); return;
     }
 
     bool ok = sd_mgr_delete_file(path.c_str());
-    if (!ok) { _sendError(500, "delete failed"); return; }
+    if (!ok) { _sendError(req, 500, "delete failed"); return; }
 
     JsonDocument doc;
     doc["ok"]   = true;
     doc["path"] = path;
-    _sendJson(200, doc);
+    _sendJson(req, 200, doc);
 }
 
 // ============================================================
 // SECTION 3 — HANDLER-JI: /api/ota
 // ============================================================
-// Sinhroni WebServer OTA upload prek HTTP_POST z multipart/form-data.
-// Razlika od async: upload handler dobi celoten chunk v eni iteraciji.
 
-static void _handleOtaUpload() {
-    // Pokliče se po zaključku uploada
+static void _handleOtaUpload(AsyncWebServerRequest* req,
+                             const String& filename, size_t index,
+                             uint8_t* data, size_t len, bool final) {
+    _stats.req_total++;
+
+    if (index == 0) {
+        _stats.ota_attempts++;
+        LOG_INFO(TAG, "OTA upload start: %s", filename.c_str());
+        logger_flush();
+        if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
+            LOG_ERROR(TAG, "OTA Update.begin() failed: %s", Update.errorString());
+            return;
+        }
+    }
+
+    if (Update.write(data, len) != len) {
+        LOG_ERROR(TAG, "OTA Update.write() failed at index=%u", (unsigned)index);
+        return;
+    }
+
+    if (final) {
+        if (Update.end(true)) {
+            _stats.ota_success++;
+            LOG_INFO(TAG, "OTA upload OK: %u bytes — restarting", (unsigned)(index + len));
+        } else {
+            LOG_ERROR(TAG, "OTA Update.end() failed: %s", Update.errorString());
+        }
+    }
+}
+
+static void _handleOtaRequest(AsyncWebServerRequest* req) {
+    _stats.req_api++;
     bool ok = !Update.hasError();
     JsonDocument doc;
     doc["ok"]  = ok;
     doc["msg"] = ok ? "OTA ok, restarting" : Update.errorString();
-    _sendJson(ok ? 200 : 500, doc);
-    _stats.ota_attempts++;
+    _sendJson(req, ok ? 200 : 500, doc);
+
     if (ok) {
-        _stats.ota_success++;
-        LOG_INFO(TAG, "OTA OK — restarting");
         logger_flush();
         vTaskDelay(pdMS_TO_TICKS(500));
         ESP.restart();
-    }
-}
-
-static void _handleOtaChunk() {
-    // Pokliče se za vsak chunk med uploadom
-    HTTPUpload& upload = _server.upload();
-    if (upload.status == UPLOAD_FILE_START) {
-        LOG_INFO(TAG, "OTA upload start: %s", upload.filename.c_str());
-        logger_flush();
-        if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
-            LOG_ERROR(TAG, "OTA Update.begin() failed: %s", Update.errorString());
-        }
-    } else if (upload.status == UPLOAD_FILE_WRITE) {
-        if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
-            LOG_ERROR(TAG, "OTA Update.write() failed");
-        }
-    } else if (upload.status == UPLOAD_FILE_END) {
-        if (Update.end(true)) {
-            LOG_INFO(TAG, "OTA upload OK: %u bytes", (unsigned)upload.totalSize);
-        } else {
-            LOG_ERROR(TAG, "OTA Update.end() failed: %s", Update.errorString());
-        }
     }
 }
 
@@ -982,38 +992,34 @@ static void _handleOtaChunk() {
 // SECTION 3 — NOT FOUND + CORS OPTIONS
 // ============================================================
 
-static void _handleNotFound() {
+static void _handleNotFound(AsyncWebServerRequest* req) {
     _stats.req_total++;
     _stats.req_errors++;
 
     // CORS preflight
-    if (_server.method() == HTTP_OPTIONS) {
-        _server.sendHeader("Access-Control-Allow-Origin",  "*");
-        _server.sendHeader("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS");
-        _server.sendHeader("Access-Control-Allow-Headers", "Content-Type");
-        _server.send(204);
+    if (req->method() == HTTP_OPTIONS) {
+        AsyncWebServerResponse* resp = req->beginResponse(204);
+        _addCorsHeaders(resp);
+        req->send(resp);
         return;
     }
+
+    String url = req->url();
 
     // SPA fallback — pot ki ni /api ali /files → index.html (Alpine.js router)
-    String url = _server.uri();
     if (!url.startsWith("/api") && !url.startsWith("/files")) {
-        if (LittleFS.exists(String(WEB_ASSETS_PATH) + "/index.html")) {
-            File f = LittleFS.open(String(WEB_ASSETS_PATH) + "/index.html", "r");
-            _server.streamFile(f, "text/html");
-            f.close();
-        } else {
-            _server.send(404, "text/plain", "index.html not found — run: pio run --target uploadfs");
-        }
+        req->send(LittleFS, WEB_ASSETS_PATH "/index.html", "text/html");
         return;
     }
 
+    // /api/* ali /files/* pot ki ne obstaja
+    LOG_DEBUG(TAG, "404: %s", url.c_str());
     JsonDocument doc;
     doc["error"] = "not found";
     doc["path"]  = url;
     String body;
     serializeJson(doc, body);
-    _server.send(404, "application/json", body);
+    req->send(404, "application/json", body);
 }
 
 // ============================================================
@@ -1021,53 +1027,78 @@ static void _handleNotFound() {
 // ============================================================
 
 static void _registerHandlers() {
-    // Statične datoteke iz LittleFS
-    // ⚠ Sinhroni WebServer: serveStatic() vrne void — ni chainable.
-    // index.html fallback je pokrit v _handleNotFound() (SPA fallback).
-    _server.serveStatic("/", LittleFS, WEB_ASSETS_PATH "/", "max-age=86400");
+    // CORS preflight
+    _server.on("/*", HTTP_OPTIONS, [](AsyncWebServerRequest* req) {
+        AsyncWebServerResponse* resp = req->beginResponse(204);
+        _addCorsHeaders(resp);
+        req->send(resp);
+    });
 
     // Status
-    _server.on("/api/status/light",   HTTP_GET,  _handleStatusLight);
-    _server.on("/api/status/sensors", HTTP_GET,  _handleStatusSensors);
-    _server.on("/api/status/system",  HTTP_GET,  _handleStatusSystem);
+    _server.on("/api/status/light",   HTTP_GET, _handleStatusLight);
+    _server.on("/api/status/sensors", HTTP_GET, _handleStatusSensors);
+    _server.on("/api/status/system",  HTTP_GET, _handleStatusSystem);
 
     // Logi
     _server.on("/api/logs",       HTTP_GET,  _handleLogsGet);
     _server.on("/api/logs/flush", HTTP_POST, _handleLogsFlush);
 
-    // Config
+    // Config — POST ima body callback
     _server.on("/api/config",       HTTP_GET,  _handleConfigGet);
-    _server.on("/api/config",       HTTP_POST, _handleConfigPost);
+    _server.on("/api/config",       HTTP_POST,
+        [](AsyncWebServerRequest* req) {},  // onRequest placeholder
+        nullptr,                            // onUpload
+        _handleConfigPost                   // onBody
+    );
     _server.on("/api/config/reset", HTTP_POST, _handleConfigReset);
 
-    // Radar
+    // Radar — POST ima body callback
     _server.on("/api/radar",        HTTP_GET,  _handleRadarGet);
-    _server.on("/api/radar/config", HTTP_POST, _handleRadarConfigPost);
+    _server.on("/api/radar/config", HTTP_POST,
+        [](AsyncWebServerRequest* req) {},
+        nullptr,
+        _handleRadarConfigBody
+    );
 
     // Vozila
-    _server.on("/api/vehicles",        HTTP_GET,    _handleVehiclesGet);
-    _server.on("/api/vehicles/rename", HTTP_POST,   _handleVehiclesRename);
-    _server.on("/api/vehicles",        HTTP_DELETE, _handleVehiclesDelete);
+    _server.on("/api/vehicles", HTTP_GET,    _handleVehiclesGet);
+    _server.on("/api/vehicles/rename", HTTP_POST,
+        [](AsyncWebServerRequest* req) {},
+        nullptr,
+        _handleVehiclesRename
+    );
+    _server.on("/api/vehicles", HTTP_DELETE, _handleVehiclesDelete);
 
-    // SSR
-    _server.on("/api/ssr", HTTP_GET,  _handleSsrGet);
-    _server.on("/api/ssr", HTTP_POST, _handleSsrPost);
+    // SSR — POST ima body callback
+    _server.on("/api/ssr", HTTP_GET, _handleSsrGet);
+    _server.on("/api/ssr", HTTP_POST,
+        [](AsyncWebServerRequest* req) {},
+        nullptr,
+        _handleSsrPost
+    );
 
     // Restart
     _server.on("/api/restart", HTTP_POST, _handleRestart);
 
-    // OTA
-    // ⚠ WebServer OTA: drugi argument je upload chunk handler, tretji je POST done handler
-    _server.on("/api/ota", HTTP_POST, _handleOtaUpload, _handleOtaChunk);
+    // OTA — async upload callback
+    _server.on("/api/ota", HTTP_POST,
+        _handleOtaRequest,
+        _handleOtaUpload
+    );
 
     // Files (SD)
     _server.on("/files", HTTP_GET,    _handleFilesGet);
     _server.on("/files", HTTP_DELETE, _handleFilesDelete);
 
-    // Not found + CORS OPTIONS
+    // Statične datoteke iz LittleFS
+    _server.serveStatic("/", LittleFS, WEB_ASSETS_PATH "/")
+           .setDefaultFile("index.html")
+           .setCacheControl("max-age=86400");
+
+    // Not found
     _server.onNotFound(_handleNotFound);
 
-    LOG_INFO(TAG, "Handlers registered (sync WebServer v2.0)");
+    LOG_INFO(TAG, "Handlers registered (ESPAsyncWebServer v3.0)");
 }
 
 // ============================================================
@@ -1101,7 +1132,7 @@ bool web_ui_init() {
 }
 
 bool web_ui_begin() {
-    LOG_INFO(TAG, "web_ui_begin() — zaganjam sync WebServer na port %d", WEB_PORT);
+    LOG_INFO(TAG, "web_ui_begin() — zaganjam AsyncWebServer na port %d", WEB_PORT);
 
     _registerHandlers();
 
@@ -1114,28 +1145,16 @@ bool web_ui_begin() {
     return true;
 }
 
-// ============================================================
-// web_ui_tick() — MORA se klicati redno iz wifiTask zanke!
-//
-// Sinhroni WebServer zahteva periodični handleClient() klic.
-// Priporočena frekvenca: vsakih 20–50 ms v wifiTask while(true) zanki.
-//
-// PRIMER v wifi_manager.cpp / wifiTask:
-//   while (true) {
-//       wifi_manager_tick();    // reconnect logika itd.
-//       web_ui_tick();          // HTTP request handling
-//       vTaskDelay(pdMS_TO_TICKS(20));
-//   }
-// ============================================================
+// web_ui_tick() — NI POTREBEN z ESPAsyncWebServer.
+// AsyncTCP procesira konekcije v svojem tasku — ne potrebuje eksplicitnega klica.
+// Funkcija je stub za kompatibilnost — web_ui.h deklaracija ostane.
 void web_ui_tick() {
-    if (_server_running) {
-        _server.handleClient();
-    }
+    // NOP — AsyncTCP je self-contained
 }
 
 void web_ui_stop() {
     if (_server_running) {
-        _server.stop();
+        _server.end();
         _server_running = false;
         _stats.server_running = false;
         LOG_INFO(TAG, "Web server ustavljen");
@@ -1144,9 +1163,9 @@ void web_ui_stop() {
 
 bool web_ui_running() { return _server_running; }
 
-// web_ui_get_server() je bil namenjen ESPAsyncWebServer — v sync verziji ni potreben.
-// Ohranjen kot nullptr stub za kompatibilnost s kodo ki ga morda kliče.
-void* web_ui_get_server() { return nullptr; }
+AsyncWebServer* web_ui_get_server() {
+    return _server_running ? &_server : nullptr;
+}
 
 WebUiStats web_ui_get_stats() {
     _stats.server_running = _server_running;

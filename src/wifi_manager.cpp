@@ -1,15 +1,17 @@
 // ============================================================
 // wifi_manager.cpp — WiFi Manager
 // Projekt : Avtomatizacija Pokritega Parkirišča
-// Verzija : 1.0.0-dev  |  Datum: 2026-04
+// Verzija : 1.1.0-dev  |  Datum: 2026-05
 // ============================================================
 //
 // IMPLEMENTIRA: wifiTask() — zamenja BSP stub
 //
 // POTEK wifiTask():
 //   1. wifi_connect_best()  — scan vseh SSID, vzame prvega ki odgovori
-//   2. web_ui_begin()       — web server start (pred NTP, heap neframentiran)
-//   3. wifi_ntp_sync()      — configTime + čakanje na sync (max 15s)
+//   2. wifi_ntp_sync()      — configTime + čakanje na sync (max 15s)
+//                             MORA biti pred web_ui_begin() — NTP vzame ~8 KB SRAM.
+//                             Po NTP se heap ustali, AsyncTCP dobi zaporedni blok.
+//   3. web_ui_begin()       — web server start (po NTP — heap je ustaljenem stanju)
 //   4. mDNS ODSTRANJEN      — statična IP 192.168.2.170
 //   5. Watchdog zanka       — vsakih 30s preveri, reconnect po potrebi
 //
@@ -439,9 +441,22 @@ void wifiTask(void* pvParams) {
         WF_I("EventBus: WIFI_CONNECTED IP=%s", WiFi.localIP().toString().c_str());
 
         // --------------------------------------------------------
-        // FAZA 2 — Web UI start (pred NTP — heap je še neframentiran)
-        // xTaskCreate za async_tcp zahteva 8 KB zaporednega SRAM.
-        // NTP + mDNS alocirata SRAM bufferje ki fragmentirajo heap.
+        // FAZA 2 — NTP sinhronizacija (PRED web_ui_begin)
+        // configTime() + SNTP internali vzamejo ~8 KB SRAM.
+        // Po NTP sync se heap ustali — ni več velikih alokacij.
+        // AsyncTCP task mora dobiti zaporedni blok v ustaljenem heap-u.
+        // DOKUMENTIRANO: ram_problem4.md (Patch 2, 2026-05)
+        // --------------------------------------------------------
+        WF_I("=== SRAM pred NTP sync: %lu B ===",
+             (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+        wifi_ntp_sync();
+        WF_I("=== SRAM po  NTP sync:  %lu B ===",
+             (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+
+        // --------------------------------------------------------
+        // FAZA 3 — Web UI start (PO NTP — heap je v ustaljenem stanju)
+        // NTP je končan, ni več velikih SRAM alokacij.
+        // AsyncTCP dobi zaporedni blok, LwIP ima prostor za TCP PCB.
         // --------------------------------------------------------
         WF_I("=== SRAM pred web_ui_begin: %lu B (min-ever: %lu B) ===",
              (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
@@ -452,15 +467,6 @@ void wifiTask(void* pvParams) {
         WF_I("=== SRAM po  web_ui_begin: %lu B (min-ever: %lu B) ===",
              (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
              (unsigned long)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-
-        // --------------------------------------------------------
-        // FAZA 3 — NTP sinhronizacija
-        // --------------------------------------------------------
-        WF_D("SRAM pred NTP sync: %lu B",
-             (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-        wifi_ntp_sync();
-        WF_D("SRAM po  NTP sync:  %lu B",
-             (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
 
         // FAZA 4 — mDNS ODSTRANJEN (statična IP 192.168.2.170, mDNS ni potreben)
 
@@ -511,10 +517,11 @@ void wifiTask(void* pvParams) {
             wifi_ntp_check();
         }
 
-        // Sinhroni WebServer zahteva periodični handleClient() klic
+        // AsyncTCP procesira konekcije sam — web_ui_tick() je NOP stub
+        // (ohranjen za morebitno bodočo WLED polling logiko)
         web_ui_tick();
 
-        vTaskDelay(pdMS_TO_TICKS(20));
+        vTaskDelay(pdMS_TO_TICKS(100));
     }
 }
 

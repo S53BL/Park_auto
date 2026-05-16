@@ -1052,8 +1052,8 @@ bool signal_led_init(CRGB* buf, uint16_t count) {
 // TICK — kliči iz ledTask
 // ============================================================
 
-void signal_led_tick() {
-    if (!s_initialized) return;
+bool signal_led_tick() {
+    if (!s_initialized) return false;
 
     s_stats.tick_count++;
 
@@ -1065,24 +1065,24 @@ void signal_led_tick() {
 
         case SignalMode::SIG_RAMP:
             tick_ramp();
-            break;
+            return true;
 
         case SignalMode::SIG_PARKING:
             tick_parking();
-            break;
+            return true;
 
         case SignalMode::SIG_PHOTOCELL:
             tick_photocell();
-            break;
+            return true;
 
         case SignalMode::SIG_CLOCK:
             tick_clock();
-            break;
+            return true;
 
         case SignalMode::SIG_IDLE:
         default:
             // Buffer je že počiščen ob prehodu v IDLE (v dispatch_update)
-            break;
+            return false;
     }
 }
 

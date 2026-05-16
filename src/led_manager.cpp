@@ -190,6 +190,12 @@ static uint32_t   s_unfill_count   = 0;
 static uint32_t   s_fadeout_count  = 0;
 static uint32_t   s_pa_updates     = 0;
 
+// Dirty flag — safe_show() samo ob dejanski spremembi bufferja.
+// Eliminira RMT DMA alloc/free ko LED miruje (SRAM fragmentacija).
+static bool     s_led_dirty = false;
+// Adaptive tick — 20ms med animacijo, 100ms v IDLE.
+static uint32_t s_tick_ms   = 20;
+
 // ============================================================
 // POMOŽNE FUNKCIJE
 // ============================================================
@@ -701,6 +707,7 @@ void ledTask(void* pvParams) {
             switch (s_anim_state) {
                 case AnimState::FILLING:
                     done = anim_fill_tick();
+                    s_led_dirty = true;
                     if (done) {
                         s_anim_state = AnimState::IDLE;
                         LEDI("FILL animacija končana");
@@ -709,6 +716,7 @@ void ledTask(void* pvParams) {
 
                 case AnimState::UNFILLING:
                     done = anim_unfill_tick();
+                    s_led_dirty = true;
                     if (done) {
                         s_anim_state = AnimState::IDLE;
                         fill_main_solid(CRGB::Black);
@@ -718,6 +726,7 @@ void ledTask(void* pvParams) {
 
                 case AnimState::FADING:
                     done = anim_fade_tick();
+                    s_led_dirty = true;
                     if (done) {
                         s_anim_state = AnimState::IDLE;
                         LEDI("FADE_OUT animacija končana");
@@ -738,16 +747,24 @@ void ledTask(void* pvParams) {
         // signal_led_tick() je centralni dispečer za vse signalne scenarije.
         // Piše direktno v s_leds_signal[] buffer.
         // FastLED.show() (korak 4) bo te vrednosti poslal na IO40.
-        signal_led_tick();
+        if (signal_led_tick()) {
+            s_led_dirty = true;
+        }
 
         // -------------------------------------------------------
-        // 4. FastLED.show() — samo če ni party mode
+        // 4. FastLED.show() — samo ob dejanski spremembi bufferja
         // -------------------------------------------------------
-        safe_show();
+        if (s_led_dirty) {
+            s_led_dirty = false;
+            s_tick_ms = 20;   // animacija aktivna — ostani na 50 Hz
+            safe_show();
+        } else {
+            s_tick_ms = 100;  // IDLE — 10 Hz, brez show(), brez RMT DMA
+        }
 
         // -------------------------------------------------------
-        // 5. Čakaj do naslednjega tika (50 Hz)
+        // 5. Čakaj do naslednjega tika (adaptive: 20ms ali 100ms)
         // -------------------------------------------------------
-        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(LEDTASK_TICK_MS));
+        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(s_tick_ms));
     }
 }
