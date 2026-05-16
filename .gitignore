@@ -82,6 +82,9 @@ src/wifi_config.h  # ←
 .idea/
 *.code-workspace
 
+# Managed components (PlatformIO jih samodejno prenese ob prvem buildu)
+managed_components/
+
 # Temporary project folders
 vent_CEE_temp/
 vent_DEW_temp/
