@@ -7,10 +7,11 @@ import shutil
 # 1. Zbrise Park_auto_last/ ce obstaja
 # 2. Kopira src/ v Park_auto_last/src/
 # 3. Kopira platformio.ini v Park_auto_last/
-# 4. Kopira include/ v Park_auto_last/include/
-# 5. Kopira data/ v Park_auto_last/data/
-# 6. Kopira scripts/ v Park_auto_last/scripts/
-# 7. Vsem datotekam doda .txt koncnico
+# 4. Kopira partitions_custom.csv v Park_auto_last/
+# 5. Kopira include/ v Park_auto_last/include/
+# 6. Kopira data/ v Park_auto_last/data/
+# 7. Kopira scripts/ v Park_auto_last/scripts/
+# 8. Vsem datotekam doda .txt koncnico
 # ============================================
 
 SRC_DIR = 'src'
@@ -31,25 +32,30 @@ if os.path.isfile('platformio.ini'):
     shutil.copy2('platformio.ini', os.path.join(DST_DIR, 'platformio.ini'))
     print('  kopiram platformio.ini')
 
-# 4. Kopiraj include/ v Park_auto_last/include/
+# 4. Kopiraj partitions_custom.csv v Park_auto_last/
+if os.path.isfile('partitions_custom.csv'):
+    shutil.copy2('partitions_custom.csv', os.path.join(DST_DIR, 'partitions_custom.csv'))
+    print('  kopiram partitions_custom.csv')
+
+# 5. Kopiraj include/ v Park_auto_last/include/
 if os.path.isdir('include'):
     dst_include = os.path.join(DST_DIR, 'include')
     shutil.copytree('include', dst_include)
     print('  kopiram include/')
 
-# 5. Kopiraj data/ v Park_auto_last/data/
+# 6. Kopiraj data/ v Park_auto_last/data/
 if os.path.isdir('data'):
     dst_data = os.path.join(DST_DIR, 'data')
     shutil.copytree('data', dst_data)
     print('  kopiram data/')
 
-# 6. Kopiraj scripts/ v Park_auto_last/scripts/
+# 7. Kopiraj scripts/ v Park_auto_last/scripts/
 if os.path.isdir('scripts'):
     dst_scripts = os.path.join(DST_DIR, 'scripts')
     shutil.copytree('scripts', dst_scripts)
     print('  kopiram scripts/')
 
-# 7. Dodaj .txt vsem datotekam
+# 8. Dodaj .txt vsem datotekam
 count = 0
 for dp, dn, fn in os.walk(DST_DIR):
     for f in fn:

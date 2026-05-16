@@ -82,6 +82,10 @@ static void _sendJson(AsyncWebServerRequest* req, int code, JsonDocument& doc) {
     if (code != 200) resp->setCode(code);
     serializeJson(doc, *resp);
     req->send(resp);
+    LOG_DEBUG(TAG, "HTTP %d → %s | SRAM: %lu B",
+              code,
+              req->url().c_str(),
+              (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
 }
 
 static void _addCorsHeaders(AsyncWebServerResponse* resp) {
@@ -97,8 +101,7 @@ static void _addCorsHeaders(AsyncWebServerResponse* resp) {
 static void _handleStatusLight(AsyncWebServerRequest* req) {
     _stats.req_total++;
     _stats.req_api++;
-    LOG_DEBUG(TAG, "GET /api/status/light | SRAM: %lu B",
-              (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    LOG_INFO(TAG, "HTTP → %s", req->url().c_str());
 
     JsonDocument doc;
 
@@ -160,8 +163,7 @@ static void _handleStatusLight(AsyncWebServerRequest* req) {
 static void _handleStatusSensors(AsyncWebServerRequest* req) {
     _stats.req_total++;
     _stats.req_api++;
-    LOG_DEBUG(TAG, "GET /api/status/sensors | SRAM: %lu B",
-              (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    LOG_INFO(TAG, "HTTP → %s", req->url().c_str());
 
     JsonDocument doc;
 
@@ -209,8 +211,7 @@ static void _handleStatusSensors(AsyncWebServerRequest* req) {
 static void _handleStatusSystem(AsyncWebServerRequest* req) {
     _stats.req_total++;
     _stats.req_api++;
-    LOG_DEBUG(TAG, "GET /api/status/system | SRAM: %lu B",
-              (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    LOG_INFO(TAG, "HTTP → %s", req->url().c_str());
 
     JsonDocument doc;
 
@@ -274,8 +275,7 @@ static void _handleStatusSystem(AsyncWebServerRequest* req) {
 static void _handleLogsGet(AsyncWebServerRequest* req) {
     _stats.req_total++;
     _stats.req_api++;
-    LOG_DEBUG(TAG, "GET /api/logs | SRAM free: %lu B",
-              (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    LOG_INFO(TAG, "HTTP → %s", req->url().c_str());
 
     uint16_t max_lines = WEB_LOG_MAX_LINES;
     if (req->hasParam("lines")) {
@@ -368,7 +368,7 @@ static void _handleLogsFlush(AsyncWebServerRequest* req) {
 static void _handleConfigGet(AsyncWebServerRequest* req) {
     _stats.req_total++;
     _stats.req_api++;
-    LOG_DEBUG(TAG, "GET /api/config");
+    LOG_INFO(TAG, "HTTP → %s", req->url().c_str());
 
     JsonDocument doc;
     const Config cfg = config_get();
@@ -496,6 +496,7 @@ static void _handleConfigReset(AsyncWebServerRequest* req) {
 static void _handleRadarGet(AsyncWebServerRequest* req) {
     _stats.req_total++;
     _stats.req_api++;
+    LOG_INFO(TAG, "HTTP → %s", req->url().c_str());
     JsonDocument doc;
     JsonArray sensors = doc["sensors"].to<JsonArray>();
 
@@ -627,6 +628,7 @@ static void _handleRadarConfigBody(AsyncWebServerRequest* req, uint8_t* data,
 static void _handleVehiclesGet(AsyncWebServerRequest* req) {
     _stats.req_total++;
     _stats.req_api++;
+    LOG_INFO(TAG, "HTTP → %s", req->url().c_str());
 
     String place_str = "A";
     if (req->hasParam("place")) place_str = req->getParam("place")->value();
@@ -772,7 +774,7 @@ static void _handleRestart(AsyncWebServerRequest* req) {
 static void _handleSsrGet(AsyncWebServerRequest* req) {
     _stats.req_total++;
     _stats.req_api++;
-    LOG_DEBUG(TAG, "GET /api/ssr");
+    LOG_INFO(TAG, "HTTP → %s", req->url().c_str());
 
     if (!light_logic_ok()) {
         _sendError(req, 503, "light_logic not ready"); return;
@@ -812,7 +814,7 @@ static void _handleSsrPost(AsyncWebServerRequest* req, uint8_t* data,
     _stats.req_api++;
     if (index + len < total) return;
 
-    LOG_DEBUG(TAG, "POST /api/ssr body=%u bytes", (unsigned)len);
+    LOG_INFO(TAG, "HTTP → %s [%u bytes]", req->url().c_str(), (unsigned)len);
 
     JsonDocument doc;
     DeserializationError err = deserializeJson(doc, data, len);
@@ -861,8 +863,7 @@ static void _handleSsrPost(AsyncWebServerRequest* req, uint8_t* data,
 static void _handleFilesGet(AsyncWebServerRequest* req) {
     _stats.req_total++;
     _stats.req_files++;
-    LOG_DEBUG(TAG, "GET /files | SRAM free: %lu B",
-              (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    LOG_INFO(TAG, "HTTP → %s", req->url().c_str());
 
     if (!sd_mgr_ready()) {
         _sendError(req, 503, "SD not available"); return;

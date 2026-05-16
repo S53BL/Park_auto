@@ -254,7 +254,9 @@
 // Stack free v originalni 4096 arhitekturi: 956-964 B free → dovolj rezerve.
 // Historični razlog za 8192: sinhroni WebServer iteracije — ZASTARELO z v3.0.
 // ⚠ Stack MORA biti v SRAM (ne PSRAM) — WiFi init kliče flash ops.
-#define TASK_WIFI_STACK     4096
+#define TASK_WIFI_STACK     5120
+// 2026-05: dvigneno iz 4096. Izmerjeno: 784 B free / 4096 → premalo rezerve
+// ob reconnect + NTP resync + logging kombinaciji.
 #define TASK_WIFI_PRIO      1
 // TASK_EVENTBUS_STACK: zmanjšano 6144→4096 (2026-05, optimizacija RAM)
 // Razlog: eventBusTask handlerji (on_button_ssr, on_radar_motion itd.)

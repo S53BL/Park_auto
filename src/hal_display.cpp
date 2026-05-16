@@ -130,7 +130,7 @@ static uint32_t lvgl_tick_cb() { return millis(); }
 static void lvgl_flush_cb(lv_display_t* disp, const lv_area_t* area, uint8_t* px_map) {
     static uint32_t s_flush_cnt = 0;
     if (s_flush_cnt < 20) {
-        DISPI("flush #%lu x1=%d y1=%d x2=%d y2=%d",
+        DISPD("flush #%lu x1=%d y1=%d x2=%d y2=%d",
               (unsigned long)s_flush_cnt,
               area->x1, area->y1, area->x2, area->y2);
     }

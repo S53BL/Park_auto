@@ -231,7 +231,6 @@ static bool float_valid(float f) {
 #define VALIDATE_U32(prefs, key, field, vmin, vmax, defval)                 \
     do {                                                                     \
         uint32_t _v = (prefs).getUInt((key), UINT32_MAX);                   \
-        CFGD("  " key " = %lu", (unsigned long)_v);                         \
         if (_v >= (vmin) && _v <= (vmax)) {                                  \
             s_config.field = _v;                                             \
         } else {                                                             \
@@ -239,9 +238,6 @@ static bool float_valid(float f) {
                 CFGW("  " key " = %lu izven meja [%lu,%lu] → default %lu",  \
                      (unsigned long)_v, (unsigned long)(vmin),               \
                      (unsigned long)(vmax), (unsigned long)(defval));        \
-            } else {                                                         \
-                CFGD("  " key " ni v NVS → default %lu",                    \
-                     (unsigned long)(defval));                               \
             }                                                                \
             s_config.field = (defval);                                       \
             (prefs).putUInt((key), (defval));                                \
@@ -252,7 +248,6 @@ static bool float_valid(float f) {
 #define VALIDATE_U8(prefs, key, field, vmin, vmax, defval)                  \
     do {                                                                     \
         uint8_t _v = (prefs).getUChar((key), 0xFF);                         \
-        CFGD("  " key " = %u", (unsigned)_v);                               \
         if (_v >= (vmin) && _v <= (vmax)) {                                  \
             s_config.field = _v;                                             \
         } else {                                                             \
@@ -260,9 +255,6 @@ static bool float_valid(float f) {
                 CFGW("  " key " = %u izven meja [%u,%u] → default %u",      \
                      (unsigned)_v, (unsigned)(vmin),                         \
                      (unsigned)(vmax), (unsigned)(defval));                  \
-            } else {                                                         \
-                CFGD("  " key " ni v NVS → default %u",                     \
-                     (unsigned)(defval));                                    \
             }                                                                \
             s_config.field = (defval);                                       \
             (prefs).putUChar((key), (defval));                               \
@@ -273,15 +265,12 @@ static bool float_valid(float f) {
 #define VALIDATE_BOOL(prefs, key, field, defval)                            \
     do {                                                                     \
         uint8_t _v = (prefs).getUChar((key), 0xFF);                         \
-        CFGD("  " key " = %u", (unsigned)_v);                               \
         if (_v == 0 || _v == 1) {                                            \
             s_config.field = (_v == 1);                                      \
         } else {                                                             \
             if (_v != 0xFF) {                                                \
                 CFGW("  " key " = %u neveljavna bool vrednost → default %d", \
                      (unsigned)_v, (int)(defval));                           \
-            } else {                                                         \
-                CFGD("  " key " ni v NVS → default %d", (int)(defval));     \
             }                                                                \
             s_config.field = (defval);                                       \
             (prefs).putUChar((key), (defval) ? 1u : 0u);                    \
@@ -293,17 +282,12 @@ static bool float_valid(float f) {
     do {                                                                     \
         uint32_t _raw = (prefs).getUInt((key), UINT32_MAX);                 \
         float    _v   = (_raw == UINT32_MAX) ? NAN : u32_to_float(_raw);    \
-        CFGD("  " key " = %.3f (raw=0x%08lX)", float_valid(_v) ? _v : 0.0f,\
-             (unsigned long)_raw);                                           \
         if (float_valid(_v) && _v >= (vmin) && _v <= (vmax)) {              \
             s_config.field = _v;                                             \
         } else {                                                             \
             if (_raw != UINT32_MAX && float_valid(_v)) {                     \
                 CFGW("  " key " = %.3f izven meja [%.1f,%.1f] → default %.3f",\
                      _v, (float)(vmin), (float)(vmax), (float)(defval));    \
-            } else {                                                         \
-                CFGD("  " key " ni v NVS ali NaN → default %.3f",           \
-                     (float)(defval));                                       \
             }                                                                \
             s_config.field = (defval);                                       \
             (prefs).putUInt((key), float_to_u32(defval));                   \
@@ -319,8 +303,6 @@ static bool float_valid(float f) {
 
 static void load_and_validate(Preferences& prefs) {
     s_replaced_count = 0;
-
-    CFGD("Beremo NVS namespace '%s'...", NVS_NS);
 
     const Config def = config_defaults();
 
@@ -365,7 +347,6 @@ static void load_and_validate(Preferences& prefs) {
         if (md <= 8) {
             s_config.radar_max_dist[ri] = md;
         } else {
-            CFGD("  %s ni v NVS → default %d", NVS_RADAR_MD[ri], def.radar_max_dist[ri]);
             s_config.radar_max_dist[ri] = def.radar_max_dist[ri];
             prefs.putUChar(NVS_RADAR_MD[ri], def.radar_max_dist[ri]);
             s_replaced_count++;
@@ -413,6 +394,8 @@ static void load_and_validate(Preferences& prefs) {
                  radar_max_consec_overflows,
                  CFG_MIN_RADAR_MAX_OVF, CFG_MAX_RADAR_MAX_OVF,
                  def.radar_max_consec_overflows);
+
+    CFGI("NVS vrednosti naložene (48 parametrov)");
 }
 
 // ============================================================

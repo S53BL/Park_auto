@@ -161,3 +161,9 @@ struct LedMgrStats {
 
 LedMgrStats led_mgr_get_stats();
 bool        led_mgr_ok();
+
+// Startup ready flag — LED procesiranje blokirano dokler ni true.
+// Privzeto false ob zagonu, postane true po 120s ali ob eksplicitnem klicu.
+// Namenjeno: web UI, LCD, prihodnje izklapljanje LED taskov.
+void led_mgr_set_ready(bool ready);
+bool led_mgr_is_ready();

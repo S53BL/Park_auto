@@ -458,15 +458,18 @@ void wifiTask(void* pvParams) {
         // NTP je končan, ni več velikih SRAM alokacij.
         // AsyncTCP dobi zaporedni blok, LwIP ima prostor za TCP PCB.
         // --------------------------------------------------------
-        WF_I("=== SRAM pred web_ui_begin: %lu B (min-ever: %lu B) ===",
-             (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
-             (unsigned long)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+        WF_I("=== SRAM pred web_ui_begin ===");
+        WF_I("  SRAM prosto:        %lu B", (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+        WF_I("  SRAM min-ever:      %lu B", (unsigned long)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+        WF_I("  SRAM največji blok: %lu B", (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
         if (!web_ui_running()) {
             web_ui_begin();
         }
-        WF_I("=== SRAM po  web_ui_begin: %lu B (min-ever: %lu B) ===",
-             (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
-             (unsigned long)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+        WF_I("=== SRAM po  web_ui_begin ===");
+        WF_I("  SRAM prosto:        %lu B", (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+        WF_I("  SRAM min-ever:      %lu B", (unsigned long)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+        WF_I("  SRAM največji blok: %lu B", (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+        WF_I("  PSRAM prosto:       %lu B", (unsigned long)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
 
         // FAZA 4 — mDNS ODSTRANJEN (statična IP 192.168.2.170, mDNS ni potreben)
 
@@ -499,11 +502,15 @@ void wifiTask(void* pvParams) {
         // --------------------------------------------------------
         if ((now_ms - last_watchdog_ms) >= WATCHDOG_INTERVAL_MS) {
             last_watchdog_ms = now_ms;
-            WF_I("SRAM free: %lu B  min-ever: %lu B  PSRAM free: %lu B",
+            WF_I("--- RAM status ---");
+            WF_I("  SRAM prosto:        %lu B  (min-ever: %lu B)",
                  (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
-                 (unsigned long)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                 (unsigned long)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+            WF_I("  SRAM največji blok: %lu B",
+                 (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+            WF_I("  PSRAM prosto:       %lu B",
                  (unsigned long)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
-            WF_I("wifiTask stack: %lu B free / %d B total",
+            WF_I("  wifiTask stack:     %lu B free / %d B total",
                  (unsigned long)uxTaskGetStackHighWaterMark(nullptr) * sizeof(StackType_t),
                  TASK_WIFI_STACK);
 

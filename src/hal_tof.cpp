@@ -271,8 +271,6 @@ static bool do_recovery(uint8_t channel) {
 // ============================================================
 
 static bool init_channel(uint8_t channel) {
-    TOFD("Init kanal %s...", ch_name(channel));
-
     if (!tca_open(channel)) {
         TOFW("Init kanal %s: TCA open napaka — senzor morda ni priključen",
              ch_name(channel));

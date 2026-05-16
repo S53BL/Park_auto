@@ -337,9 +337,14 @@ void bsp_init() {
     sd_midnight_flush_start();
 
     s_boot_time = millis() - t0;
-    LOGI("Internal SRAM free: %lu B  min-ever: %lu B",
-         (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
-         (unsigned long)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    LOGI("=== SRAM/PSRAM BILANCA ob zagonu ===");
+    LOGI("  SRAM skupaj:    %6lu B", (unsigned long)heap_caps_get_total_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    LOGI("  SRAM prosto:    %6lu B", (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    LOGI("  SRAM min-ever:  %6lu B", (unsigned long)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    LOGI("  SRAM največji blok: %lu B", (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    LOGI("  PSRAM skupaj:   %6lu B", (unsigned long)heap_caps_get_total_size(MALLOC_CAP_SPIRAM));
+    LOGI("  PSRAM prosto:   %6lu B", (unsigned long)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+    LOGI("  PSRAM min-ever: %6lu B", (unsigned long)heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM));
     LOGI("=== BSP init OK v %lu ms ===", (unsigned long)s_boot_time);
 }
 

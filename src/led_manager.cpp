@@ -196,6 +196,14 @@ static bool     s_led_dirty = false;
 // Adaptive tick — 20ms med animacijo, 100ms v IDLE.
 static uint32_t s_tick_ms   = 20;
 
+// Startup ready flag — blokira LED procesiranje med stabilizacijo sistema.
+// false = LED task spi in ne procesira ukazov (2 minuti po zagonu).
+// true  = normalno delovanje.
+// Eksplicitna kontrola prek led_mgr_set_ready() za web/LCD uporabo.
+static volatile bool s_startup_ready    = false;
+static uint32_t      s_startup_time_ms  = 0;  // čas ko je ledTask začel
+#define LED_STARTUP_DELAY_MS  120000           // 2 minuti
+
 // ============================================================
 // POMOŽNE FUNKCIJE
 // ============================================================
@@ -418,6 +426,19 @@ bool led_mgr_ok() {
     return s_initialized;
 }
 
+void led_mgr_set_ready(bool ready) {
+    s_startup_ready = ready;
+    if (ready) {
+        LEDI("led_mgr_set_ready(true) — LED procesiranje omogočeno");
+    } else {
+        LEDI("led_mgr_set_ready(false) — LED procesiranje blokirano");
+    }
+}
+
+bool led_mgr_is_ready() {
+    return s_startup_ready;
+}
+
 LedMgrStats led_mgr_get_stats() {
     LedMgrStats st;
     st.initialized           = s_initialized;
@@ -554,7 +575,25 @@ void ledTask(void* pvParams) {
 
     TickType_t last_wake = xTaskGetTickCount();
 
+    // Zabeleži čas zagona za startup delay
+    s_startup_time_ms = millis();
+    LEDI("Startup delay: %d ms — čakam stabilizacijo sistema", LED_STARTUP_DELAY_MS);
+
     while (true) {
+        // -------------------------------------------------------
+        // 0. Startup ready check
+        // -------------------------------------------------------
+        if (!s_startup_ready) {
+            if ((millis() - s_startup_time_ms) >= LED_STARTUP_DELAY_MS) {
+                s_startup_ready = true;
+                LEDI("Startup delay iztekel — LED procesiranje omogočeno");
+            } else {
+                // Še čakamo — spi in ne delaj ničesar
+                vTaskDelay(pdMS_TO_TICKS(100));
+                continue;
+            }
+        }
+
         // -------------------------------------------------------
         // 1. Preberi ukaz iz queue (non-blocking)
         // -------------------------------------------------------

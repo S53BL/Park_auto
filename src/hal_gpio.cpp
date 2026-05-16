@@ -491,7 +491,6 @@ bool hal_gpio_init() {
         GPIOE("IOCON write napaka");
         return false;
     }
-    GPIOD("IOCON = 0x00 OK");
 
     // --- IODIRA: smer Port A ---
     // GPA0–4 vhodi (1), GPA5–7 izhodi (0)
@@ -501,7 +500,6 @@ bool hal_gpio_init() {
         GPIOE("IODIRA write napaka");
         return false;
     }
-    GPIOD("IODIRA = 0x%02X (vhodi: GPA0–4, izhodi: GPA5–7)", PORTA_INPUT_MASK);
 
     // --- IODIRB: smer Port B ---
     // GPB0 izhod (0), GPB1–7 rezerva kot vhodi (1) — varno, ne lebdijo
@@ -511,7 +509,6 @@ bool hal_gpio_init() {
         GPIOE("IODIRB write napaka");
         return false;
     }
-    GPIOD("IODIRB = 0x%02X (izhod: GPB0, vhodi: GPB1–7)", MCP_PORTB_IODIR);
 
     // --- GPPUA: pull-up Port A ---
     // Samo na vhodih (GPA0–4) — pullup na izhodih je nevtralen a ga pustimo izklopljeno
@@ -520,7 +517,6 @@ bool hal_gpio_init() {
         GPIOE("GPPUA write napaka");
         return false;
     }
-    GPIOD("GPPUA = 0x%02X (pull-up na GPA0–4)", PORTA_INPUT_MASK);
 
     // --- GPPUB: pull-up Port B ---
     // GPB1–7 rezerva — pullup da ne lebdijo. GPB0 je izhod — brez pull-up.
@@ -529,7 +525,6 @@ bool hal_gpio_init() {
         GPIOE("GPPUB write napaka");
         return false;
     }
-    GPIOD("GPPUB = 0xFE (pull-up na GPB1–7)");
 
     // --- INTCONA: interrupt control Port A ---
     // 0x00 = interrupt ob spremembi (compare-to-previous, ne compare-to-DEFVAL)
@@ -539,7 +534,6 @@ bool hal_gpio_init() {
         GPIOE("INTCONA write napaka");
         return false;
     }
-    GPIOD("INTCONA = 0x00 (interrupt ob spremembi)");
 
     // --- GPINTENA: interrupt enable Port A ---
     // Samo vhodni pini (GPA0–4) generirajo interrupt.
@@ -549,7 +543,6 @@ bool hal_gpio_init() {
         GPIOE("GPINTENA write napaka");
         return false;
     }
-    GPIOD("GPINTENA = 0x%02X (INT enable: GPA0–4)", PORTA_INPUT_MASK);
 
     // Port B nima vhodov ki bi sprožali INT (GPB0 je izhod, GPB1–7 rezerva)
     if (!mcp_write_reg(MCP_REG_GPINTENB, 0x00)) {
@@ -557,7 +550,7 @@ bool hal_gpio_init() {
         GPIOE("GPINTENB write napaka");
         return false;
     }
-    GPIOD("GPINTENB = 0x00 (INT disable Port B)");
+    GPIOI("MCP23017 registri konfigurirani (IODIRA/B, GPPUA/B, GPINTENA/B)");
 
     // --- Inicializiraj izhode (vsi SSR izklopljeni) ---
     s_ssr_shadow_a = 0x00;
@@ -579,7 +572,6 @@ bool hal_gpio_init() {
     // Prepreči lažni takoj-interrupt ob zagonu.
     uint8_t intcap_a_clr = mcp_read_reg(MCP_REG_INTCAPA);
     uint8_t intcap_b_clr = mcp_read_reg(MCP_REG_INTCAPB);
-    GPIOD("INT počistitev ob init: INTCAPA=0x%02X INTCAPB=0x%02X", intcap_a_clr, intcap_b_clr);
 
     // --- Preberi začetno stanje vhodov ---
     // Sinhroniziramo interno stanje s fizičnim pred prvim interruptom.
