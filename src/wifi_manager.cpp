@@ -11,8 +11,11 @@
 //   2. wifi_ntp_sync()      — configTime + čakanje na sync (max 15s)
 //                             MORA biti pred web_ui_begin() — NTP vzame ~8 KB SRAM.
 //                             Po NTP se heap ustali, AsyncTCP dobi zaporedni blok.
-//   3. web_ui_begin()       — web server start (po NTP — heap je ustaljenem stanju)
-//   4. mDNS ODSTRANJEN      — statična IP 192.168.2.170
+//   3. čakaj led_mgr_is_ready() — počakamo da LED startup delay (120s) poteče.
+//                                  Zagotavlja stabilen SRAM preden AsyncTCP task
+//                                  kreira xTaskCreatePinnedToCore. (ram_problem4.md)
+//   4. web_ui_begin()       — web server start (po LED delay — SRAM stabilen)
+//   5. mDNS ODSTRANJEN      — statična IP 192.168.2.170
 //   5. Watchdog zanka       — vsakih 30s preveri, reconnect po potrebi
 //
 // ============================================================
@@ -29,6 +32,8 @@
 #include <esp_sntp.h>
 #include <freertos/semphr.h>
 #include <time.h>
+#include <WiFiClient.h>
+#include "led_manager.h"
 
 // ============================================================
 // LOGGING
@@ -73,6 +78,7 @@
 static SemaphoreHandle_t s_mutex    = nullptr;
 static WifiStatus        s_status   = {};
 static uint32_t          s_last_ntp_check_ms = 0;
+static uint32_t          _web_start_ms       = 0;
 
 // ============================================================
 // POMOŽNE FUNKCIJE
@@ -454,24 +460,46 @@ void wifiTask(void* pvParams) {
              (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
 
         // --------------------------------------------------------
-        // FAZA 3 — Web UI start (PO NTP — heap je v ustaljenem stanju)
-        // NTP je končan, ni več velikih SRAM alokacij.
-        // AsyncTCP dobi zaporedni blok, LwIP ima prostor za TCP PCB.
+        // FAZA 3 — Čakaj LED startup delay
+        // led_mgr_is_ready() postane true po 120s od zagona ledTask-a.
+        // Zagotavlja da je SRAM stabilen preden AsyncTCP task kreira
+        // xTaskCreatePinnedToCore — pri min-ever < 300 B task kreacija
+        // tiho odpove, server ne posluša (AsyncServer::begin() je void).
+        // DOKUMENTIRANO: ram_problem4.md (Patch 4, 2026-05)
+        // --------------------------------------------------------
+        if (!led_mgr_is_ready()) {
+            WF_I("Čakam LED startup delay pred web_ui_begin()...");
+            while (!led_mgr_is_ready()) {
+                vTaskDelay(pdMS_TO_TICKS(500));
+            }
+            WF_I("LED startup delay iztekel — nadaljujem z web_ui_begin()");
+        }
+
+        // --------------------------------------------------------
+        // FAZA 4 — Web UI start (PO LED delay — SRAM stabilen)
         // --------------------------------------------------------
         WF_I("=== SRAM pred web_ui_begin ===");
-        WF_I("  SRAM prosto:        %lu B", (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-        WF_I("  SRAM min-ever:      %lu B", (unsigned long)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-        WF_I("  SRAM največji blok: %lu B", (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+        WF_I("  SRAM prosto:        %lu B",
+             (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+        WF_I("  SRAM min-ever:      %lu B",
+             (unsigned long)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+        WF_I("  SRAM največji blok: %lu B",
+             (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
         if (!web_ui_running()) {
             web_ui_begin();
         }
+        _web_start_ms = millis();
         WF_I("=== SRAM po  web_ui_begin ===");
-        WF_I("  SRAM prosto:        %lu B", (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-        WF_I("  SRAM min-ever:      %lu B", (unsigned long)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-        WF_I("  SRAM največji blok: %lu B", (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-        WF_I("  PSRAM prosto:       %lu B", (unsigned long)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+        WF_I("  SRAM prosto:        %lu B",
+             (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+        WF_I("  SRAM min-ever:      %lu B",
+             (unsigned long)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+        WF_I("  SRAM največji blok: %lu B",
+             (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+        WF_I("  PSRAM prosto:       %lu B",
+             (unsigned long)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
 
-        // FAZA 4 — mDNS ODSTRANJEN (statična IP 192.168.2.170, mDNS ni potreben)
+        // FAZA 5 — mDNS ODSTRANJEN (statična IP 192.168.2.170, mDNS ni potreben)
 
         update_status(WifiState::NTP_SYNCED);
 
@@ -488,8 +516,22 @@ void wifiTask(void* pvParams) {
 
     uint32_t last_watchdog_ms  = millis();
     // last_log_flush_ms ODSTRANJEN — flush je preseljen v appTask (2026-05)
+    static bool tcp_self_test_done = false;
 
     while (true) {
+        // --------------------------------------------------------
+        // TCP SELF-CONNECT TEST — enkraten, 2s po vstopu v zanko
+        // --------------------------------------------------------
+        if (!tcp_self_test_done && web_ui_running() && (millis() - _web_start_ms) >= 2000) {
+            tcp_self_test_done = true;
+            WiFiClient client;
+            if (client.connect("192.168.2.170", 80)) {
+                WF_I("TCP self-connect 192.168.2.170:80 → USPEL");
+                client.stop();
+            } else {
+                WF_I("TCP self-connect 192.168.2.170:80 → NEUSPEL");
+            }
+        }
         uint32_t now_ms = millis();
 
         // Periodični log flush je preseljen v appTask (light_logic.cpp)

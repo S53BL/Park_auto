@@ -1138,6 +1138,12 @@ bool web_ui_begin() {
     _registerHandlers();
 
     _server.begin();
+    // AsyncServer::begin() je void — ne moremo direktno preveriti uspeha.
+    // Edini zanesljiv indikator je TCP self-connect test v wifiTask.
+    LOG_INFO(TAG, "AsyncServer port 80 — begin() klican (TCP self-connect test sledi)");
+    LOG_INFO(TAG, "  SRAM po begin(): %lu B  blok: %lu B",
+             (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
     _server_running = true;
     _stats.server_running = true;
 

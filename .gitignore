@@ -94,7 +94,9 @@ nove_ico/
 nide.zip
 src_txt/*
 Doc/*
-scripts/
+scripts/*
+!scripts/fix_build_env.py
+!scripts/compress_assets.py
 Park_auto_last/
 
 # Agent navodila in popravki
