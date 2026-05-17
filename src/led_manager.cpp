@@ -124,6 +124,8 @@ enum class LedCmd : uint8_t {
     CELICA_TIMER_ON,    // OPUŠČENO — signal_led_photocell_update() direktno
     CELICA_TIMER_OFF,   // OPUŠČENO — signal_led_photocell_stop() direktno
     SIGNAL_OFF,         // OPUŠČENO — signal_led_off() direktno
+    ALARM_BLINK_START,  // začni alarm utripanje (rdeča/modra 1s)
+    ALARM_BLINK_STOP,   // ustavi alarm utripanje
 };
 
 struct LedCmdMsg {
@@ -143,6 +145,7 @@ enum class AnimState : uint8_t {
     PARKING_ASSIST,  // OPUŠČENO (2026-05) — signal_led_parking_update()
     CLOCK_SHOW,      // OPUŠČENO (2026-05) — signal_led_clock_show()
     CELICA_BLINK,    // OPUŠČENO (2026-05) — signal_led_photocell_update()
+    ALARM_BLINK,     // rdeča 1s / modra 1s, ponavljanje
 };
 
 // ============================================================
@@ -189,6 +192,10 @@ static uint32_t   s_fill_count     = 0;
 static uint32_t   s_unfill_count   = 0;
 static uint32_t   s_fadeout_count  = 0;
 static uint32_t   s_pa_updates     = 0;
+
+// Alarm blink stanje
+static uint32_t s_alarm_blink_phase_ms = 0;  // millis() začetka trenutne faze
+static bool     s_alarm_blink_red      = true; // true=rdeča, false=modra
 
 // Dirty flag — safe_show() samo ob dejanski spremembi bufferja.
 // Eliminira RMT DMA alloc/free ko LED miruje (SRAM fragmentacija).
@@ -439,6 +446,14 @@ bool led_mgr_is_ready() {
     return s_startup_ready;
 }
 
+void led_mgr_alarm_blink_start() {
+    send_cmd(LedCmd::ALARM_BLINK_START, 0);
+}
+
+void led_mgr_alarm_blink_stop() {
+    send_cmd(LedCmd::ALARM_BLINK_STOP, 0);
+}
+
 LedMgrStats led_mgr_get_stats() {
     LedMgrStats st;
     st.initialized           = s_initialized;
@@ -522,6 +537,25 @@ static void anim_parking_assist_tick(const Config& cfg) { ... }
 static void anim_clock_tick() { ... }
 static void anim_celica_tick() { ... }
 */
+
+// ============================================================
+// ALARM BLINK TICKER (ledTask interno)
+// ============================================================
+// Rdeča 1000ms → modra 1000ms → ponavljanje.
+// Vrne true ob spremembi bufferja (zahteva safe_show).
+
+static bool anim_alarm_blink_tick() {
+    uint32_t elapsed = millis() - s_alarm_blink_phase_ms;
+    if (elapsed >= 1000UL) {
+        s_alarm_blink_red      = !s_alarm_blink_red;
+        s_alarm_blink_phase_ms = millis();
+        CRGB color = s_alarm_blink_red ? CRGB(255, 0, 0) : CRGB(0, 0, 255);
+        fill_main_solid(color);
+        FastLED.setBrightness(255);
+        return true;
+    }
+    return false;
+}
 
 // ============================================================
 // PARTY MODE PREKLOP (ledTask interno — pod zahteva safe_show pred)
@@ -684,6 +718,25 @@ void ledTask(void* pvParams) {
                     if (s_party_mode) do_party_off();
                     break;
 
+                case LedCmd::ALARM_BLINK_START:
+                    if (s_party_mode) { LEDW("ALARM_BLINK ignoriran — party mode"); break; }
+                    s_alarm_blink_red      = true;
+                    s_alarm_blink_phase_ms = millis();
+                    fill_main_solid(CRGB(255, 0, 0));
+                    FastLED.setBrightness(255);
+                    s_anim_state = AnimState::ALARM_BLINK;
+                    LEDI("Alarm blink START");
+                    break;
+
+                case LedCmd::ALARM_BLINK_STOP:
+                    if (s_anim_state == AnimState::ALARM_BLINK) {
+                        s_anim_state = AnimState::IDLE;
+                        FastLED.setBrightness(s_brightness_main);
+                        fill_main_solid(CRGB::Black);
+                        LEDI("Alarm blink STOP");
+                    }
+                    break;
+
                 // -----------------------------------------------
                 // OPUŠČENO (2026-05): wrapper funkcije kličejo
                 // signal_led_* direktno, ne prek queue.
@@ -770,6 +823,10 @@ void ledTask(void* pvParams) {
                         s_anim_state = AnimState::IDLE;
                         LEDI("FADE_OUT animacija končana");
                     }
+                    break;
+
+                case AnimState::ALARM_BLINK:
+                    if (anim_alarm_blink_tick()) s_led_dirty = true;
                     break;
 
                 case AnimState::IDLE:

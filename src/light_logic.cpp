@@ -72,6 +72,7 @@
 // ============================================================
 
 #include "light_logic.h"
+#include "alarm.h"
 #include "bsp.h"
 #include "signal_led.h"
 #include "hal_light.h"
@@ -118,6 +119,10 @@ static SsrRuntime s_ssr[5] = {};    // indeksi 1–4
 // Noč/dan stanje — posodobljeno ob NIGHT_THRESHOLD_CHANGED eventu
 static bool    s_is_night       = false;
 static float   s_lux            = 0.0f;
+
+// Alarm stanje — posodobljeno ob ALARM_STATE_CHANGED eventu
+static bool          s_alarm_active = false;
+static AlarmStateEnum s_alarm_state = AlarmStateEnum::OFF;
 
 // Radar sumarni status — OR vseh 4 kanalov
 // Posodobljeno ob vsakem RADAR_MOTION eventu
@@ -406,6 +411,15 @@ static void on_radar_motion(const Event& e) {
 
     uint32_t now = millis();
 
+    // ALARM MODE GUARD: ko je alarm aktiven, light_logic ignorira radar evente
+    // za SSR logiko. Alarm modul ima lastni subscriber in skrbi za SSR1 + blink.
+    // Anti-forget timeri in clock se še vedno posodabljajo (24/7 logika ostane).
+    if (s_alarm_active) {
+        s_any_motion     = true;
+        s_last_motion_ms = now;
+        return;
+    }
+
     // -------------------------------------------------------
     // VEDNO — ne glede na dan/noč
     // -------------------------------------------------------
@@ -540,6 +554,39 @@ static void on_cell_broken(const Event& e) {
     }
 }
 
+// ALARM_STATE_CHANGED — alarm modul publishira ob vsaki spremembi stanja
+// payload bit 0-1: AlarmStateEnum (0=OFF, 1=ARMED, 2=TRIGGERED)
+// payload bit 8: active flag
+static void on_alarm_state_changed(const Event& e) {
+    AlarmStateEnum new_state = (AlarmStateEnum)(e.payload & 0x03);
+    bool           was_active = s_alarm_active;
+    s_alarm_active = (new_state != AlarmStateEnum::OFF);
+    s_alarm_state  = new_state;
+
+    LLI("ALARM_STATE_CHANGED: %s → %s",
+        was_active ? "AKTIVEN" : "off",
+        s_alarm_active ? "AKTIVEN" : "off");
+
+    if (s_alarm_active) {
+        // SSR1 mora biti ON da LED matrika dobi 12V napajanje za utripanje.
+        if (!s_ssr[1].on && !s_ssr[1].disabled) {
+            LLI("Alarm: SSR1 prižig za blink napajanje");
+            s_ssr[1].is_auto     = true;
+            s_ssr[1].deadline_ms = 0;   // "alarm-owned" sentinel: is_auto=true + deadline_ms=0
+                                        // je nedosegljivo v normalnem delovanju — timer bi bil >0
+            ssr_physical_on(1);
+            vTaskDelay(pdMS_TO_TICKS(SSR1_STABILIZE_MS));
+        }
+    } else {
+        // Alarm OFF → ugasni SSR1 samo če ga je alarm prižgal.
+        // Preverba sentinel: is_auto && deadline_ms==0 — glej decisions.md ADR-013.
+        if (s_ssr[1].on && s_ssr[1].is_auto && s_ssr[1].deadline_ms == 0) {
+            LLI("Alarm: SSR1 izklop po alarm OFF");
+            ssr_cmd_enqueue(SsrCmdType::TRIGGER_OFF);
+        }
+    }
+}
+
 // ============================================================
 // light_logic_init
 // ============================================================
@@ -585,9 +632,10 @@ bool light_logic_init() {
     EventBus::subscribe(EventType::BUTTON_SSR,               on_button_ssr);
     EventBus::subscribe(EventType::BUTTON_SSR_DISABLE,       on_button_ssr_disable);
     EventBus::subscribe(EventType::CELL_BROKEN,              on_cell_broken);
+    EventBus::subscribe(EventType::ALARM_STATE_CHANGED,      on_alarm_state_changed);
 
     s_initialized = true;
-    LLI("light_logic_init OK — 7 EventBus subscriberjev registriranih");
+    LLI("light_logic_init OK — 8 EventBus subscriberjev registriranih");
     return true;
 }
 
@@ -903,6 +951,8 @@ LightLogicState light_logic_get_state() {
         st.lux            = s_lux;
         st.any_motion     = s_any_motion;
         st.last_motion_ms = s_last_motion_ms;
+        st.alarm_active   = s_alarm_active;
+        st.alarm_state    = s_alarm_state;
         xSemaphoreGive(s_mutex);
     } else {
         // Fallback: brez mutexa (morda init ni bil klican)
@@ -956,6 +1006,11 @@ void appTask(void* pvParams) {
         }
     }
 
+    if (!alarm_init()) {
+        LLW("alarm_init NAPAKA — alarm sistem ne deluje");
+        // Ne ustavi appTask — sistem deluje brez alarma
+    }
+
     // Identifikacija vozil — zahteva LittleFS (inicializiran v bsp) in config_mgr
     {
         uint32_t heap_before = esp_get_free_heap_size();
@@ -975,6 +1030,7 @@ void appTask(void* pvParams) {
     while (true) {
         esp_task_wdt_reset();
         light_logic_tick();
+        alarm_tick();
         vehicle_recog_tick();
 
         // parking_log_tick vsakih ~10 s (perioda je interha v tick())

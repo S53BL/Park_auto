@@ -52,6 +52,7 @@ enum class EventType : uint16_t {
     SSR_STATE_CHANGED   = 0x0050,
     // Alarm
     ALARM_TRIGGERED     = 0x0060,
+    ALARM_STATE_CHANGED = 0x0061,
     // Sistem
     SYSTEM_READY          = 0x00FF,
 

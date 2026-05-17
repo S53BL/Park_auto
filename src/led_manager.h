@@ -167,3 +167,14 @@ bool        led_mgr_ok();
 // Namenjeno: web UI, LCD, prihodnje izklapljanje LED taskov.
 void led_mgr_set_ready(bool ready);
 bool led_mgr_is_ready();
+
+// ============================================================
+// ALARM BLINK
+// ============================================================
+
+// Začni alarm utripanje — rdeča 1s / modra 1s, ponavljanje.
+// Kliči ko je alarm TRIGGERED. Ustavi se z led_mgr_alarm_blink_stop().
+void led_mgr_alarm_blink_start();
+
+// Ustavi alarm utripanje in vrne LED v mirovanje (izklopljene).
+void led_mgr_alarm_blink_stop();

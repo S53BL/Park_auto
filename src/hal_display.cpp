@@ -60,6 +60,8 @@ public:
 #include "screen_service.h"
 #include "screen_party.h"
 #include "screen_main.h"
+#include "screen_alarm.h"
+#include "alarm.h"
 #include "light_logic.h"
 #include "hal_radar.h"
 #include "hal_tof.h"
@@ -276,6 +278,23 @@ static void _calc_core_usage(uint8_t& c0_out, uint8_t& c1_out) {
 // Ko bodo implementirani novi moduli, SAMO DODAJ klice tukaj —
 // ne ustvari novih timerjev ali direktnih klicev iz taskov.
 static void ui_refresh_cb(lv_timer_t*) {
+    // Alarm screen preklop — preveri stanje pred vsemi ostalimi posodobitvami.
+    // Kliče se v lvglTask kontekstu — LVGL klici so varni.
+    if (alarm_ok()) {
+        AlarmState as = alarm_get_state();
+        bool should_show = as.active;
+
+        if (should_show && !screen_alarm_is_active()) {
+            screen_alarm_show(as.state);
+        } else if (!should_show && screen_alarm_is_active()) {
+            screen_alarm_hide();
+        } else if (should_show && screen_alarm_is_active()) {
+            screen_alarm_update(as.state);
+        }
+
+        if (screen_alarm_is_active()) return;
+    }
+
     if (!light_logic_ok()) return;
 
     LightLogicState st = light_logic_get_state();
@@ -621,6 +640,13 @@ bool hal_display_init() {
         lv_mem_monitor_t mon;
         lv_mem_monitor(&mon);
         DISPI("LVGL heap po screen_party: free=%u B frag=%d%%",
+              mon.free_size, mon.frag_pct);
+    }
+    screen_alarm_init();
+    {
+        lv_mem_monitor_t mon;
+        lv_mem_monitor(&mon);
+        DISPI("LVGL heap po screen_alarm: free=%u B frag=%d%%",
               mon.free_size, mon.frag_pct);
     }
     DISPI("Zasloni OK");

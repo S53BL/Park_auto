@@ -69,6 +69,7 @@
 #pragma once
 #include <Arduino.h>
 #include <stdint.h>
+#include "alarm.h"
 
 // ============================================================
 // SSR STANJE — za prikaz na zaslonu in web API
@@ -102,6 +103,9 @@ struct LightLogicState {
     float    lux;           // zadnja izmerjena vrednost lux
     bool     any_motion;    // OR vseh 4 radar kanalov
     uint32_t last_motion_ms;// millis() zadnjega gibanja
+    // Alarm stanje (za LCD polling in web UI)
+    bool           alarm_active;
+    AlarmStateEnum alarm_state;
 };
 
 // ============================================================

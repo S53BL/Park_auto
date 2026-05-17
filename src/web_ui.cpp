@@ -1,9 +1,11 @@
 // ============================================================
 // web_ui.cpp — Web UI implementacija (REST API + statične datoteke)
 // Projekt : Avtomatizacija Pokritega Parkirišča
-// Verzija : 3.3.0  |  Datum: 2026-05
+// Verzija : 3.4.0  |  Datum: 2026-05
 // ============================================================
 //
+// v3.4.0: alarm sistem — GET/POST /api/alarm, /api/alarm/test, /api/alarm/pin;
+//         alarm stanje v /api/status/light; decisions.md ADR-012, ADR-013
 // v3.3.0: _sendJson PSRAM fix — JsonDocument & _json_buf v PSRAM, brez cbuf leak
 //         ob TCP RST. AsyncBasicResponse namesto AsyncResponseStream.
 // v3.2.0: AsyncWebServer dinamična kreacija pred begin() — fiksira tcp_accept
@@ -33,6 +35,7 @@
 // ============================================================
 
 #include "web_ui.h"
+#include "alarm.h"
 #include "signal_led.h"
 #include "logger.h"
 #include "sd_mgr.h"
@@ -153,6 +156,18 @@ static void _handleStatusLight(AsyncWebServerRequest* req) {
     else if (gpio.rampagor) doc["ramp"] = "up";
     else                    doc["ramp"] = "down";
     doc["door"] = gpio.vrataod ? "open" : "closed";
+
+    // Alarm stanje
+    if (alarm_ok()) {
+        AlarmState as = alarm_get_state();
+        JsonObject alarmObj = doc["alarm"].to<JsonObject>();
+        alarmObj["active"] = as.active;
+        const char* astate = "OFF";
+        if (as.state == AlarmStateEnum::ARMED)     astate = "ARMED";
+        if (as.state == AlarmStateEnum::TRIGGERED) astate = "TRIGGERED";
+        alarmObj["state"]           = astate;
+        alarmObj["callback_url_set"] = as.callback_url_set;
+    }
 
     JsonArray parkArr = doc["parking"].to<JsonArray>();
     const char* vrStateStr[4] = {"EMPTY_CAL","EMPTY_UNCAL","OCC_UNKNOWN","OCC_KNOWN"};
@@ -1053,6 +1068,139 @@ static void _handleNotFound(AsyncWebServerRequest* req) {
 // SECTION 4 — REGISTRACIJA HANDLERJEV
 // ============================================================
 
+// ============================================================
+// SECTION 3 — HANDLER-JI: /api/alarm
+// ============================================================
+
+static void _handleAlarmGet(AsyncWebServerRequest* req) {
+    _stats.req_total++;
+    _stats.req_api++;
+    LOG_DEBUG(TAG, "GET /api/alarm");
+
+    AlarmState as = alarm_get_state();
+    JsonDocument doc(&s_psram_alloc);
+
+    const char* state_str = "OFF";
+    if (as.state == AlarmStateEnum::ARMED)     state_str = "ARMED";
+    if (as.state == AlarmStateEnum::TRIGGERED) state_str = "TRIGGERED";
+
+    doc["state"]            = state_str;
+    doc["active"]           = as.active;
+    doc["permanent"]        = as.permanent;
+    doc["duration_s"]       = as.duration_s;
+    doc["remaining_s"]      = as.remaining_s;
+    doc["grace_s"]          = as.grace_s;
+    doc["callback_url_set"] = as.callback_url_set;
+    doc["trigger_count"]    = as.trigger_count;
+    doc["callback_sent"]    = as.callback_sent;
+    doc["callback_failed"]  = as.callback_failed;
+    doc["pin_len"]          = as.pin_len;
+
+    _sendJson(req, 200, doc);
+}
+
+static void _handleAlarmPost(AsyncWebServerRequest* req, uint8_t* data,
+                              size_t len, size_t index, size_t total) {
+    _stats.req_total++;
+    _stats.req_api++;
+    if (index + len < total) return;
+
+    JsonDocument doc(&s_psram_alloc);
+    if (deserializeJson(doc, data, len)) {
+        _sendError(req, 400, "invalid JSON");
+        return;
+    }
+
+    if (!doc["state"].is<const char*>()) {
+        _sendError(req, 400, "missing 'state' field (on|off)");
+        return;
+    }
+
+    String state = doc["state"].as<String>();
+    state.toLowerCase();
+
+    if (state == "off") {
+        alarm_disarm();
+        LOG_INFO(TAG, "POST /api/alarm: disarm");
+        JsonDocument resp(&s_psram_alloc);
+        resp["ok"]    = true;
+        resp["state"] = "OFF";
+        _sendJson(req, 200, resp);
+        return;
+    }
+
+    if (state == "on") {
+        AlarmArmParams params = {};
+        params.duration_s = doc["duration_seconds"].is<uint32_t>()
+                            ? (uint32_t)doc["duration_seconds"].as<uint32_t>() : 0;
+
+        if (doc["callback_url"].is<const char*>()) {
+            strlcpy(params.callback_url, doc["callback_url"].as<const char*>(),
+                    sizeof(params.callback_url));
+        }
+
+        if (doc["grace_s"].is<uint32_t>()) {
+            alarm_set_grace_s(doc["grace_s"].as<uint32_t>());
+        }
+
+        if (!alarm_arm(params)) {
+            _sendError(req, 400, "arm failed — preverite parametre");
+            return;
+        }
+
+        LOG_INFO(TAG, "POST /api/alarm: armed (duration=%lu s)", (unsigned long)params.duration_s);
+        JsonDocument resp(&s_psram_alloc);
+        resp["ok"]          = true;
+        resp["state"]       = "ARMED";
+        resp["duration_s"]  = params.duration_s;
+        resp["permanent"]   = (params.duration_s == 0);
+        _sendJson(req, 200, resp);
+        return;
+    }
+
+    _sendError(req, 400, "state mora biti 'on' ali 'off'");
+}
+
+static void _handleAlarmTest(AsyncWebServerRequest* req) {
+    _stats.req_total++;
+    _stats.req_api++;
+    LOG_INFO(TAG, "POST /api/alarm/test — test blink");
+    alarm_test_blink();
+    JsonDocument doc(&s_psram_alloc);
+    doc["ok"]  = true;
+    doc["msg"] = "test blink start";
+    _sendJson(req, 200, doc);
+}
+
+static void _handleAlarmPinPost(AsyncWebServerRequest* req, uint8_t* data,
+                                size_t len, size_t index, size_t total) {
+    _stats.req_total++;
+    _stats.req_api++;
+    if (index + len < total) return;
+
+    JsonDocument doc(&s_psram_alloc);
+    if (deserializeJson(doc, data, len)) {
+        _sendError(req, 400, "invalid JSON");
+        return;
+    }
+    if (!doc["pin"].is<const char*>()) {
+        _sendError(req, 400, "missing 'pin' field");
+        return;
+    }
+
+    const char* pin = doc["pin"].as<const char*>();
+    if (!alarm_set_pin(pin)) {
+        _sendError(req, 400, "neveljaven PIN (4-8 stevilk)");
+        return;
+    }
+
+    LOG_INFO(TAG, "POST /api/alarm/pin: PIN spremenjen");
+    JsonDocument resp(&s_psram_alloc);
+    resp["ok"]      = true;
+    resp["pin_len"] = strlen(pin);
+    _sendJson(req, 200, resp);
+}
+
 static void _registerHandlers() {
     // CORS preflight
     _server->on("/*", HTTP_OPTIONS, [](AsyncWebServerRequest* req) {
@@ -1102,6 +1250,20 @@ static void _registerHandlers() {
         [](AsyncWebServerRequest* req) {},
         nullptr,
         _handleSsrPost
+    );
+
+    // Alarm
+    _server->on("/api/alarm", HTTP_GET, _handleAlarmGet);
+    _server->on("/api/alarm", HTTP_POST,
+        [](AsyncWebServerRequest* req) {},
+        nullptr,
+        _handleAlarmPost
+    );
+    _server->on("/api/alarm/test", HTTP_POST, _handleAlarmTest);
+    _server->on("/api/alarm/pin", HTTP_POST,
+        [](AsyncWebServerRequest* req) {},
+        nullptr,
+        _handleAlarmPinPost
     );
 
     // Diagnostika — brez LittleFS, testira ali handlerji odgovarjajo

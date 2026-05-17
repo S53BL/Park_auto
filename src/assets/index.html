@@ -50,6 +50,8 @@
     <button class="nav-tab"        onclick="nav('diagnostika')">Diagnostika</button>
     <button class="nav-tab"        onclick="nav('logs')">Logi</button>
     <button class="nav-tab"        onclick="nav('system')">Sistem</button>
+    <button class="nav-tab"        onclick="nav('vehicles')">Vozila</button>
+    <button class="nav-tab"        onclick="nav('alarm')">Alarm</button>
   </nav>
 </div>
 
@@ -67,6 +69,12 @@
 
   <!-- SISTEM (pull na klik) -->
   <div id="page-system" class="page"></div>
+
+  <!-- VOZILA (pull na klik) -->
+  <div id="page-vehicles" class="page"></div>
+
+  <!-- ALARM (polling 3s) -->
+  <div id="page-alarm" class="page"></div>
 
 </div>
 
@@ -97,6 +105,8 @@ const PAGES = {
   diagnostika:'/diagnostika.js',
   logs:       '/logs.js',
   system:     '/system.js',
+  vehicles:   '/vehicles.js',
+  alarm:      '/alarm.js',
 };
 
 // ── Navigacija ───────────────────────────────────────────

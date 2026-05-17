@@ -17,6 +17,9 @@
 void screen_main_create(lv_obj_t* parent);
 void screen_main_apply_updates();
 
+// Vrne referenco na screen_main LVGL objekt (za screen_alarm_hide).
+lv_obj_t* screen_main_get_screen();
+
 // Direktni setterji — kliče hal_display.cpp iz ui_refresh_cb (LVGL timer kontekst)
 void screen_main_set_ssr(uint8_t idx, const SsrDisplayData& data);
 void screen_main_set_parking(uint8_t idx, const ParkingDisplayData& data);

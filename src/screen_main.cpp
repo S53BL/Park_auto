@@ -212,6 +212,7 @@ static lv_obj_t*   s_topbar            = nullptr;
 static lv_obj_t*   s_topbar_icon       = nullptr;
 static lv_obj_t*   s_topbar_lux        = nullptr;
 static bool        s_created           = false;
+static lv_obj_t*   s_parent_scr        = nullptr;  // screen_alarm_hide() se vrne na ta objekt; brez getterja bi moral screen_alarm vključiti screen_main internals
 
 static const char* SSR_NAMES[4]   = { "Glavna\nveriga", "Glavna\ndodatno", "Pred\ngaražo", "Pred\nlopo" };
 static const char* RADAR_NAMES[4] = { "Vhod", "Cesta L", "Cesta D", "Garaža" };
@@ -1257,6 +1258,7 @@ static void topbar_create(lv_obj_t* parent) {
 // ============================================================
 
 void screen_main_create(lv_obj_t* parent) {
+    s_parent_scr = parent;
     SMNI("screen_main_create...");
     lv_obj_set_style_bg_color(parent, C_SCREEN_BG, LV_PART_MAIN);
     lv_obj_set_style_pad_all(parent, 0, LV_PART_MAIN);
@@ -1370,4 +1372,8 @@ void screen_main_set_daynight(bool is_night, float lux) {
         snprintf(buf, sizeof(buf), "%.0f lx", lux);
         lv_label_set_text(s_topbar_lux, buf);
     }
+}
+
+lv_obj_t* screen_main_get_screen() {
+    return s_parent_scr;
 }
