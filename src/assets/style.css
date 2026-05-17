@@ -390,12 +390,14 @@ html, body {
   height: 460px;
   overflow-y: auto;
   overflow-x: hidden;
+  white-space: pre-wrap;
+  word-break: break-all;
   scrollbar-width: thin;
   scrollbar-color: var(--border2) transparent;
 }
 
-/* ll-* razredi — skupni za #log-output in .log-output-sm (SD preview) */
-.ll        { line-height: 1.6; padding: 0 2px; word-break: break-all; }
+/* ll-* razredi — span elementi znotraj pre-wrap containerja.
+   Vsaka vrstica je <span class="ll ll-X">...</span>\n — \n zagotavlja ločevanje. */
 .ll-error  { color: var(--red); }
 .ll-warn   { color: var(--amber); }
 .ll-info   { color: var(--text); }
@@ -403,7 +405,8 @@ html, body {
 .ll-ts     { color: var(--text3); }
 .ll-mod    { color: var(--cyan); }
 .ll-empty  { color: var(--text3); font-family: var(--font);
-             font-size: 11px; text-align: center; padding: 20px; }
+             font-size: 11px; display: block; text-align: center; padding: 20px;
+             white-space: normal; }
 
 /* SD log preview window */
 .log-output-sm {
@@ -417,6 +420,8 @@ html, body {
   height: 320px;
   overflow-y: auto;
   overflow-x: hidden;
+  white-space: pre-wrap;
+  word-break: break-all;
   scrollbar-width: thin;
   scrollbar-color: var(--border2) transparent;
 }

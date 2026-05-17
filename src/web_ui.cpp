@@ -314,13 +314,10 @@ static void _handleLogsGet(AsyncWebServerRequest* req) {
         if (n > 0 && n <= 1000) max_lines = (uint16_t)n;
     }
 
-    // Log buffer v PSRAM — ne SRAM
+    // Log buffer v PSRAM
     char* buf = (char*)ps_malloc(WEB_LOG_BUF_SIZE);
     if (!buf) buf = (char*)malloc(WEB_LOG_BUF_SIZE);
-    if (!buf) {
-        _sendError(req, 503, "out of memory");
-        return;
-    }
+    if (!buf) { _sendError(req, 503, "out of memory"); return; }
 
     size_t len = logger_get_recent(buf, WEB_LOG_BUF_SIZE, max_lines);
     buf[len] = '\0';
@@ -332,12 +329,18 @@ static void _handleLogsGet(AsyncWebServerRequest* req) {
         lvl_filter.toUpperCase();
     }
 
-    // Streaming prek AsyncResponseStream — brez JsonDocument, 0 B SRAM heap alokacije.
-    // FORMAT: ["vrstica1","vrstica2",...] — veljaven JSON array.
-    // Optimizacija ohranjena iz v2.0 — veljavna tudi z AsyncTCP.
-    AsyncResponseStream* resp = req->beginResponseStream("application/json");
-    resp->addHeader("Cache-Control", "no-cache");
-    resp->print("[");
+    // JSON izhod v ločenem PSRAM bufferju.
+    // AsyncResponseStream::_fillBuffer kliče StreamString::read() → String::remove(0,1)
+    // → memmove celotnega preostalega stringa za vsak bajt → O(n²) → WDT crash pri >~5 KB.
+    // Rešitev: predhodno sestavimo JSON v PSRAM, pošljemo prek AwsResponseFiller
+    // (direkten memcpy iz PSRAM v TCP buffer) → O(n) skupaj, brez memmove.
+    const size_t JSON_BUF = WEB_LOG_BUF_SIZE * 2 + 32;  // worst case: vsak znak escaped
+    char* json = (char*)ps_malloc(JSON_BUF);
+    if (!json) json = (char*)malloc(JSON_BUF);
+    if (!json) { free(buf); _sendError(req, 503, "out of memory"); return; }
+
+    size_t jpos = 0;
+    json[jpos++] = '[';
 
     bool first = true;
     char* line = buf;
@@ -358,26 +361,38 @@ static void _handleLogsGet(AsyncWebServerRequest* req) {
                                                            strstr(line, ":INFO]")  != nullptr);
             }
 
-            if (include) {
-                if (!first) resp->print(",");
+            if (include && jpos + llen * 2 + 4 < JSON_BUF - 2) {
+                if (!first) json[jpos++] = ',';
                 first = false;
-                resp->print("\"");
+                json[jpos++] = '"';
                 for (size_t i = 0; i < llen; i++) {
                     char c = line[i];
-                    if      (c == '"')  resp->print("\\\"");
-                    else if (c == '\\') resp->print("\\\\");
+                    if      (c == '"')  { json[jpos++] = '\\'; json[jpos++] = '"';  }
+                    else if (c == '\\') { json[jpos++] = '\\'; json[jpos++] = '\\'; }
                     else if (c == '\r') { /* skip */ }
-                    else if (c < 0x20)  resp->print(' ');
-                    else                resp->write((uint8_t)c);
+                    else if (c < 0x20)  json[jpos++] = ' ';
+                    else                json[jpos++] = c;
                 }
-                resp->print("\"");
+                json[jpos++] = '"';
             }
         }
         line = nl ? nl + 1 : end;
     }
 
-    resp->print("]");
+    json[jpos++] = ']';
+    json[jpos]   = '\0';
     free(buf);
+
+    size_t json_len = jpos;
+    AsyncWebServerResponse* resp = req->beginResponse(
+        "application/json", json_len,
+        [json, json_len](uint8_t* outBuf, size_t maxLen, size_t index) -> size_t {
+            if (index >= json_len) { free(json); return 0; }
+            size_t n = (json_len - index < maxLen) ? (json_len - index) : maxLen;
+            memcpy(outBuf, (const uint8_t*)json + index, n);
+            return n;
+        });
+    resp->addHeader("Cache-Control", "no-cache");
     req->send(resp);
 }
 
@@ -940,6 +955,7 @@ static void _handleFilesGet(AsyncWebServerRequest* req) {
         f["path"]       = entries[i].path;
         f["size_bytes"] = entries[i].size_bytes;
         f["date"]       = entries[i].date;
+        f["is_dir"]     = entries[i].is_dir;
     }
     doc["disk_total_mb"] = (uint32_t)(sd_mgr_total_bytes() / (1024ULL * 1024ULL));
     doc["disk_free_mb"]  = (uint32_t)(sd_mgr_free_bytes()  / (1024ULL * 1024ULL));

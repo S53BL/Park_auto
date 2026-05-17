@@ -353,20 +353,31 @@ int sd_mgr_list_files(const char* path, SdFileInfo* out, int max_cnt) {
         return 0;
     }
 
+    // Zagotovi trailing slash za pravilno sestavljanje poti
+    size_t plen = strlen(path);
+    const char* sep = (plen > 0 && path[plen - 1] == '/') ? "" : "/";
+
     int cnt = 0;
     File entry = root.openNextFile();
     while (entry && cnt < max_cnt) {
-        if (!entry.isDirectory()) {
-            const char* name = entry.name();
+        const char* name = entry.name();
+        bool isDir = entry.isDirectory();
 
-            strncpy(out[cnt].name, name, sizeof(out[cnt].name) - 1);
-            out[cnt].name[sizeof(out[cnt].name) - 1] = '\0';
+        strncpy(out[cnt].name, name, sizeof(out[cnt].name) - 1);
+        out[cnt].name[sizeof(out[cnt].name) - 1] = '\0';
 
-            snprintf(out[cnt].path, sizeof(out[cnt].path), "%s%s", path, name);
+        // Mapa dobi trailing slash v poti da jo JS uporabi kot dir param
+        if (isDir) {
+            snprintf(out[cnt].path, sizeof(out[cnt].path), "%s%s%s/", path, sep, name);
+        } else {
+            snprintf(out[cnt].path, sizeof(out[cnt].path), "%s%s%s", path, sep, name);
+        }
 
-            out[cnt].size_bytes = (uint32_t)entry.size();
+        out[cnt].is_dir     = isDir;
+        out[cnt].size_bytes = isDir ? 0 : (uint32_t)entry.size();
 
-            // Datum iz imena (log_YYYYMMDD.txt) ali "unknown"
+        // Datum iz imena (log_YYYYMMDD.txt) ali "unknown" — samo za datoteke
+        if (!isDir) {
             uint32_t d = extract_date_from_filename(name);
             if (d > 0) {
                 snprintf(out[cnt].date, sizeof(out[cnt].date), "%04u-%02u-%02u",
@@ -374,16 +385,18 @@ int sd_mgr_list_files(const char* path, SdFileInfo* out, int max_cnt) {
             } else {
                 strncpy(out[cnt].date, "unknown", sizeof(out[cnt].date));
             }
-
-            cnt++;
+        } else {
+            out[cnt].date[0] = '\0';
         }
+
+        cnt++;
         entry.close();
         entry = root.openNextFile();
     }
     root.close();
     give_mutex();
 
-    SD_D("list_files(%s): %d datotek", path, cnt);
+    SD_D("list_files(%s): %d vnosov", path, cnt);
     return cnt;
 }
 

@@ -97,6 +97,7 @@ struct SdFileInfo {
     char     path[128];     // polna pot
     uint32_t size_bytes;    // velikost
     char     date[16];      // datum iz imena datoteke ali "unknown"
+    bool     is_dir;        // true = mapa
 };
 
 // Napolni array z vsebino mape.

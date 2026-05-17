@@ -23,7 +23,7 @@
   const DIV          = 'page-logs';
   const DOM_LIMIT    = 500;     // max vrstic v log-output DOM-u
   const POLL_MS      = 5000;    // interval pollinga RAM logov
-  const LINES_FETCH  = 500;     // koliko vrstic zahtevamo od API
+  const LINES_FETCH  = 200;     // koliko vrstic zahtevamo od API
 
   let _lastLines  = [];         // zadnje prejete vrstice (nefiltriran buffer)
   let _autoScroll = true;
@@ -37,25 +37,32 @@
   // ali krajši:         [14:32:01] [WARN:WEBUI] sporočilo
 
   function _levelOf(line) {
-    if (line.includes(':ERROR]') || line.includes('[ERROR]')) return 'error';
-    if (line.includes(':WARN]')  || line.includes('[WARN]'))  return 'warn';
-    if (line.includes(':DEBUG]') || line.includes('[DEBUG]')) return 'debug';
-    return 'info';
+    // Format: "HH:MM:SS|[TAG:E] msg"  (E/W/I/D — ena črka)
+    const m = line.match(/\[[A-Z0-9_]+:([EWID])\]/);
+    if (!m) return 'info';
+    return {E: 'error', W: 'warn', D: 'debug'}[m[1]] || 'info';
   }
+
+  // Barve hardkodirane — brez odvisnosti od style.css (prepreči browser cache problem)
+  const _COL = { error:'#ef4444', warn:'#f59e0b', debug:'#4a5570', info:'#c8d0e0' };
+  const _COL_TS  = '#4a5570';   // timestamp
+  const _COL_MOD = '#06b6d4';   // modul tag
 
   function _colorLine(line) {
     const lvl = _levelOf(line);
+    const col = _COL[lvl];
     const escaped = line
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;');
 
-    // Obarvaj: [timestamp] → ll-ts, [NIVO:MODUL] → ll-mod, ostalo ostane
-    const fmt2 = escaped
-      .replace(/(\[[^\]]{5,25}\])/,            '<span class="ll-ts">$1</span>')
-      .replace(/\[([A-Z]+:[A-Z0-9_]+)\]/,      '<span class="ll-mod">[$1]</span>');
+    // Format: "14:32:01|[TAG:L] msg"  ali  "M0000123456|[TAG:L] msg"
+    // Container ima white-space:pre-wrap, \n med spani = nova vrstica.
+    const fmt = escaped
+      .replace(/^(\d{2}:\d{2}:\d{2}|M\d{6,12})/, `<span style="color:${_COL_TS}">$1</span>`)
+      .replace(/(\[[A-Z0-9_]+:[EWID]\])/, `<span style="color:${_COL_MOD}">$1</span>`);
 
-    return `<div class="ll ll-${lvl}">${fmt2}</div>`;
+    return `<span style="color:${col}">${fmt}</span>`;
   }
 
   function _applyFilter(lines) {
@@ -91,7 +98,7 @@
       out.innerHTML = '<div class="ll-empty">Ni logov' +
         (_filterLvl !== 'ALL' || _filterMod ? ' (aktiven filter)' : '') + '</div>';
     } else {
-      out.innerHTML = visible.map(_colorLine).join('');
+      out.innerHTML = visible.map(_colorLine).join('\n');
     }
 
     // Šteje: filtered / total
@@ -109,8 +116,7 @@
   async function _pollLogs() {
     if (_paused) return;
     try {
-      const url = '/api/logs?lines=' + LINES_FETCH +
-                  (_filterLvl !== 'ALL' ? '&level=' + _filterLvl : '');
+      const url = '/api/logs?lines=' + LINES_FETCH;
       const d = await api.get(url);
       _lastLines = Array.isArray(d) ? d : (d.lines || d || []);
       _renderLogs();
@@ -195,11 +201,11 @@
       // Prikaži zadnjih 200 vrstic (datoteka je lahko velika)
       const tail  = lines.slice(-200);
       output.innerHTML = tail.length
-        ? tail.map(_colorLine).join('')
-        : '<div class="ll-empty">Prazna datoteka</div>';
+        ? tail.map(_colorLine).join('\n')
+        : '<span class="ll-empty">Prazna datoteka</span>';
       output.scrollTop = output.scrollHeight;
     } catch(e) {
-      output.innerHTML = `<div class="ll ll-error">Napaka: ${e.message}</div>`;
+      output.innerHTML = `<span class="ll-error">Napaka: ${e.message}</span>`;
     }
   };
 
@@ -259,7 +265,7 @@
       });
 
       tbody.innerHTML = files.map(f => {
-        const isDir = f.is_dir || f.size_bytes === 0 && !f.name.includes('.');
+        const isDir = !!f.is_dir;
         if (isDir) {
           return `<tr>
             <td class="mono" style="cursor:pointer;color:var(--accent)"
@@ -345,8 +351,8 @@
     </div>
   </div>
 
-  <!-- Log output -->
-  <div id="log-output"></div>
+  <!-- Log output — white-space:pre-wrap inline, neodvisno od style.css -->
+  <div id="log-output" style="white-space:pre-wrap;overflow-wrap:break-word"></div>
 
   <!-- Footer stats -->
   <div class="flex-row mt8" style="color:var(--text3);font-size:11px;font-family:var(--font);flex-wrap:wrap;gap:8px">
@@ -400,7 +406,7 @@
         <button class="btn btn-sm" onclick="sdLogPreviewClose()">✕ Zapri</button>
       </div>
     </div>
-    <div id="sdlog-preview-output" class="log-output-sm"></div>
+    <div id="sdlog-preview-output" class="log-output-sm" style="white-space:pre-wrap;overflow-wrap:break-word"></div>
   </div>
 </div>
 
@@ -491,44 +497,8 @@
     _renderLogs();
   };
 
-  // ── CSS za log output (dodan inline ker CSS ne podpira dynamic) ─
-  // Doda style za log-output-sm (SD preview) in ll-* razrede
-  // Samo enkrat ob prvem renderju
-  function _ensureStyles() {
-    if (document.getElementById('logs-extra-css')) return;
-    const s = document.createElement('style');
-    s.id = 'logs-extra-css';
-    s.textContent = `
-      .log-output-sm {
-        font-family: var(--font);
-        font-size: 11px;
-        line-height: 1.6;
-        background: var(--bg);
-        border: 1px solid var(--border);
-        border-radius: var(--radius);
-        padding: 10px 12px;
-        height: 320px;
-        overflow-y: auto;
-        overflow-x: hidden;
-        scrollbar-width: thin;
-        scrollbar-color: var(--border2) transparent;
-      }
-      .ll        { line-height: 1.6; padding: 0 2px; }
-      .ll-error  { color: var(--red); }
-      .ll-warn   { color: var(--amber); }
-      .ll-info   { color: var(--text); }
-      .ll-debug  { color: var(--text3); }
-      .ll-ts     { color: var(--text3); }
-      .ll-mod    { color: var(--cyan); }
-      .ll-empty  { color: var(--text3); font-family: var(--font);
-                   font-size: 11px; text-align: center; padding: 20px; }
-    `;
-    document.head.appendChild(s);
-  }
-
   // ── Init ─────────────────────────────────────────────────
   window.page_logs = function () {
-    _ensureStyles();
     if (!document.getElementById('log-output')) _render();
     registerPoller('logs', _pollLogs, POLL_MS);
   };
