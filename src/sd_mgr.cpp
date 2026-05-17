@@ -32,6 +32,7 @@
 #include <freertos/semphr.h>
 #include <time.h>
 #include <sys/stat.h>
+#include <esp_heap_caps.h>
 
 // ============================================================
 // LOGGING — direkten Serial (logger.cpp še ni inicializiran ob sd_mgr_init())
@@ -525,21 +526,32 @@ int sd_mgr_keep_newest_n(const char* path, uint16_t n) {
     if (!s_ready || !path || n == 0) return 0;
     if (!take_mutex(500)) return 0;
 
-    // Poberi imana vseh datotek v mapi (max 200)
-    static char names[200][64];
+    // Poberi imena vseh datotek v mapi (max 200) — buffer v PSRAM
+    static const int NAMES_MAX = 200;
+    static const int NAME_LEN  = 64;
+    char* names_buf = (char*)heap_caps_malloc((size_t)NAMES_MAX * NAME_LEN, MALLOC_CAP_SPIRAM);
+    if (!names_buf) names_buf = (char*)malloc((size_t)NAMES_MAX * NAME_LEN);
+    if (!names_buf) {
+        give_mutex();
+        return 0;
+    }
+    // Makro za dostop do names_buf kot 2D array
+    #define NAME(i) (names_buf + (i) * NAME_LEN)
+
     int total = 0;
 
     File root = SD_MMC.open(path);
     if (!root || !root.isDirectory()) {
+        heap_caps_free(names_buf);
         give_mutex();
         return 0;
     }
 
     File entry = root.openNextFile();
-    while (entry && total < 200) {
+    while (entry && total < NAMES_MAX) {
         if (!entry.isDirectory()) {
-            strncpy(names[total], entry.name(), 63);
-            names[total][63] = '\0';
+            strncpy(NAME(total), entry.name(), NAME_LEN - 1);
+            NAME(total)[NAME_LEN - 1] = '\0';
             total++;
         }
         entry.close();
@@ -548,19 +560,19 @@ int sd_mgr_keep_newest_n(const char* path, uint16_t n) {
     root.close();
 
     if (total <= (int)n) {
+        heap_caps_free(names_buf);
         give_mutex();
         return 0;
     }
 
     // Sortiraj abecedno (=kronološko ker format YYYYMMDD_HHMMSS_)
-    // Bubble sort — majhen N (max ~100), dovolj hitro
     for (int i = 0; i < total - 1; i++) {
         for (int j = 0; j < total - i - 1; j++) {
-            if (strcmp(names[j], names[j + 1]) > 0) {
-                char tmp[64];
-                strncpy(tmp, names[j], 63);
-                strncpy(names[j], names[j + 1], 63);
-                strncpy(names[j + 1], tmp, 63);
+            if (strcmp(NAME(j), NAME(j + 1)) > 0) {
+                char tmp[NAME_LEN];
+                strncpy(tmp,      NAME(j),     NAME_LEN - 1);
+                strncpy(NAME(j),  NAME(j + 1), NAME_LEN - 1);
+                strncpy(NAME(j + 1), tmp,      NAME_LEN - 1);
             }
         }
     }
@@ -570,7 +582,7 @@ int sd_mgr_keep_newest_n(const char* path, uint16_t n) {
     int deleted = 0;
     char full[192];
     for (int i = 0; i < del_count; i++) {
-        snprintf(full, sizeof(full), "%s/%s", path, names[i]);
+        snprintf(full, sizeof(full), "%s/%s", path, NAME(i));
         if (SD_MMC.remove(full)) {
             deleted++;
             SD_D("keep_newest_n: pobrisal %s", full);
@@ -579,6 +591,8 @@ int sd_mgr_keep_newest_n(const char* path, uint16_t n) {
         }
     }
 
+    #undef NAME
+    heap_caps_free(names_buf);
     give_mutex();
     return deleted;
 }

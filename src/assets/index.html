@@ -202,12 +202,20 @@ window.fmt = {
 };
 
 // ── Boot — naloži Nastavitve kot prvo stran ──────────────
-(function boot() {
+// DOMContentLoaded čaka da alpine.min.js (defer) konča prenos IN izvajanje.
+// S tem je settings.js prenos serializiran — ne tekmuje z 16 KB alpine.min.js.
+// Brez tega: 3 vzporedne zahteve (style.css + alpine.min.js + settings.js) +
+// TCP self-connect iz wifiTask = 5 konekcij, MAX_ACTIVE_TCP=4 zavrne 5. z RST.
+document.addEventListener('DOMContentLoaded', function() {
   const sc = document.createElement('script');
   sc.src = PAGES.settings;
   sc.onload = () => { _loaded.settings = true; if (typeof page_settings === 'function') page_settings(); };
+  sc.onerror = () => {
+    document.getElementById('page-settings').innerHTML =
+      '<div class="empty-state">Napaka pri nalaganju ' + PAGES.settings + '</div>';
+  };
   document.head.appendChild(sc);
-})();
+});
 </script>
 
 </body>

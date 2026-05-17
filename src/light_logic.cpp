@@ -957,8 +957,17 @@ void appTask(void* pvParams) {
     }
 
     // Identifikacija vozil — zahteva LittleFS (inicializiran v bsp) in config_mgr
-    if (!vehicle_recog_init()) {
-        LLI("vehicle_recog_init NAPAKA — identifikacija vozil onemogočena");
+    {
+        uint32_t heap_before = esp_get_free_heap_size();
+        uint32_t psram_before = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+        if (!vehicle_recog_init()) {
+            LLI("vehicle_recog_init NAPAKA — identifikacija vozil onemogočena");
+        }
+        uint32_t heap_after  = esp_get_free_heap_size();
+        uint32_t psram_after = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+        LLI("vehicle_recog_init: SRAM heap %u→%u (delta -%d B), PSRAM %u→%u (delta -%d B)",
+            heap_before, heap_after,  (int)(heap_before - heap_after),
+            psram_before, psram_after, (int)(psram_before - psram_after));
     }
     parking_log_init();
 

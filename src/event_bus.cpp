@@ -22,7 +22,7 @@ struct HandlerSlot {
     bool         active   = false;
 };
 
-static constexpr uint16_t MAX_TOTAL_HANDLERS = 128;
+static constexpr uint16_t MAX_TOTAL_HANDLERS = 40;  // 31 subscribe klicev v kodi + 9 rezerva
 static HandlerSlot       s_handlers[MAX_TOTAL_HANDLERS];
 static uint16_t          s_handler_count    = 0;
 static SemaphoreHandle_t s_mutex            = nullptr;

@@ -520,16 +520,19 @@ void wifiTask(void* pvParams) {
 
     while (true) {
         // --------------------------------------------------------
-        // TCP SELF-CONNECT TEST — enkraten, 2s po vstopu v zanko
+        // TCP SELF-CONNECT TEST — enkraten, 30s po web_ui_begin()
+        // 30s zagotavlja da je browser že naložil stran in sprostil PCB-je.
+        // 2s je prekratko — tekmuje z brskalnikovo vzporedno inicializacijo
+        // (style.css + alpine.min.js + settings.js), MAX_ACTIVE_TCP=6 je zaseden.
         // --------------------------------------------------------
-        if (!tcp_self_test_done && web_ui_running() && (millis() - _web_start_ms) >= 2000) {
+        if (!tcp_self_test_done && web_ui_running() && (millis() - _web_start_ms) >= 30000) {
             tcp_self_test_done = true;
             WiFiClient client;
             if (client.connect("192.168.2.170", 80)) {
                 WF_I("TCP self-connect 192.168.2.170:80 → USPEL");
                 client.stop();
             } else {
-                WF_I("TCP self-connect 192.168.2.170:80 → NEUSPEL");
+                WF_I("TCP self-connect 192.168.2.170:80 → NEUSPEL (server morda ne posluša)");
             }
         }
         uint32_t now_ms = millis();

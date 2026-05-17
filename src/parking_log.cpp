@@ -9,17 +9,18 @@
 #include "logger.h"
 #include <time.h>
 #include <math.h>
+#include <esp_heap_caps.h>
 
 #define PL_TAG "PLOG"
 
 #define PL_DIR      "/parking"
 #define PL_CSV_PATH "/parking/parking_log.csv"
 
-// RAM krožni buffer za akumulacijo novih vrstic pred SD flushom
+// CSV akumulacijski buffer — alociran v PSRAM ob parking_log_init()
 #define PL_BUF_SIZE     10240
 #define PL_FLUSH_THRESH (PL_BUF_SIZE * 80 / 100)
 
-static char     s_buf[PL_BUF_SIZE];
+static char*    s_buf         = nullptr;
 static int      s_buf_used    = 0;
 static bool     s_init_ok     = false;
 static uint32_t s_last_flush_ms = 0;
@@ -152,6 +153,15 @@ static void on_event(const Event& evt) {
 // -----------------------------------------------------------------------------
 
 bool parking_log_init(void) {
+    if (!s_buf) {
+        s_buf = (char*)ps_malloc(PL_BUF_SIZE);
+        if (!s_buf) s_buf = (char*)malloc(PL_BUF_SIZE);
+        if (!s_buf) {
+            LOG_ERROR(PL_TAG, "parking_log_init: buffer alokacija NEUSPELA");
+            return false;
+        }
+        LOG_INFO(PL_TAG, "CSV buf OK (%u B PSRAM)", (unsigned)PL_BUF_SIZE);
+    }
     s_buf_used = 0;
     s_buf[0] = '\0';
     s_last_flush_ms = millis();
