@@ -540,17 +540,20 @@ size_t logger_get_recent(char* out, size_t out_len, uint16_t max_lines) {
     give_mutex();
 
     // Kopiraj vrstice v out[] v obratnem vrstnem redu (najstarejša najprej)
+    // Vsaka vrstica dobi \n na koncu (logger je shranjuje brez).
     size_t out_pos = 0;
-    for (int i = (int)found - 1; i >= 0 && out_pos < out_len - 1; i--) {
+    for (int i = (int)found - 1; i >= 0 && out_pos < out_len - 2; i--) {
         const char* src = line_starts[i];
         uint16_t    ln  = line_lens[i];
 
         // Preveri ali vrstica ni wrapped čez konec bufferja
         // (za enostavnost: wrappane vrstice preskočimo)
         if (src + ln <= s_ram_buf + s_ram_size) {
-            size_t copy = (out_pos + ln < out_len - 1) ? ln : (out_len - 1 - out_pos);
+            size_t copy = (out_pos + ln < out_len - 2) ? ln : (out_len - 2 - out_pos);
+            if (copy == 0) break;
             memcpy(out + out_pos, src, copy);
             out_pos += copy;
+            out[out_pos++] = '\n';
         }
     }
     out[out_pos] = '\0';

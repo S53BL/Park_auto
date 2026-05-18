@@ -131,7 +131,7 @@
       <div class="form-hint">IP WLED naprave na lokalnem omrežju (npr. 192.168.2.171)</div>
     </div>
     <input class="form-input" type="text" id="cfg-wled_ip"
-           value="192.168.4.1" autocomplete="off" placeholder="192.168.4.1"
+           value="192.168.2.171" autocomplete="off" placeholder="192.168.2.171"
            style="width:160px;text-align:right">
   </div>
   ${_saveBtn('party')}

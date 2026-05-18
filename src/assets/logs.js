@@ -1,4 +1,4 @@
-// logs.js — Logi & SD (v4.3)
+// logs.js — Logi & SD (v4.6)
 // !! OB VSAKI SPREMEMBI DVIGNI VERZIJO: v4.x → v4.(x+1) tukaj IN v page-header spodaj !!
 // Tab 1: RAM logi  — polling /api/logs (text/plain), inkrementalni append, X-Log-Total cursor
 // Tab 2: SD logi   — browse /logs/ mape, preview, download, delete
@@ -47,7 +47,7 @@
   // Vrne HTML string za eno log vrstico.
   // <div> je block element — vrstice se ločijo brez white-space ali br, brez CSS odvisnosti.
   // Barve so inline — neodvisne od style.css.
-  const _CLR = {E:'#ef4444', W:'#f59e0b', I:'#c8d0e0', D:'#4a5570'};
+  const _CLR = {E:'#ef4444', W:'#f59e0b', I:'#c8d0e0', D:'#4ade80'};
   function _lineHtml(raw) {
     const p    = _parse(raw);
     const col  = _CLR[p.lvl] || '#c8d0e0';
@@ -120,7 +120,11 @@
       if (!r.ok) throw new Error(r.status + ' ' + r.statusText);
 
       const newTotal = parseInt(r.headers.get('X-Log-Total') || '-1', 10);
-      const newLines = (await r.text()).split('\n').filter(l => l.trim());
+      // Split po timestamp vzorcu — logger vrača vrstice brez \n ločil (bug v logger_get_recent).
+      // Lookahead zagotovi da timestamp ostane na začetku vsake vrstice.
+      const newLines = (await r.text())
+        .split(/(?=\[\d{2}:\d{2}:\d{2}\]|\[M\d+\])/)
+        .map(l => l.trim()).filter(Boolean);
 
       const tsEl = document.getElementById('log-ts');
       if (tsEl) tsEl.textContent = new Date().toLocaleTimeString('sl-SI');
@@ -207,7 +211,9 @@
       const r = await fetch('/files?path=' + encodeURIComponent(path),
                             { signal: AbortSignal.timeout(10000) });
       if (!r.ok) throw new Error(r.status + ' ' + r.statusText);
-      const lines = (await r.text()).split('\n').filter(l => l.trim()).slice(-200);
+      const lines = (await r.text())
+        .split(/(?=\[\d{2}:\d{2}:\d{2}\]|\[M\d+\])/)
+        .map(l => l.trim()).filter(Boolean).slice(-200);
       if (lines.length === 0) {
         output.innerHTML = '<div class="ll-empty">Prazna datoteka</div>';
       } else {
@@ -298,7 +304,7 @@
   // ── HTML skeleton ─────────────────────────────────────────
   function _render() {
     document.getElementById(DIV).innerHTML = `
-<div class="page-header"><h1>Logi &amp; SD</h1><span class="subtitle" style="color:var(--text3);font-size:10px">v4.3</span></div>
+<div class="page-header"><h1>Logi &amp; SD</h1><span class="subtitle" style="color:var(--text3);font-size:10px">v4.6</span></div>
 
 <div class="tab-bar">
   <button class="tab-btn active" id="ltab-ram"    onclick="logsTab('ram')">RAM logi</button>
@@ -363,7 +369,7 @@
     <span style="color:#ef4444">■ ERROR</span>
     <span style="color:#f59e0b">■ WARN</span>
     <span style="color:#c8d0e0">■ INFO</span>
-    <span style="color:#4a5570">■ DEBUG</span>
+    <span style="color:#4ade80">■ DEBUG</span>
     <span style="color:#06b6d4;margin-left:8px">■ modul</span>
     <span style="color:#4a5570">■ timestamp</span>
   </div>
