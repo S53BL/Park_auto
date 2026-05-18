@@ -71,6 +71,7 @@
   <button class="tab-btn"        id="stab-led"   onclick="cfgTab('led')">LED animacije</button>
   <button class="tab-btn"        id="stab-ident" onclick="cfgTab('ident')">Identifikacija</button>
   <button class="tab-btn"        id="stab-radar" onclick="cfgTab('radar')">Radar</button>
+  <button class="tab-btn"        id="stab-party" onclick="cfgTab('party')">Party</button>
 </div>
 
 <!-- ── TAB: OSVETLITEV ──────────────────────── -->
@@ -119,6 +120,21 @@
   ${_field('phase_confirm_cm',    'Faza 1→2 prag',           'cm',   350, 'H razdalja pri kateri potrdimo aktivno parkirno mesto', 10)}
   ${_field('stability_s',         'Stabilnost za zaključek', 's',    1.5, 'H mora biti stabilen ta čas preden se sproži TOF_PROFILE_READY', 0.1)}
   ${_saveBtn('ident')}
+</div>
+
+<!-- ── TAB: PARTY / WLED ────────────────────── -->
+<div class="tab-panel card" id="spanel-party">
+  <div class="section-label">WLED Party ESP</div>
+  <div class="form-row">
+    <div class="flex-col">
+      <div class="form-label">IP naslov Party ESP</div>
+      <div class="form-hint">IP WLED naprave na lokalnem omrežju (npr. 192.168.2.171)</div>
+    </div>
+    <input class="form-input" type="text" id="cfg-wled_ip"
+           value="192.168.4.1" autocomplete="off" placeholder="192.168.4.1"
+           style="width:160px;text-align:right">
+  </div>
+  ${_saveBtn('party')}
 </div>
 
 <!-- ── TAB: RADAR ───────────────────────────── -->
@@ -251,6 +267,8 @@
     document.getElementById('spanel-' + tab).classList.add('active');
     // Naloži radar podatke ob prvem obisku radar taba
     if (tab === 'radar' && !_radarCfg) _loadRadar();
+    // Naloži party config ob prvem obisku party taba
+    if (tab === 'party') _loadParty();
   };
 
   window.cfgSave = async function(tab) {
@@ -339,9 +357,39 @@
     }
   };
 
+  // ── Party tab: naloži WLED IP ────────────────────────────
+  async function _loadParty() {
+    try {
+      const pc = await api.get('/api/party/config');
+      const el = document.getElementById('cfg-wled_ip');
+      if (el && pc.wled_ip) el.value = pc.wled_ip;
+    } catch(e) {
+      console.warn('Party config napaka:', e.message);
+    }
+  }
+
   // Shrani persistence_n — del radar taba, ločen endpoint
   window.cfgSave = (function(_origCfgSave) {
     return async function(tab) {
+      if (tab === 'party') {
+        if (_saving) return;
+        _saving = true;
+        const btn = document.getElementById('save-btn-party');
+        if (btn) { btn.disabled = true; btn.textContent = 'Shranjujem…'; }
+        _setStatus('Shranjujem WLED IP…');
+        try {
+          const ip = (document.getElementById('cfg-wled_ip')?.value || '').trim();
+          if (!ip) { _setStatus('IP naslov ne sme biti prazen', false); return; }
+          await api.post('/api/party/config', { wled_ip: ip });
+          _setStatus('WLED IP shranjen ✓', true);
+        } catch(e) {
+          _setStatus('Napaka: ' + e.message, false);
+        } finally {
+          _saving = false;
+          if (btn) { btn.disabled = false; btn.textContent = 'Shrani'; }
+        }
+        return;
+      }
       if (tab === 'radar') {
         // Persistence_n gre na /api/radar/config z drugačnim telesom
         if (_saving) return;
@@ -380,6 +428,7 @@
     try {
       _cfg = await api.get('/api/config');
       _fill(_cfg);
+      _loadParty();
       _setStatus('Naloženo iz naprave');
     } catch(e) {
       _setStatus('Napaka pri nalaganju: ' + e.message, false);

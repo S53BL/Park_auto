@@ -2,7 +2,6 @@
 // event_bus.h — EventBus: tipi in javni API
 // Projekt : Avtomatizacija Pokritega Parkirišča
 // Verzija : 2.0.0-dev  |  Datum: 2026-04
-// Faza    : 0 — minimalen, brez GPIO/radar include
 // ============================================================
 #pragma once
 #include <Arduino.h>
@@ -29,6 +28,11 @@ enum class EventType : uint16_t {
     VEHICLE_DEPARTED        = 0x0023,  // odhod — payload: 0=A, 1=B
     PARKING_SCAN_ABORTED    = 0x0024,  // ParkingScanAbortedEvent_t*
     PARKING_PLACE_CALIBRATED = 0x0025, // ParkingPlaceCalibratedEvent_t*
+    // F3: TOF fazni prehodi za diagnostika.js real-time prikaz
+    // payload: bit 0-1  = TofPhase (0=IDLE,1=DETECT,2=SCANNING,3=DTW_WAIT)
+    //          bit 8    = TofPlace (0=A, 1=B, veljavno samo v SCANNING)
+    //          bit 16   = anomaly flag (1 = IDLE watchdog anomalija zaznana)
+    TOF_PHASE_CHANGE        = 0x0026,
     // Svetloba
     NIGHT_THRESHOLD_CHANGED = 0x0030,
     // UI gumbi

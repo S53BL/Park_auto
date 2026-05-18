@@ -2,7 +2,6 @@
 // hal_display.h
 // Projekt : Avtomatizacija Pokritega Parkirišča
 // Verzija : 2.0.1-dev  |  Datum: 2026-04
-// Faza    : 0 — ekran + touch
 //
 // POPRAVEK v2.0.1:
 //   - Dodan #include <lvgl.h> — hal_display.h ga potrebuje za lv_obj_t
@@ -39,7 +38,9 @@ struct ParkingDisplayData {
     float    dtw_distance;
     uint8_t  tof_phase;      // 0=IDLE 1=DETECT 2=SCANNING 3=DTW_WAIT
     bool     tof_active;     // to parkirno mesto je trenutno aktivno
-    uint16_t horiz_mm;       // razdalja horizontalnega TOF (0 = ni meritve)
+    uint16_t horiz_mm;       // razdalja horizontalnega TOF H (0 = ni meritve)
+    uint16_t p1_mm;          // TOF P1 razdalja (stropni, spredaj)
+    uint16_t p2_mm;          // TOF P2 razdalja (stropni, zadaj)
 
     // B4 — vehicle_recog stanje
     // vr_place_state_t: 0=EMPTY_CAL, 1=EMPTY_UNCAL, 2=OCC_UNKNOWN, 3=OCC_KNOWN

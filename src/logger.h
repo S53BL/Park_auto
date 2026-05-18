@@ -31,9 +31,9 @@
 //   Mutex se kreira v logger_sd_attach() ker taski še niso startani.
 //
 // FORMAT LOG VRSTICE:
-//   Z NTP:    "14:32:01|[TAG:L] sporočilo\n"   (L = D/I/W/E)
-//   Brez NTP: "M000123456|[TAG:L] sporočilo\n"
-//             M = millis() prefix — jasno razlikovanje od Unix časa
+//   Z NTP:    "[HH:MM:SS][TAG:L] message\n"    (10-char timestamp)
+//   Brez NTP: "[M000123456][TAG:L] message\n"  (M + 9-digit millis)
+//             L = D/I/W/E
 //
 // MAKROJI (primarna API — vsi moduli kličejo samo te):
 //   LOG_ERROR("TAG", "fmt", ...)  — flush takoj na SD (kritično)
@@ -51,6 +51,22 @@
 //   time.h     — NTP timestamp
 //
 // ============================================================
+
+// LOG FORMAT STANDARD:
+//   [HH:MM:SS][TAG:L] message        (with NTP)
+//   [M000123456][TAG:L] message      (without NTP, M + 9-digit millis)
+//   L = D/I/W/E | target line length: 60–90 chars
+//
+// VALID TAGs: BSP LOGGER LLOGIC WIFI SENSOR RADAR TOF VR
+//             ALARM PLOG WEBUI SDMGR LED GPIO LIGHT SCREEN SDFLUSH
+//
+// LANGUAGE: English. Exception: UI labels visible to user on screen.
+//
+// CONTENT: always include concrete context. Avoid: "OK", "Initialized.", "Ready."
+//
+// EXAMPLE:
+//   LOG_INFO("BSP", "Wire1 init OK | SDA=IO17 SCL=IO18 freq=100kHz");
+//   LOG_WARN("RADAR", "SC16[0x48] chA: OE! overflow=%lu", cnt);
 
 #pragma once
 
@@ -171,3 +187,23 @@ struct LoggerStats {
 };
 
 LoggerStats logger_get_stats();
+
+// ============================================================
+// SD DUMP — incremental ring buffer → SD
+// ============================================================
+
+// Dumps new ring buffer content to SD (only bytes added since the last call).
+// Allocates a temp PSRAM buffer — freed immediately after write.
+// Thread-safe. Returns bytes written, 0 on error or nothing new.
+// Called by sd_midnight_flush_task every full hour.
+size_t logger_dump_to_sd();
+
+// ============================================================
+// SYSTEM HEALTH SUMMARY
+// ============================================================
+
+// Prints a compact multi-line health summary to the log.
+// is_boot=true  → called once from appTask after parking_log_init()
+// is_boot=false → called every 120s from light_logic_tick()
+// Boot call also triggers hal_radar_log_stats(); periodic does not.
+void logger_log_system_health(bool is_boot);

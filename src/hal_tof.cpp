@@ -64,6 +64,7 @@
 #include "bsp.h"
 #include "logger.h"
 #include "config.h"
+#include "event_bus.h"
 #include <Wire.h>
 #include <VL53L1X.h>
 #include <freertos/semphr.h>
@@ -136,6 +137,9 @@ static TofProfileCallback s_profile_cb = nullptr;
 // Prepreči Wire1 mutex contention ko bi radar, TOF in GPIO
 // vsi hkrati zahtevali Wire1 ob 600s meji.
 static uint32_t s_last_watchdog_ms = 60000;
+
+// F1: DETECT faza timeout — kdaj smo vstopili v DETECT fazo
+static uint32_t s_detect_start_ms = 0;
 
 // Inicializiran flag
 static bool s_initialized = false;
@@ -420,6 +424,9 @@ static void finalize_profile() {
     s_phase          = TOF_PHASE_DTW_WAIT;
     s_profile_active = false;
     s_in_stable      = false;
+
+    // F3: fazni prehod SCANNING → DTW_WAIT
+    EventBus::publish(EventType::TOF_PHASE_CHANGE, (uint32_t)TOF_PHASE_DTW_WAIT);
 }
 
 // ============================================================
@@ -442,6 +449,11 @@ static void start_scanning(TofPlace place) {
     s_profile.scan_start_ms = millis();
     s_profile.timestamp_ms  = 0;
     s_profile.scan_duration_ms = 0;
+
+    // F3: fazni prehod DETECT → SCANNING, bit 8 = mesto (0=A, 1=B)
+    uint32_t ph_payload = (uint32_t)TOF_PHASE_SCANNING |
+                          ((place == TOF_PLACE_B) ? (1u << 8) : 0u);
+    EventBus::publish(EventType::TOF_PHASE_CHANGE, ph_payload);
 }
 
 // ============================================================
@@ -542,7 +554,10 @@ void hal_tof_startDetect() {
     if (s_phase == TOF_PHASE_IDLE || s_phase == TOF_PHASE_DTW_WAIT) {
         TOFI("Faza: %s → DETECT",
              (s_phase == TOF_PHASE_IDLE) ? "IDLE" : "DTW_WAIT");
-        s_phase = TOF_PHASE_DETECT;
+        s_phase            = TOF_PHASE_DETECT;
+        s_detect_start_ms  = millis();
+        // F3: notifikacija ob faznem prehodu
+        EventBus::publish(EventType::TOF_PHASE_CHANGE, (uint32_t)TOF_PHASE_DETECT);
     } else if (s_phase == TOF_PHASE_SCANNING) {
         TOFW("startDetect() med SCANNING — ignoriram");
     }
@@ -623,24 +638,42 @@ void hal_tof_tick() {
         }
         s_last_watchdog_ms = now;
 
-        // Watchdog meritev — oba H senzorja
+        // Watchdog meritev — vseh 6 kanalov (posodobi s_last_mm[] za diagnostiko)
         if (xSemaphoreTake(mtx, pdMS_TO_TICKS(WIRE1_MUTEX_TIMEOUT_MS)) != pdTRUE) {
             TOFW("IDLE watchdog: Wire1 mutex timeout — preskočeno");
             break;
         }
-        uint16_t h_a = read_channel(TCA_CH_TOF_H_A);
-        uint16_t h_b = read_channel(TCA_CH_TOF_H_B);
+        uint16_t wdg_mm[6];
+        for (uint8_t ch = 0; ch < 6; ch++) wdg_mm[ch] = read_channel(ch);
         xSemaphoreGive(mtx);
 
-        // Watchdog log — vedno na INFO nivoju (ne DEBUG) da je vidno v normalnem logu
-        TOFI("=== IDLE watchdog === H_A:%s H_B:%s | uptime:%lus | bus:OK",
-             (h_a == TOF_ERR) ? "ERR" : String(h_a).c_str(),
-             (h_b == TOF_ERR) ? "ERR" : String(h_b).c_str(),
-             (unsigned long)(now / 1000));
+        uint16_t h_a = wdg_mm[TCA_CH_TOF_H_A];
+        uint16_t h_b = wdg_mm[TCA_CH_TOF_H_B];
 
-        // Opozorilo ob napaki senzorja
+        // Watchdog log — vedno na INFO nivoju (ne DEBUG) da je vidno v normalnem logu
+        TOFI("=== IDLE watchdog === uptime:%lus", (unsigned long)(now / 1000));
+        for (uint8_t ch = 0; ch < 6; ch++) {
+            TOFI("  %s: %s", ch_name(ch),
+                 (wdg_mm[ch] == TOF_ERR) ? "ERR" : String(wdg_mm[ch]).c_str());
+        }
+
+        // Opozorilo ob napaki H senzorjev
         if (h_a == TOF_ERR) TOFW("IDLE watchdog: H_A napaka — senzor morda odpovedal");
         if (h_b == TOF_ERR) TOFW("IDLE watchdog: H_B napaka — senzor morda odpovedal");
+
+        // F2: anomaly detection — mesto označeno kot prazno ampak H kaže vozilo
+        if (h_a != TOF_ERR && h_a < (uint16_t)VEH_ENTRY_THRESH_MM) {
+            TOFW("IDLE watchdog ANOMALIJA: H_A=%d mm < prag %d mm — vozilo brez normalnega postopka?",
+                 h_a, VEH_ENTRY_THRESH_MM);
+            EventBus::publish(EventType::TOF_PHASE_CHANGE,
+                              (uint32_t)TOF_PHASE_IDLE | (1u << 16)); // bit 16 = anomalija
+        }
+        if (h_b != TOF_ERR && h_b < (uint16_t)VEH_ENTRY_THRESH_MM) {
+            TOFW("IDLE watchdog ANOMALIJA: H_B=%d mm < prag %d mm — vozilo brez normalnega postopka?",
+                 h_b, VEH_ENTRY_THRESH_MM);
+            EventBus::publish(EventType::TOF_PHASE_CHANGE,
+                              (uint32_t)TOF_PHASE_IDLE | (0xFF00u));
+        }
 
         break;
     }
@@ -693,11 +726,17 @@ void hal_tof_tick() {
             TOFI("DETECT: vozilo na mestu B (H_B=%d mm) → SCANNING", h_b);
             start_scanning(TOF_PLACE_B);
         } else if (a_hit && b_hit) {
-            // Oba H pod pragom — nejasen primer, čakamo razrešitev
-            // TODO: če traja predolgo, logirati kot anomalijo
             TOFW("DETECT: oba H pod pragom (A=%d B=%d mm) — čakam razrešitev", h_a, h_b);
         }
-        // Nobeden → ostanemo v DETECT, čakamo naslednji tick
+
+        // F1: DETECT timeout — po TOF_DETECT_TIMEOUT_MS brez detekcije → IDLE
+        uint32_t now_det = millis();
+        if ((now_det - s_detect_start_ms) >= TOF_DETECT_TIMEOUT_MS) {
+            TOFW("DETECT timeout (%lu min) — vračam v IDLE",
+                 (unsigned long)(TOF_DETECT_TIMEOUT_MS / 60000UL));
+            s_phase = TOF_PHASE_IDLE;
+            EventBus::publish(EventType::TOF_PHASE_CHANGE, (uint32_t)TOF_PHASE_IDLE);
+        }
         break;
     }
 
@@ -920,6 +959,24 @@ bool hal_tof_reinitAll() {
     TOFI("reinitAll zaključen — %s",
          all_ok ? "vsi OK" : "nekateri NAPAKA (glej loge)");
     return all_ok;
+}
+
+bool hal_tof_startup_scan() {
+    if (!s_initialized) return false;
+    TOFI("=== TOF startup health scan (vseh 6 kanalov) ===");
+    SemaphoreHandle_t mtx = bsp_get_wire1_mutex();
+    if (xSemaphoreTake(mtx, pdMS_TO_TICKS(WIRE1_MUTEX_TIMEOUT_MS)) != pdTRUE) {
+        TOFW("startup_scan: Wire1 mutex timeout — ponavljam");
+        return false;
+    }
+    for (uint8_t ch = 0; ch < 6; ch++) {
+        uint16_t mm = read_channel(ch);
+        TOFI("  %s: %s", ch_name(ch),
+             (mm == TOF_ERR) ? "ERR" : String(mm).c_str());
+    }
+    xSemaphoreGive(mtx);
+    TOFI("startup_scan zaključen");
+    return true;
 }
 
 void hal_tof_logStats() {

@@ -168,6 +168,8 @@ struct PkgWidget {
     lv_obj_t*          lbl_stats;
     lv_obj_t*          lbl_phase;
     lv_obj_t*          lbl_horiz;
+    lv_obj_t*          lbl_p1;
+    lv_obj_t*          lbl_p2;
     CarIcon            car;
     uint8_t            idx;
     ParkingDisplayData data;
@@ -1133,7 +1135,7 @@ static void pkg_apply(PkgWidget& w) {
         lv_obj_set_style_text_color(w.lbl_name, C_PKG_EMPTY_NAME, LV_PART_MAIN);
         car_set_color(w.car, C_CAR_EMPTY);
         if (w.data.vr_state == VR_STATE_EMPTY_UNCALIBRATED) {
-            lv_label_set_text(w.lbl_stats, "\xe2\x9a\xa0 ni kalibr.");
+            lv_label_set_text(w.lbl_stats, "! ni kalibr.");
             lv_obj_set_style_text_color(w.lbl_stats,
                 lv_color_hex(0xFBBF24), LV_PART_MAIN);
         } else {
@@ -1157,13 +1159,34 @@ static void pkg_apply(PkgWidget& w) {
         lv_obj_add_flag(w.lbl_phase, LV_OBJ_FLAG_HIDDEN);
     }
 
+    // H senzor (horizontalni)
     if (w.data.horiz_mm > 0 && w.data.horiz_mm < 8000) {
         char buf[12];
-        snprintf(buf, sizeof(buf), "%u cm", w.data.horiz_mm / 10);
+        snprintf(buf, sizeof(buf), "H:%ucm", w.data.horiz_mm / 10);
         lv_label_set_text(w.lbl_horiz, buf);
         lv_obj_remove_flag(w.lbl_horiz, LV_OBJ_FLAG_HIDDEN);
     } else {
         lv_obj_add_flag(w.lbl_horiz, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    // P1 senzor (stropni, spredaj)
+    if (w.data.p1_mm > 0 && w.data.p1_mm < 8000) {
+        char buf[12];
+        snprintf(buf, sizeof(buf), "P1:%ucm", w.data.p1_mm / 10);
+        lv_label_set_text(w.lbl_p1, buf);
+        lv_obj_remove_flag(w.lbl_p1, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(w.lbl_p1, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    // P2 senzor (stropni, zadaj)
+    if (w.data.p2_mm > 0 && w.data.p2_mm < 8000) {
+        char buf[12];
+        snprintf(buf, sizeof(buf), "P2:%ucm", w.data.p2_mm / 10);
+        lv_label_set_text(w.lbl_p2, buf);
+        lv_obj_remove_flag(w.lbl_p2, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(w.lbl_p2, LV_OBJ_FLAG_HIDDEN);
     }
 }
 
@@ -1220,8 +1243,22 @@ static void pkg_create(uint8_t idx, lv_obj_t* parent, int x, int y) {
     lv_label_set_text(w.lbl_horiz, "");
     lv_obj_set_style_text_font(w.lbl_horiz, &font_montserrat_14_sl, LV_PART_MAIN);
     lv_obj_set_style_text_color(w.lbl_horiz, C_PKG_STATS, LV_PART_MAIN);
-    lv_obj_align(w.lbl_horiz, LV_ALIGN_BOTTOM_RIGHT, -8, -5);
+    lv_obj_align(w.lbl_horiz, LV_ALIGN_BOTTOM_RIGHT, -6, -4);
     lv_obj_add_flag(w.lbl_horiz, LV_OBJ_FLAG_HIDDEN);
+
+    w.lbl_p1 = lv_label_create(w.card);
+    lv_label_set_text(w.lbl_p1, "");
+    lv_obj_set_style_text_font(w.lbl_p1, &font_montserrat_14_sl, LV_PART_MAIN);
+    lv_obj_set_style_text_color(w.lbl_p1, C_PKG_STATS, LV_PART_MAIN);
+    lv_obj_align(w.lbl_p1, LV_ALIGN_BOTTOM_RIGHT, -6, -22);
+    lv_obj_add_flag(w.lbl_p1, LV_OBJ_FLAG_HIDDEN);
+
+    w.lbl_p2 = lv_label_create(w.card);
+    lv_label_set_text(w.lbl_p2, "");
+    lv_obj_set_style_text_font(w.lbl_p2, &font_montserrat_14_sl, LV_PART_MAIN);
+    lv_obj_set_style_text_color(w.lbl_p2, C_PKG_STATS, LV_PART_MAIN);
+    lv_obj_align(w.lbl_p2, LV_ALIGN_BOTTOM_RIGHT, -6, -40);
+    lv_obj_add_flag(w.lbl_p2, LV_OBJ_FLAG_HIDDEN);
 
     car_create(w, PKG_W - 68, 16, C_CAR_EMPTY);
 }

@@ -183,6 +183,12 @@ bool hal_tof_init();
 // Preveri ali je HAL inicializiran in vsaj en H senzor deluje.
 bool hal_tof_ok();
 
+// Enkratna startup meritev vseh 6 kanalov — kliči iz sensorTask po ~5s stabilizaciji.
+// Posodobi s_last_mm[] za vse kanale, kar je potrebno za diagnostiko in servisni zaslon.
+// Vrne true ob uspešnem pridobivanju Wire1 mutex-a in izvedbi meritev.
+// Vrne false ob mutex timeout (Wire1 zaseden) — v tem primeru sensor_mgr ponovi klic.
+bool hal_tof_startup_scan();
+
 // ============================================================
 // JAVNE FUNKCIJE — fazni avtomat
 // ============================================================

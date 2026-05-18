@@ -171,6 +171,8 @@ static uint8_t    s_brightness_signal  = LED_TARGET_BRIGHTNESS;
 static AnimState  s_anim_state     = AnimState::IDLE;
 static float      s_fill_progress  = 0.0f;     // 0.0 = nič, 90.0 = polno
 static float      s_fill_delta     = 0.0f;     // LED na frame
+// F4: smer fill animacije (false = 0→89, true = 89→0)
+static bool       s_fill_reverse   = false;
 static uint32_t   s_fade_start_ms  = 0;
 static uint32_t   s_fade_duration  = 0;
 static uint8_t    s_fade_start_br  = 0;
@@ -359,9 +361,11 @@ bool led_mgr_is_party_mode() {
     return s_party_mode;
 }
 
-void led_mgr_fill(uint32_t speed_ms) {
+void led_mgr_fill(uint32_t speed_ms, bool reverse) {
     if (speed_ms == 0) speed_ms = config_get().fill_speed_ms;
-    send_cmd(LedCmd::FILL, speed_ms);
+    // F4: enkodira smer v bit 31 payloada
+    uint32_t payload = (speed_ms & 0x7FFFFFFFu) | (reverse ? 0x80000000u : 0u);
+    send_cmd(LedCmd::FILL, payload);
 }
 
 void led_mgr_unfill(uint32_t speed_ms) {
@@ -483,7 +487,9 @@ static bool anim_fill_tick() {
 
     int lit = (int)s_fill_progress;
     for (int i = 0; i < LED_MAIN_LOGICAL; i++) {
-        s_leds_main[i] = (i < lit) ? WARM_WHITE : CRGB::Black;
+        // F4: s_fill_reverse = desno→levo (visoki indeksi najprej)
+        int phys = s_fill_reverse ? (LED_MAIN_LOGICAL - 1 - i) : i;
+        s_leds_main[phys] = (i < lit) ? WARM_WHITE : CRGB::Black;
     }
 
     return (lit >= LED_MAIN_LOGICAL);
@@ -526,17 +532,6 @@ static bool anim_fade_tick() {
     return false;
 }
 
-// ============================================================
-// OPUŠČENO — 2026-05: preneseno v signal_led.cpp
-// Te funkcije so bile placeholder implementacije signalnih animacij.
-// signal_led.cpp implementira polne verzije vseh scenarijev.
-// ============================================================
-
-/*
-static void anim_parking_assist_tick(const Config& cfg) { ... }
-static void anim_clock_tick() { ... }
-static void anim_celica_tick() { ... }
-*/
 
 // ============================================================
 // ALARM BLINK TICKER (ledTask interno)
@@ -638,23 +633,25 @@ void ledTask(void* pvParams) {
 
             switch (msg.cmd) {
 
-                case LedCmd::FILL:
+                case LedCmd::FILL: {
                     if (s_party_mode) {
                         LEDW("FILL ukaz ignoriran — party mode aktiven");
                         break;
                     }
+                    // F4: bit 31 = smer (0=levo→desno, 1=desno→levo), bits 0-30 = speed_ms
+                    s_fill_reverse  = (msg.payload >> 31) != 0u;
+                    uint32_t spd    = msg.payload & 0x7FFFFFFFu;
                     s_fill_progress = 0.0f;
-                    // delta = LED/frame = LED_MAIN_LOGICAL / (speed_ms / tick_ms)
                     s_fill_delta = (float)LED_MAIN_LOGICAL /
-                                   ((float)msg.payload / (float)LEDTASK_TICK_MS);
+                                   ((float)spd / (float)LEDTASK_TICK_MS);
                     if (s_fill_delta <= 0.0f) s_fill_delta = 0.1f;
-                    // Obnovi brightness na normalno vrednost
                     FastLED.setBrightness(s_brightness_main);
                     s_anim_state = AnimState::FILLING;
                     s_fill_count++;
-                    LEDD("FILL start: speed=%lu ms, delta=%.3f LED/frame",
-                         (unsigned long)msg.payload, s_fill_delta);
+                    LEDD("FILL start: speed=%lu ms, delta=%.3f LED/frame, reverse=%d",
+                         (unsigned long)spd, s_fill_delta, (int)s_fill_reverse);
                     break;
+                }
 
                 case LedCmd::UNFILL:
                     if (s_party_mode) {

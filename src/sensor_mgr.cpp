@@ -2,12 +2,6 @@
 // sensor_mgr.cpp — Sensor Manager
 // Projekt : Avtomatizacija Pokritega Parkirišča
 // Verzija : 2.0.0-dev  |  Datum: 2026-04
-// Faza    : 3 — hal_radar + hal_tof aktivna (Wire1)
-// ============================================================
-//
-// FAZA0: hal_tof, hal_radar, hal_light so zakomentirani.
-// Odkomentiraj postopno ko priklapljaš hardware na Wire1.
-//
 // ============================================================
 
 #include "sensor_mgr.h"
@@ -22,9 +16,6 @@
 #include "config_mgr.h"
 #include "vehicle_recog.h"   // vehicle_recog_feed_profile(), reconcile_state()
 
-// hal_radar_test.h — odstranjeno, test zaključen 2026-04
-
-// FAZA 2: hal_radar aktiven
 #include "hal_radar.h"
 
 #include "logger.h"
@@ -34,7 +25,7 @@
 static bool s_init_ok = false;
 
 bool sensor_mgr_init() {
-    SMGI("=== sensor_mgr_init — FAZA3 (hal_radar + hal_tof) ===");
+    SMGI("=== sensor_mgr_init (hal_light + hal_radar + hal_tof) ===");
 
     //   hal_gpio_init()  — MCP23017                (Wire1) — v eventBusTask
 
@@ -42,7 +33,7 @@ bool sensor_mgr_init() {
     SMGI("hal_light_init...");
     bool light_ok = hal_light_init();
     if (!light_ok) {
-        SMGW("hal_light_init NAPAKA — sistem dela naprej brez senzorja svetlobe (is_night=false)");
+        SMGW("hal_light_init error — system continues without light sensor (is_night=false)");
     } else {
         SMGI("hal_light_init OK");
     }
@@ -84,7 +75,7 @@ bool sensor_mgr_init() {
         }
     });
     if (!radar_ok) {
-        SMGW("hal_radar_init NAPAKA — sistem dela naprej brez radarja");
+        SMGW("hal_radar_init error — system continues without radar");
     } else {
         SMGI("hal_radar_init OK");
     }
@@ -109,7 +100,7 @@ bool sensor_mgr_init() {
         uint32_t payload = (profile.place == TOF_PLACE_A) ? 0u : 1u;
         EventBus::publish(EventType::TOF_PROFILE_READY, payload);
     });
-    SMGI("TOF profil callback registriran");
+    SMGI("TOF profile callback registered");
 
     // DOOR_OPENED: rampagor LOW → sproži hal_tof fazni avtomat IDLE/DTW_WAIT → DETECT.
     // hal_tof bo začel meriti H_A in H_B vsake ~40 ms in prehod v SCANNING
@@ -119,11 +110,11 @@ bool sensor_mgr_init() {
         hal_tof_startDetect();
         SMGI("DOOR_OPENED → hal_tof_startDetect()");
     });
-    SMGI("DOOR_OPENED subscriber registriran");
+    SMGI("DOOR_OPENED subscriber registered");
 
     bool tof_ok = hal_tof_init();
     if (!tof_ok) {
-        SMGW("hal_tof_init NAPAKA — sistem teče brez TOF (identifikacija vozil onemogočena)");
+        SMGW("hal_tof_init error — system running without TOF (vehicle recognition disabled)");
     } else {
         SMGI("hal_tof_init OK");
     }
@@ -141,7 +132,7 @@ bool sensor_mgr_read_place_now(char id, uint16_t* h, uint16_t* p1, uint16_t* p2)
     TofPlace place = (id == 'A') ? TOF_PLACE_A : TOF_PLACE_B;
     TofProfilePoint pt = hal_tof_readAll(place);
     if (pt.H_mm == TOF_ERR || pt.P1_mm == TOF_ERR || pt.P2_mm == TOF_ERR) {
-        SMGW("read_place_now(%c): TOF_ERR na vsaj enem senzorju", id);
+        SMGW("read_place_now(%c): TOF_ERR on at least one sensor", id);
         return false;
     }
     *h  = pt.H_mm;
@@ -156,12 +147,25 @@ void sensorTask(void* pvParams) {
 
     sensor_mgr_init();
 
-    SMGI("sensorTask v zanki (FAZA3 — hal_radar + hal_tof)");
+    SMGI("sensorTask loop (hal_light + hal_radar + hal_tof)");
     static uint32_t last_tof_tick_ms = 0;
     static uint32_t last_light_tick_ms = 0;
+    static bool     s_startup_scan_done    = false;
+    static uint32_t s_startup_scan_next_ms = 5000UL;
 
     while (true) {
         esp_task_wdt_reset();
+
+        // Enkratni startup health scan vseh 6 TOF kanalov po 5s stabilizaciji.
+        // Posodobi s_last_mm[] → LCD servisni zaslon in web diagnostika bosta
+        // pokazala realne vrednosti brez čakanja na prvo parkirno sekvenco.
+        if (!s_startup_scan_done && hal_tof_ok() && millis() >= s_startup_scan_next_ms) {
+            if (hal_tof_startup_scan()) {
+                s_startup_scan_done = true;
+            } else {
+                s_startup_scan_next_ms = millis() + 2000UL;
+            }
+        }
 
         // --- hal_tof tick s fazno-odvisnim intervalom ---
         // IDLE:     tick preverja watchdog timer — dejanska meritev samo vsakih 10 min

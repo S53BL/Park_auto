@@ -2,7 +2,6 @@
 // hal_display.cpp — Hardware Abstraction Layer: AXS15231B display + touch
 // Projekt : Avtomatizacija Pokritega Parkirišča
 // Verzija : 2.0.2-dev  |  Datum: 2026-04
-// Faza    : 0 — ekran + touch (Wire1 neaktiven)
 // ============================================================
 //
 // SPREMEMBE v2.0.2 (glede na v2.0.0):
@@ -404,6 +403,8 @@ static void ui_refresh_cb(lv_timer_t*) {
             pk.tof_active = ((uint8_t)tof.active_place == p
                              && tof.current_phase != TOF_PHASE_IDLE);
             pk.horiz_mm   = (p == 0) ? tof.last_mm[0] : tof.last_mm[3];
+            pk.p1_mm      = (p == 0) ? tof.last_mm[1] : tof.last_mm[4];
+            pk.p2_mm      = (p == 0) ? tof.last_mm[2] : tof.last_mm[5];
 
             pk.vr_state       = (uint8_t)vehicle_recog_get_state(pid);
             pk.baseline_valid = vehicle_recog_get_baseline(pid).valid;

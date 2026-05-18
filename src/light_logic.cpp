@@ -172,23 +172,23 @@ static bool ssr_cmd_enqueue(SsrCmdType type, uint32_t payload = 0) {
 // Ne menja s_ssr[].deadline — to naredi klicatelj.
 static void ssr_physical_on(uint8_t idx) {
     if (!hal_gpio_set_ssr(idx, true)) {
-        LLW("SSR%d: hal_gpio_set_ssr ON napaka", idx);
+        LLW("SSR%d: hal_gpio_set_ssr ON error", idx);
         return;
     }
     s_ssr[idx].on = true;
-    LLI("SSR%d: VKLOPLJEN (%s)", idx, s_ssr[idx].is_auto ? "auto" : "ročno");
+    LLI("SSR%d: ON (%s)", idx, s_ssr[idx].is_auto ? "auto" : "manual");
 }
 
 // Fizični izklop SSR releja.
 static void ssr_physical_off(uint8_t idx) {
     if (!hal_gpio_set_ssr(idx, false)) {
-        LLW("SSR%d: hal_gpio_set_ssr OFF napaka", idx);
+        LLW("SSR%d: hal_gpio_set_ssr OFF error", idx);
         return;
     }
     s_ssr[idx].on          = false;
     s_ssr[idx].deadline_ms = 0;
     s_ssr[idx].is_auto     = false;
-    LLI("SSR%d: izklopljen", idx);
+    LLI("SSR%d: OFF", idx);
 }
 
 // Vrne preostali čas v sekundah za SSR idx.
@@ -216,7 +216,10 @@ static uint32_t ssr_remaining_s(uint8_t idx) {
 // Če je SSR1 že ON: samo resetiraj timer na polno vrednost.
 // Ne ponavljaj fill animacije pri vsakem radar pulzu!
 
-static void trigger_ssr1_auto(uint32_t fill_speed_ms) {
+static void trigger_ssr1_auto(uint32_t fill_payload) {
+    // F4: bit 31 = smer (0=levo→desno, 1=desno→levo), bits 0-30 = speed_ms
+    bool     fill_reverse  = (fill_payload >> 31) != 0u;
+    uint32_t fill_speed_ms = fill_payload & 0x7FFFFFFFu;
     // ============================================================
     // VKLOP SSR1 — avtomatski trigger (radar, rampa, raluc)
     // ============================================================
@@ -281,7 +284,7 @@ static void trigger_ssr1_auto(uint32_t fill_speed_ms) {
         //   naslednji trigger misli da je SSR1 ON in samo resetira timer.
         s_ssr[1].is_auto     = false;
         s_ssr[1].deadline_ms = 0;
-        LLW("SSR1: vklop ni uspel (Wire1 napaka) — bo poskusil ob naslednjem triggerju");
+        LLW("SSR1: ON failed (Wire1 error) — will retry on next trigger");
         return;
     }
 
@@ -294,8 +297,8 @@ static void trigger_ssr1_auto(uint32_t fill_speed_ms) {
     // je napajanje stabilno → možni glitchi pri prvi LED.
     vTaskDelay(pdMS_TO_TICKS(SSR1_STABILIZE_MS));
 
-    // Začni fill animacijo — hitrost odvisna od triggerja.
-    led_mgr_fill(fill_speed_ms);
+    // Začni fill animacijo — hitrost in smer odvisna od triggerja.
+    led_mgr_fill(fill_speed_ms, fill_reverse);
 
     // Armiraj SSR2 auto sekvencer.
     // SSR2 (LED paneli) se vklopi POTEM ko fill konča + SSR2_DELAY_MS.
@@ -338,7 +341,7 @@ static void trigger_ssr1_off() {
     if (s_ssr[2].on && s_ssr[2].is_auto) {
         ssr_physical_off(2);
         s_ssr2_auto = Ssr2AutoState::IDLE;
-        LLI("SSR2: izklopljen (pred unfill)");
+        LLI("SSR2: OFF (before unfill)");
     }
 
     // Korak 2: 500ms pavza med SSR2 off in unfill start
@@ -461,8 +464,13 @@ static void on_radar_motion(const Event& e) {
     }
     s_last_trigger_ms = now;
 
-    // Log samo ob prvem prižigu (SSR1 je OFF) — ne pri vsakem timer resetu.
-    ssr_cmd_enqueue(SsrCmdType::TRIGGER_ON_AUTO, LIGHT_FADE_FAST_MS);
+    // F4: smer fill animacije glede na radar kanal
+    // ch0=Vhod, ch1=Cesta L → levo-desno (forward)
+    // ch2=Cesta D, ch3=Garaža → desno-levo (reverse, bit 31 v payload)
+    bool fill_rev = (channel >= 2);
+    uint32_t trigger_payload = (LIGHT_FADE_FAST_MS & 0x7FFFFFFFu) |
+                               (fill_rev ? 0x80000000u : 0u);
+    ssr_cmd_enqueue(SsrCmdType::TRIGGER_ON_AUTO, trigger_payload);
 }
 
 // NIGHT_THRESHOLD_CHANGED — BH1750 je zaznal prehod noč/dan
@@ -474,14 +482,14 @@ static void on_night_changed(const Event& e) {
     if (s_is_night == was_night) return;  // ni spremembe
 
     LLI("NIGHT_THRESHOLD_CHANGED: %s → %s",
-        was_night ? "NOČ" : "DAN",
-        s_is_night ? "NOČ" : "DAN");
+        was_night ? "NIGHT" : "DAY",
+        s_is_night ? "NIGHT" : "DAY");
 
-    // Prehod DAN→NOČ: ne prižgemo avtomatsko — čakamo na trigger.
-    // Prehod NOČ→DAN: ugasnemo SSR1 če je bil prižgan AVTOMATSKO.
-    // Ročno vklopljeni SSR ostanejo (uporabnik je bil ekspliciten).
+    // DAY→NIGHT: do not auto-trigger SSR1 — wait for radar/ramp.
+    // NIGHT→DAY: turn off SSR1 if it was triggered automatically.
+    // Manually triggered SSR stays on (user was explicit).
     if (!s_is_night && s_ssr[1].on && s_ssr[1].is_auto) {
-        LLI("NOČ→DAN: SSR1 (auto) ugašamo");
+        LLI("NIGHT→DAY: SSR1 (auto) turning off");
         trigger_ssr1_off();
     }
 }
@@ -495,7 +503,7 @@ static void on_night_changed(const Event& e) {
 static void on_button_ssr(const Event& e) {
     uint8_t ssr_idx = (uint8_t)(e.payload + 1);
     if (ssr_idx < 1 || ssr_idx > 4) {
-        LLW("BUTTON_SSR: neveljaven payload=%lu", (unsigned long)e.payload);
+        LLW("BUTTON_SSR: invalid payload=%lu", (unsigned long)e.payload);
         return;
     }
     if (s_ssr[ssr_idx].disabled) {
@@ -527,7 +535,7 @@ static void on_button_ssr(const Event& e) {
 static void on_button_ssr_disable(const Event& e) {
     uint8_t ssr_idx = (uint8_t)(e.payload + 1);
     if (ssr_idx < 1 || ssr_idx > 4) {
-        LLW("BUTTON_SSR_DISABLE: neveljaven payload=%lu", (unsigned long)e.payload);
+        LLW("BUTTON_SSR_DISABLE: invalid payload=%lu", (unsigned long)e.payload);
         return;
     }
     // Debounce za disable — daljši (1000ms) ker je hold event
@@ -564,13 +572,13 @@ static void on_alarm_state_changed(const Event& e) {
     s_alarm_state  = new_state;
 
     LLI("ALARM_STATE_CHANGED: %s → %s",
-        was_active ? "AKTIVEN" : "off",
-        s_alarm_active ? "AKTIVEN" : "off");
+        was_active ? "ACTIVE" : "off",
+        s_alarm_active ? "ACTIVE" : "off");
 
     if (s_alarm_active) {
         // SSR1 mora biti ON da LED matrika dobi 12V napajanje za utripanje.
         if (!s_ssr[1].on && !s_ssr[1].disabled) {
-            LLI("Alarm: SSR1 prižig za blink napajanje");
+            LLI("Alarm: SSR1 ON for blink power");
             s_ssr[1].is_auto     = true;
             s_ssr[1].deadline_ms = 0;   // "alarm-owned" sentinel: is_auto=true + deadline_ms=0
                                         // je nedosegljivo v normalnem delovanju — timer bi bil >0
@@ -581,7 +589,7 @@ static void on_alarm_state_changed(const Event& e) {
         // Alarm OFF → ugasni SSR1 samo če ga je alarm prižgal.
         // Preverba sentinel: is_auto && deadline_ms==0 — glej decisions.md ADR-013.
         if (s_ssr[1].on && s_ssr[1].is_auto && s_ssr[1].deadline_ms == 0) {
-            LLI("Alarm: SSR1 izklop po alarm OFF");
+            LLI("Alarm: SSR1 OFF after alarm deactivated");
             ssr_cmd_enqueue(SsrCmdType::TRIGGER_OFF);
         }
     }
@@ -594,17 +602,15 @@ static void on_alarm_state_changed(const Event& e) {
 bool light_logic_init() {
     LLI("=== light_logic_init ===");
 
-    // Ustvari mutex za LightLogicState branje (Opcija B polling)
     s_mutex = xSemaphoreCreateMutex();
     if (!s_mutex) {
-        LLE("xSemaphoreCreateMutex napaka!");
+        LLE("xSemaphoreCreateMutex failed!");
         return false;
     }
 
-    // Ustvari SSR command queue
     s_ssr_queue = xQueueCreate(SSR_CMD_QUEUE_SIZE, sizeof(SsrCmd));
     if (!s_ssr_queue) {
-        LLE("xQueueCreate SSR queue napaka!");
+        LLE("xQueueCreate SSR queue failed!");
         return false;
     }
     LLD("SSR command queue OK (size=%d)", SSR_CMD_QUEUE_SIZE);
@@ -617,11 +623,10 @@ bool light_logic_init() {
         s_ssr[i] = { false, false, false, 0, init_ms };
     }
 
-    // Preberi začetno noč/dan stanje iz hal_light
-    // (BH1750 je že inicializiran v sensor_mgr)
+    // Read initial night/day state from hal_light (BH1750 already init'd in sensor_mgr)
     s_is_night = hal_light_get_is_night();
     s_lux      = hal_light_get_lux();
-    LLI("Začetno stanje: %s (%.1f lux)", s_is_night ? "NOČ" : "DAN", (double)s_lux);
+    LLI("initial state: %s %.1f lux", s_is_night ? "NIGHT" : "DAY", (double)s_lux);
 
     // Registriraj EventBus subscriberje
     // MAX_HANDLERS_PER_TYPE = 8 — ne bo težav
@@ -635,7 +640,7 @@ bool light_logic_init() {
     EventBus::subscribe(EventType::ALARM_STATE_CHANGED,      on_alarm_state_changed);
 
     s_initialized = true;
-    LLI("light_logic_init OK — 8 EventBus subscriberjev registriranih");
+    LLI("light_logic_init OK — 8 EventBus subscribers registered");
     return true;
 }
 
@@ -691,14 +696,14 @@ void light_logic_tick() {
                     const Config ccfg = config_get();
                     uint32_t t_now = millis();
                     if (s_ssr[idx].on) {
-                        LLI("SSR%d: ročni IZKLOP (toggle)", idx);
+                        LLI("SSR%d: manual OFF (toggle)", idx);
                         if (idx == 1) {
                             trigger_ssr1_off();
                         } else {
                             ssr_physical_off(idx);
                         }
                     } else {
-                        LLI("SSR%d: ročni VKLOP", idx);
+                        LLI("SSR%d: manual ON", idx);
                         uint32_t timeout_ms = 0;
                         switch (idx) {
                             case 1:
@@ -735,7 +740,7 @@ void light_logic_tick() {
                                 ssr_physical_on(4);
                                 break;
                         }
-                        LLI("SSR%d: ročno ON, timer=%lu min",
+                        LLI("SSR%d: manual ON | timer=%lu min",
                             idx, (unsigned long)(timeout_ms / 60000UL));
                     }
                     break;
@@ -745,14 +750,14 @@ void light_logic_tick() {
                     uint8_t idx = (uint8_t)cmd.payload;
                     if (s_ssr[idx].disabled) {
                         s_ssr[idx].disabled = false;
-                        LLI("SSR%d: RE-ENABLED (CMD)", idx);
+                        LLI("SSR%d: RE-ENABLED", idx);
                     } else {
                         if (s_ssr[idx].on) {
                             if (idx == 1) trigger_ssr1_off();
                             else ssr_physical_off(idx);
                         }
                         s_ssr[idx].disabled = true;
-                        LLI("SSR%d: DISABLED (CMD) — ne reagira na nič", idx);
+                        LLI("SSR%d: DISABLED — ignores all triggers", idx);
                     }
                     EventBus::publish(EventType::SSR_STATE_CHANGED, idx);
                     break;
@@ -839,7 +844,7 @@ void light_logic_tick() {
     if (s_ssr[2].on && !s_ssr[2].is_auto) {
         if (s_ssr[2].last_motion_ms > 0 &&
             (now - s_ssr[2].last_motion_ms) >= af2_ms) {
-            LLI("SSR2: anti-forget timeout (ni gibanja %lu min) — izklop",
+            LLI("SSR2: anti-forget timeout (no motion %lu min) — OFF",
                 (unsigned long)cfg.antiforgot_ssr2_min);
             ssr_physical_off(2);
         }
@@ -849,7 +854,7 @@ void light_logic_tick() {
     if (s_ssr[3].on) {
         if (s_ssr[3].last_motion_ms > 0 &&
             (now - s_ssr[3].last_motion_ms) >= af3_ms) {
-            LLI("SSR3: anti-forget timeout (ni gibanja %lu min) — izklop",
+            LLI("SSR3: anti-forget timeout (no motion %lu min) — OFF",
                 (unsigned long)cfg.antiforgot_ssr3_min);
             ssr_physical_off(3);
         }
@@ -859,7 +864,8 @@ void light_logic_tick() {
     if (s_ssr[4].on) {
         if (s_ssr[4].last_motion_ms > 0 &&
             (now - s_ssr[4].last_motion_ms) >= af3_ms) {
-            LLI("SSR4: anti-forget timeout — izklop");
+            LLI("SSR4: anti-forget timeout (no motion %lu min) — OFF",
+                (unsigned long)cfg.antiforgot_ssr3_min);
             ssr_physical_off(4);
         }
     }
@@ -883,44 +889,23 @@ void light_logic_tick() {
     s_lux = hal_light_get_lux();
 
     // -------------------------------------------------------
-    // 8. Periodični SSR status log (vsake 2 minuti)
+    // 8. Periodic system health (every 120s)
     // -------------------------------------------------------
-    // Namen: diagnostika v produkcijskem okolju — takoj vidno
-    // ali SSR deluje kot pričakovano brez fizičnega pregleda.
+    // Full health summary (SSR, ENV, RAM, SD, VR, RADAR) via logger_log_system_health.
+    // appTask stack + Wire1 error delta logged separately (light_logic-specific data).
     {
-        static uint32_t last_ssr_log_ms = 0;
-        if ((now - last_ssr_log_ms) >= 120000UL) {
-            last_ssr_log_ms = now;
-            LLI("SSR status | 1:%s%s 2:%s%s 3:%s%s 4:%s%s | %s %.1f lux",
-                s_ssr[1].on ? "ON"  : "off",
-                s_ssr[1].disabled ? "(dis)" : "",
-                s_ssr[2].on ? "ON"  : "off",
-                s_ssr[2].disabled ? "(dis)" : "",
-                s_ssr[3].on ? "ON"  : "off",
-                s_ssr[3].disabled ? "(dis)" : "",
-                s_ssr[4].on ? "ON"  : "off",
-                s_ssr[4].disabled ? "(dis)" : "",
-                s_is_night ? "NOČ" : "DAN",
-                (double)s_lux);
-            for (uint8_t i = 1; i <= 4; i++) {
-                if (s_ssr[i].on) {
-                    LLI("  SSR%d: %s timer=%lu s ostalo",
-                        i,
-                        s_ssr[i].is_auto ? "auto" : "ročno",
-                        (unsigned long)ssr_remaining_s(i));
-                }
-            }
-            // Stack usage diagnostika — kritično za dolgoročno stabilnost
+        static uint32_t last_health_ms = 0;
+        if ((now - last_health_ms) >= 120000UL) {
+            last_health_ms = now;
+            logger_log_system_health(false);
+
             LLI("  appTask stack: %lu B free",
                 (unsigned long)uxTaskGetStackHighWaterMark(nullptr) * sizeof(StackType_t));
 
-            // Wire1 diagnostika — koliko SSR Wire1 napak je bilo skupno
-            // Namen: zaznati sistemsko Wire1 contention brez pregledovanja
-            //        celotnega loga. Če wire1_errors raste → preveriti mutex.
             static uint32_t s_last_wire1_errors = 0;
             uint32_t cur_errors = hal_gpio_get_wire1_errors();
             if (cur_errors != s_last_wire1_errors) {
-                LLW("  Wire1 napake skupno: %lu (+%lu od zadnjega loga)",
+                LLW("  Wire1 errors total: %lu (+%lu since last log)",
                     (unsigned long)cur_errors,
                     (unsigned long)(cur_errors - s_last_wire1_errors));
                 s_last_wire1_errors = cur_errors;
@@ -1025,8 +1010,9 @@ void appTask(void* pvParams) {
             psram_before, psram_after, (int)(psram_before - psram_after));
     }
     parking_log_init();
+    logger_log_system_health(true);   // boot health summary
 
-    LLI("appTask v zanki (tick: 100ms)");
+    LLI("appTask loop start (tick: 100ms)");
     while (true) {
         esp_task_wdt_reset();
         light_logic_tick();

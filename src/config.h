@@ -2,14 +2,6 @@
 // config.h — Centralne konstante projekta
 // Projekt : Avtomatizacija Pokritega Parkirišča
 // Verzija : 2.0.0-dev  |  Datum: 2026-04
-// Faza    : 0 — Ekran + touch (Wire1 izklopljen)
-// ============================================================
-//
-// FAZA 0 SPREMEMBE glede na v1.0.1:
-//   - Odstranjene Wire2 / I2C Bus 1 definicije (IO21/IO38)
-//   - Vse I2C konstante so samo za Wire in Wire1
-//   - WDT_TIMEOUT_SEC poenoteno (bil WDT_TIMEOUT_S in WDT_TIMEOUT_SEC)
-//
 // ============================================================
 
 #pragma once
@@ -138,6 +130,8 @@
 // OPOMBA: TOF WATCHDOG (600s) se ne spreminja — ostaja nespremenjen.
 #define TOF_POLL_IDLE_MS    500   // SPREMENJEN iz 200ms (2026-05)
 #define TOF_POLL_DETECT_MS  50
+// F1: DETECT faza timeout — po 5 min brez detekcije → nazaj v IDLE
+#define TOF_DETECT_TIMEOUT_MS   (5UL * 60UL * 1000UL)
 // TOF IDLE watchdog interval — health-check meritev H_A + H_B vsakih 10 minut
 #define TOF_WATCHDOG_INTERVAL_MS    600000
 #define TOF_POLL_SCAN_MS    90
@@ -346,6 +340,9 @@
 // Vrednost ohranjena za logger_flush() ki ostane za eksplicitne klice.
 #define LOG_FLUSH_THRESHOLD     15
 #define LOG_WEB_LINES           200
+// LOG_ANSI_COLORS: ANSI escape kode v Serial izhodu (ne SD/RAM buffer)
+// 1 = vklop (E=rdeča, W=rumena, I=bela, D=temno siva), 0 = izklop
+#define LOG_ANSI_COLORS         1
 
 // ============================================================
 // 16. WEB UI

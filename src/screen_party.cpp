@@ -279,15 +279,13 @@ static void toggle_event_cb(lv_event_t* e) {
     //   OFF: HTTP POST {"on":false} → delay(200) → IO45=LOW
     //   Zamik 200ms (MUX_SWITCH_DELAY_MS) prepreči signal collision na 74HC257N.
     if (s_state.party_on) {
-        digitalWrite(PIN_MUX_SELECT, HIGH);   // PRIMARY → PARTY ESP
+        // MUX HIGH takoj — neblokirajoče; web_ui wledTask počaka
+        // MUX_SWITCH_DELAY_MS in nato pošlje HTTP {"on":true} na WLED
+        digitalWrite(PIN_MUX_SELECT, HIGH);
         PARTY_I("MUX → PARTY ESP (IO%d HIGH)", PIN_MUX_SELECT);
     } else {
-        // Pri OFF: WLED najprej ugasne (HTTP), šele nato MUX nazaj
-        // Ker HTTP ni implementiran, MUX vrnemo takoj — posodobi ko bo web_ui.cpp
-        // TODO: web_ui.cpp pokliče HTTP {"on":false}, po delay(200) pokliče
-        //       screen_party_set_mux_low() ali prek EventBus ACK
-        digitalWrite(PIN_MUX_SELECT, LOW);    // PARTY ESP → PRIMARY
-        PARTY_I("MUX → PRIMARY ESP (IO%d LOW)", PIN_MUX_SELECT);
+        // MUX LOW NE postavljamo tukaj — wledTask pošlje HTTP {"on":false}
+        // in šele nato (po MUX_SWITCH_DELAY_MS) vrne MUX na PRIMARY
     }
 
     uint32_t payload = s_state.party_on ? 1 : 0;

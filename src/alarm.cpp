@@ -69,7 +69,7 @@ static AlarmRuntime s_rt = {};
 static void _nvs_save() {
     Preferences prefs;
     if (!prefs.begin(ALARM_NVS_NAMESPACE, false)) {
-        ALW("NVS begin failed — stanje ni shranjeno");
+        ALW("NVS begin failed — state not saved");
         return;
     }
     prefs.putUChar(ALARM_NVS_KEY_STATE,    (uint8_t)s_rt.state);
@@ -85,7 +85,7 @@ static void _nvs_save() {
 static void _nvs_load() {
     Preferences prefs;
     if (!prefs.begin(ALARM_NVS_NAMESPACE, true)) {
-        ALW("NVS begin (RO) failed — defaulti");
+        ALW("NVS begin (RO) failed — using defaults");
         return;
     }
     uint8_t st = prefs.getUChar(ALARM_NVS_KEY_STATE, (uint8_t)AlarmStateEnum::OFF);
@@ -126,13 +126,13 @@ static void _send_callback(const char* radar_name) {
 
     uint32_t now = millis();
     if ((now - s_rt.last_callback_ms) < ALARM_CALLBACK_THROTTLE_MS) {
-        ALD("Callback throttled (%lu ms od zadnjega)", (unsigned long)(now - s_rt.last_callback_ms));
+        ALD("Callback throttled (%lu ms since last)", (unsigned long)(now - s_rt.last_callback_ms));
         return;
     }
     s_rt.last_callback_ms = now;
 
     if (WiFi.status() != WL_CONNECTED) {
-        ALW("Callback preskočen — WiFi ni connected");
+        ALW("Callback skipped — WiFi not connected");
         s_rt.callback_failed++;
         return;
     }
@@ -159,7 +159,7 @@ static void _send_callback(const char* radar_name) {
         ALD("Callback OK (HTTP %d)", code);
     } else {
         s_rt.callback_failed++;
-        ALW("Callback NAPAKA (HTTP %d / err=%d)", code, code);
+        ALW("Callback error (HTTP %d err=%d)", code, code);
     }
 }
 
@@ -220,13 +220,13 @@ bool alarm_init() {
 
     s_mutex = xSemaphoreCreateMutex();
     if (!s_mutex) {
-        ALE("xSemaphoreCreateMutex napaka!");
+        ALE("xSemaphoreCreateMutex failed!");
         return false;
     }
 
     s_cmd_queue = xQueueCreate(16, sizeof(AlarmCmd));
     if (!s_cmd_queue) {
-        ALE("xQueueCreate napaka!");
+        ALE("xQueueCreate failed!");
         return false;
     }
 
@@ -246,7 +246,7 @@ bool alarm_init() {
     // Objavi začetno stanje (LCD in web UI se posodobita)
     _publish_state_changed();
 
-    ALI("alarm_init OK — stanje: %s",
+    ALI("alarm_init OK | state: %s",
         s_rt.state == AlarmStateEnum::OFF    ? "OFF"       :
         s_rt.state == AlarmStateEnum::ARMED  ? "ARMED"     : "TRIGGERED");
     return true;
@@ -264,7 +264,7 @@ bool alarm_arm(const AlarmArmParams& params) {
     if (params.duration_s != 0 &&
         (params.duration_s < ALARM_MIN_DURATION_S ||
          params.duration_s > ALARM_MAX_DURATION_S)) {
-        ALW("arm: neveljaven duration_s=%lu", (unsigned long)params.duration_s);
+        ALW("arm: invalid duration_s=%lu", (unsigned long)params.duration_s);
         return false;
     }
 
@@ -318,7 +318,7 @@ void alarm_disarm() {
     // Ustavi alarm blink animacijo
     led_mgr_alarm_blink_stop();
 
-    ALI("DISARMED (bil: %s)",
+    ALI("DISARMED (was: %s)",
         prev == AlarmStateEnum::ARMED     ? "ARMED" :
         prev == AlarmStateEnum::TRIGGERED ? "TRIGGERED" : "OFF");
 }
@@ -338,11 +338,11 @@ bool alarm_disarm_pin(const char* entered_pin) {
     xSemaphoreGive(s_mutex);
 
     if (match) {
-        ALI("PIN pravilen → disarm");
+        ALI("PIN correct → disarm");
         alarm_disarm();
         return true;
     } else {
-        ALW("PIN napačen (dolžina=%u)", (unsigned)strlen(entered_pin));
+        ALW("PIN wrong (len=%u)", (unsigned)strlen(entered_pin));
         return false;
     }
 }
@@ -353,14 +353,14 @@ bool alarm_disarm_pin(const char* entered_pin) {
 
 bool alarm_set_grace_s(uint32_t grace_s) {
     if (grace_s < ALARM_MIN_GRACE_S || grace_s > ALARM_MAX_GRACE_S) {
-        ALW("set_grace_s: vrednost %lu izven obsega", (unsigned long)grace_s);
+        ALW("set_grace_s: value %lu out of range", (unsigned long)grace_s);
         return false;
     }
     if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(50)) != pdTRUE) return false;
     s_rt.grace_s = grace_s;
     xSemaphoreGive(s_mutex);
     _nvs_save();
-    ALI("grace_s nastavljeno na %lu", (unsigned long)grace_s);
+    ALI("grace_s set to %lu", (unsigned long)grace_s);
     return true;
 }
 
@@ -372,13 +372,13 @@ bool alarm_set_pin(const char* pin) {
     if (!pin) return false;
     size_t len = strlen(pin);
     if (len < ALARM_PIN_MIN_LEN || len > ALARM_PIN_MAX_LEN) {
-        ALW("set_pin: neveljaven PIN (dolžina=%u)", (unsigned)len);
+        ALW("set_pin: invalid PIN (len=%u)", (unsigned)len);
         return false;
     }
     // Preveri da so samo številke
     for (size_t i = 0; i < len; i++) {
         if (pin[i] < '0' || pin[i] > '9') {
-            ALW("set_pin: PIN vsebuje ne-številčni znak");
+            ALW("set_pin: PIN contains non-digit char");
             return false;
         }
     }
@@ -386,7 +386,7 @@ bool alarm_set_pin(const char* pin) {
     strlcpy(s_rt.pin, pin, sizeof(s_rt.pin));
     xSemaphoreGive(s_mutex);
     _nvs_save();
-    ALI("PIN spremenjen (dolžina=%u)", (unsigned)len);
+    ALI("PIN changed (len=%u)", (unsigned)len);
     return true;
 }
 
@@ -442,7 +442,7 @@ void alarm_test_blink() {
     if (!s_initialized) return;
     AlarmCmd cmd = { AlarmCmdType::TEST_BLINK, 0 };
     if (s_cmd_queue) xQueueSend(s_cmd_queue, &cmd, 0);
-    ALI("Test blink zahtevano");
+    ALI("Test blink requested");
 }
 
 // ============================================================
@@ -488,7 +488,7 @@ void alarm_tick() {
                     // Prvo zaznavo gibanja → sprožimo alarm
                     s_rt.state = AlarmStateEnum::TRIGGERED;
                     s_rt.trigger_count++;
-                    ALI("TRIGGERED! Radar kanal %d (%s)", cmd.channel, rname);
+                    ALI("TRIGGERED! radar ch%d (%s)", cmd.channel, rname);
                     xSemaphoreGive(s_mutex);
 
                     // Začni utripanje (SSR1 bo prižgal light_logic ob ALARM_STATE_CHANGED)
@@ -500,7 +500,7 @@ void alarm_tick() {
                     // Nadaljnje gibanje — samo posodobi last_motion timer
                     // (grace period se resetira) in pošlji callback
                     xSemaphoreGive(s_mutex);
-                    ALD("TRIGGERED + gibanje (reset grace timer), radar=%s", rname);
+                    ALD("TRIGGERED + motion (reset grace timer) radar=%s", rname);
                 }
             }
 
@@ -516,7 +516,7 @@ void alarm_tick() {
     if (s_rt.test_blink_active && now >= s_rt.test_blink_end_ms) {
         s_rt.test_blink_active = false;
         led_mgr_alarm_blink_stop();
-        ALI("Test blink končan");
+        ALI("Test blink done");
     }
 
     // -------------------------------------------------------
@@ -527,7 +527,7 @@ void alarm_tick() {
         s_rt.arm_time_ms > 0) {
         uint32_t elapsed_s = (now - s_rt.arm_time_ms) / 1000UL;
         if (elapsed_s >= s_rt.duration_s) {
-            ALI("Duration timeout (%lu s) — samodejni disarm", (unsigned long)s_rt.duration_s);
+            ALI("Duration timeout (%lu s) — auto disarm", (unsigned long)s_rt.duration_s);
             alarm_disarm();
             return;
         }
@@ -543,7 +543,7 @@ void alarm_tick() {
         s_rt.last_motion_ms > 0) {
         uint32_t since_motion_ms = now - s_rt.last_motion_ms;
         if (since_motion_ms >= (s_rt.grace_s * 1000UL)) {
-            ALI("Grace period potekel (%lu s brez gibanja) → ARMED",
+            ALI("Grace period expired (%lu s no motion) → ARMED",
                 (unsigned long)s_rt.grace_s);
             if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
                 s_rt.state = AlarmStateEnum::ARMED;

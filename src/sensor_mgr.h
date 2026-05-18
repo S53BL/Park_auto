@@ -1,7 +1,7 @@
 // ============================================================
 // sensor_mgr.h
 // Projekt : Avtomatizacija Pokritega Parkirišča
-// Verzija : 2.0.0-dev  |  Faza 0 — stub
+// Verzija : 2.0.0-dev
 // ============================================================
 #pragma once
 #include <Arduino.h>

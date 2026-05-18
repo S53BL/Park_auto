@@ -1,15 +1,16 @@
 // ============================================================
-// sd_midnight_flush.h — Nočni flush logov na SD kartico
+// sd_midnight_flush.h — Hourly SD log flush
 // Projekt : Avtomatizacija Pokritega Parkirišča
-// Verzija : 1.0.0  |  Datum: 2026-05
+// Verzija : 2.0.0  |  Datum: 2026-05
 // ============================================================
 #pragma once
 
-// Zažene background task ki vsak dan ob 00:01 flusira loge na SD.
-// Kliče se iz bsp.cpp po task kreaciji in po sd_mgr_init().
-// ⚠ Task stack je v SRAM (ne PSRAM) — kliče SD_MMC prek logger_flush().
+// Starts the background task that dumps new log content to SD every full hour.
+// One file per day (log_YYYYMMDD.txt, append mode).
+// Called from bsp.cpp after task creation.
+// ⚠ Task stack is in SRAM (not PSRAM) — calls SD_MMC via logger_dump_to_sd().
 void sd_midnight_flush_start();
 
-// Obvesti task da je NTP sinhroniziran — brez tega flush ni možen.
-// Kliče wifi_manager.cpp ob uspešni NTP sinhronizaciji.
+// Notify the task that NTP is synced — required for hour-boundary detection.
+// Called by wifi_manager.cpp on successful NTP sync.
 void sd_midnight_flush_notify_ntp();

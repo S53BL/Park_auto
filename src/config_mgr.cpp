@@ -107,6 +107,9 @@ static const char* NVS_RADAR_US[] = {"r_us_0","r_us_1","r_us_2","r_us_3"};
 #define NVS_K_RADAR_POLL_IV  "r_poll_iv"    // radar_poll_interval_ms
 #define NVS_K_RADAR_MAX_OVF  "r_max_ovf"    // radar_max_consec_overflows
 
+// Party / WLED
+#define NVS_K_WLED_IP        "wled_ip"      // wled_ip (string)
+
 // ============================================================
 // MEJNE VREDNOSTI ZA VALIDACIJO
 // ============================================================
@@ -395,7 +398,23 @@ static void load_and_validate(Preferences& prefs) {
                  CFG_MIN_RADAR_MAX_OVF, CFG_MAX_RADAR_MAX_OVF,
                  def.radar_max_consec_overflows);
 
-    CFGI("NVS vrednosti naložene (48 parametrov)");
+    // --- Party / WLED ---
+    {
+        String ip = prefs.getString(NVS_K_WLED_IP, "");
+        if (ip.length() > 0 && ip.length() < (int)sizeof(s_config.wled_ip)) {
+            strncpy(s_config.wled_ip, ip.c_str(), sizeof(s_config.wled_ip));
+            s_config.wled_ip[sizeof(s_config.wled_ip) - 1] = '\0';
+        } else {
+            if (ip.length() >= sizeof(s_config.wled_ip)) {
+                CFGW("  " NVS_K_WLED_IP " predolg (%d znakov) → default", (int)ip.length());
+                s_replaced_count++;
+            }
+            strncpy(s_config.wled_ip, def.wled_ip, sizeof(s_config.wled_ip));
+            prefs.putString(NVS_K_WLED_IP, def.wled_ip);
+        }
+    }
+
+    CFGI("NVS vrednosti naložene (49 parametrov)");
 }
 
 // ============================================================
@@ -447,6 +466,8 @@ static void write_all_to_nvs(Preferences& prefs) {
     prefs.putUChar(NVS_K_RADAR_PERSIST, s_config.radar_persistence_n);
     prefs.putUInt(NVS_K_RADAR_POLL_IV,  s_config.radar_poll_interval_ms);
     prefs.putUInt(NVS_K_RADAR_MAX_OVF,  s_config.radar_max_consec_overflows);
+    // Party / WLED
+    prefs.putString(NVS_K_WLED_IP, s_config.wled_ip);
 }
 
 // ============================================================

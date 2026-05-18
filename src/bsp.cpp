@@ -2,32 +2,17 @@
 // bsp.cpp — Board Support Package implementacija
 // Projekt : Avtomatizacija Pokritega Parkirišča
 // Verzija : 2.0.0-dev  |  Datum: 2026-04
-// Faza    : 0 — Ekran + touch (Wire1 izklopljen)
 // ============================================================
 //
 // VRSTNI RED INICIALIZACIJE:
-//   1. Serial
-//   2. Wire (interni bus, IO8/IO7) — za display + touch
-//      ⚠ Wire1 ZAKOMENTIRANO — Faza 0
+//   1. Serial + logger
+//   2. Wire (IO8/IO7) in Wire1 (IO17/IO18) — interni + senzorski bus
 //   3. GPIO direktni pini (MUX, BL, LED, INT pini)
-//   4. Wire1 mutex (kreiran, a Wire1 ni inicializiran)
-//   5. TWDT watchdog
-//   6. FreeRTOS taski
-//
-// KAJ JE ZAKOMENTIRANO V FAZI 0 (označeno z // FAZA0):
-//   - Wire1.begin() — ni naprav na IO17/IO18
-//   - TCA9548A hw reset (IO46) — Wire1 naprava
-//   - MCP23017 init — Wire1 naprava
-//
-// PRIČAKOVANI SERIAL LOG:
-//   [BSP] === BSP init v2.0.0-dev ===
-//   [BSP] Wire interni bus OK (IO8/IO7)
-//   [BSP] FAZA0: Wire1 zakomeniran
-//   [BSP] GPIO init OK
-//   [BSP] Wire1 mutex OK
-//   [BSP] TWDT OK
-//   [BSP] Taski OK
-//   [BSP] === BSP init OK v XXX ms ===
+//   4. Wire1 mutex
+//   5. SD + web_ui_init
+//   6. config_mgr
+//   7. TWDT watchdog
+//   8. FreeRTOS taski
 // ============================================================
 
 #include "bsp.h"
@@ -145,75 +130,61 @@ static void bsp_serial_init() {
 }
 
 static void bsp_i2c_init() {
-    // --- Wire: interni bus (IO8=SDA, IO7=SCL) ---
-    // Waveshare BSP naprave: AXS15231B touch, TCA9554, PMU, RTC, IMU, Audio
-    // ⚠ IO8=SDA, IO7=SCL — potrjeno iz demo 10_lvgl_arduino_v9.ino
-    LOGI("Wire interni bus init (SDA=IO8, SCL=IO7, 400kHz)...");
+    // --- Wire: internal bus (IO8=SDA, IO7=SCL) ---
+    // Waveshare BSP devices: AXS15231B touch, TCA9554, PMU, RTC, IMU, Audio
+    // ⚠ IO8=SDA, IO7=SCL — confirmed from demo 10_lvgl_arduino_v9.ino
     Wire.begin(8, 7, 400000);
-    LOGI("Wire interni bus OK");
+    LOGI("Wire init OK | SDA=IO8 SCL=IO7 freq=400kHz");
 
-    // --- Wire1: senzorski bus (IO17=SDA, IO18=SCL) ---
-    // FAZA0: ZAKOMENTIRANO — TCA9548A, SC16IS752, MCP23017, BH1750
-    // niso priklopljeni na IO17/IO18.
-    // Odkomentiraj v Fazi 1 ko priklopljiš naprave.
-    //
-    // FAZA 1: Wire1 aktiven — SC16IS752 #2 priključen na IO17/IO18
-    LOGI("Wire1 senzorski bus init (SDA=IO17, SCL=IO18, 100kHz)...");
+    // --- Wire1: sensor bus (IO17=SDA, IO18=SCL) ---
     Wire1.begin(I2C_SDA, I2C_SCL, I2C_FREQ_HZ);
     s_wire1_ok = true;
-    LOGI("Wire1 OK");
+    LOGI("Wire1 init OK | SDA=IO%d SCL=IO%d freq=%lukHz",
+         I2C_SDA, I2C_SCL, (unsigned long)(I2C_FREQ_HZ / 1000));
 
-    // Wire1 mutex — kreiran tudi če Wire1 ni aktiven.
-    // hal_gpio in hal_light ga pričakujeta. Faza 0: ni Wire1 klicev.
+    // Wire1 mutex — shared by hal_gpio, hal_light, hal_radar, hal_tof
     s_wire1_mutex = xSemaphoreCreateMutex();
     if (!s_wire1_mutex) {
-        LOGE("Wire1 mutex NAPAKA — restart!");
+        LOGE("Wire1 mutex create failed — restart!");
         delay(3000);
         ESP.restart();
     }
-    LOGI("Wire1 mutex OK");
 }
 
 static void bsp_gpio_init() {
-    LOGI("GPIO init...");
-
-    // MUX select — LOW = Primary ESP aktiven ob zagonu
+    // MUX select — LOW = Primary ESP active at boot
     pinMode(PIN_MUX_SELECT, OUTPUT);
     digitalWrite(PIN_MUX_SELECT, LOW);
 
-    // LCD backlight — LOW ob zagonu, hal_display ga prižge ko je ready
+    // LCD backlight — LOW at boot, hal_display enables when ready
     pinMode(PIN_LCD_BL, OUTPUT);
     digitalWrite(PIN_LCD_BL, LOW);
 
-    // LED podatkovne linije — OUTPUT LOW
+    // LED data lines — OUTPUT LOW
     pinMode(PIN_LED_MAIN,   OUTPUT); digitalWrite(PIN_LED_MAIN,   LOW);
     pinMode(PIN_LED_SIGNAL, OUTPUT); digitalWrite(PIN_LED_SIGNAL, LOW);
 
-    // Interrupt pini — INPUT_PULLUP
-    // FAZA0: MCP, SC16 niso priklopljeni, a pine konfiguriramo vseeno
+    // Interrupt pins — INPUT_PULLUP
     pinMode(PIN_MCP_INT, INPUT_PULLUP);
     pinMode(PIN_SC1_IRQ, INPUT_PULLUP);
     pinMode(PIN_SC2_IRQ, INPUT_PULLUP);
 
-    // TCA9548A reset pin — HIGH (neaktivno)
-    // FAZA0: TCA9548A reset ZAKOMENTIRANO — Wire1 naprava
-    // bsp_tca_reset() kliče samo Wire1 zadevno logiko (IO46 je GPIO, OK)
+    // TCA9548A reset pin — HIGH (inactive)
     pinMode(PIN_TCA_RESET, OUTPUT);
     digitalWrite(PIN_TCA_RESET, HIGH);
-    // FAZA0: ne kličemo bsp_tca_reset() — nepotrebno brez Wire1
 
-    LOGI("GPIO init OK");
+    LOGI("GPIO init OK | MUX=IO%d BL=IO%d LED=IO%d/IO%d",
+         PIN_MUX_SELECT, PIN_LCD_BL, PIN_LED_MAIN, PIN_LED_SIGNAL);
 }
 
 static void bsp_sd_init_internal() {
     LOGI("SD_MMC init...");
     bool ok = sd_mgr_init();
     if (ok) {
-        LOGI("SD_MMC OK — %llu MB prosto",
-             sd_mgr_free_bytes() / (1024ULL * 1024ULL));
+        LOGI("SD_MMC OK | %llu MB free", sd_mgr_free_bytes() / (1024ULL * 1024ULL));
     } else {
-        LOGW("SD_MMC NAPAKA — sistem dela naprej brez SD (logi samo na Serial)");
-        LOGW("  Preveriti: kartica vstavljena? Format FAT32?");
+        LOGW("SD_MMC error — system continues without SD (logs Serial only)");
+        LOGW("  Check: card inserted? FAT32 format?");
     }
     // Logger Faza 2 — poveži SD. Kreira mutex (scheduler še ne teče).
     // Od tu naprej logger piše: Serial + RAM + SD.
@@ -223,7 +194,6 @@ static void bsp_sd_init_internal() {
 }
 
 static void bsp_wdt_init() {
-    LOGI("TWDT init (timeout: %ds)...", WDT_TIMEOUT_SEC);
     const esp_task_wdt_config_t cfg = {
         .timeout_ms     = (uint32_t)WDT_TIMEOUT_SEC * 1000U,
         .idle_core_mask = 0,
@@ -233,11 +203,10 @@ static void bsp_wdt_init() {
     if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
         LOGW("TWDT reconfigure: err=%d", (int)err);
     }
-    LOGI("TWDT OK");
+    LOGI("TWDT OK | timeout=%ds panic=true", WDT_TIMEOUT_SEC);
 }
 
 static void bsp_tasks_create() {
-    LOGI("FreeRTOS task kreacija...");
     BaseType_t r;
 
     #define MAKE_TASK(fn, nm, stk, pri, hdl, core)                              \
@@ -289,7 +258,6 @@ static void bsp_tasks_create() {
 
     #undef MAKE_PSRAM_TASK
     #undef MAKE_TASK
-    LOGI("Vsi taski OK");
 }
 
 // ============================================================
@@ -321,10 +289,10 @@ void bsp_init() {
     LOGI("SRAM po  config_mgr:  %lu B",
          (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
     if (config_mgr_replaced_count() > 0) {
-        LOGI("ConfigMgr: %d vrednosti zamenjanih z defaultom",
+        LOGI("ConfigMgr: %d values replaced with defaults",
              config_mgr_replaced_count());
     } else {
-        LOGI("ConfigMgr OK — vse vrednosti veljavne");
+        LOGI("ConfigMgr OK — all values valid");
     }
 
     bsp_wdt_init();
@@ -337,15 +305,15 @@ void bsp_init() {
     sd_midnight_flush_start();
 
     s_boot_time = millis() - t0;
-    LOGI("=== SRAM/PSRAM BILANCA ob zagonu ===");
-    LOGI("  SRAM skupaj:    %6lu B", (unsigned long)heap_caps_get_total_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-    LOGI("  SRAM prosto:    %6lu B", (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    LOGI("=== SRAM/PSRAM at boot ===");
+    LOGI("  SRAM total:     %6lu B", (unsigned long)heap_caps_get_total_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    LOGI("  SRAM free:      %6lu B", (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
     LOGI("  SRAM min-ever:  %6lu B", (unsigned long)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-    LOGI("  SRAM največji blok: %lu B", (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-    LOGI("  PSRAM skupaj:   %6lu B", (unsigned long)heap_caps_get_total_size(MALLOC_CAP_SPIRAM));
-    LOGI("  PSRAM prosto:   %6lu B", (unsigned long)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+    LOGI("  SRAM max-block: %lu B",  (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    LOGI("  PSRAM total:    %6lu B", (unsigned long)heap_caps_get_total_size(MALLOC_CAP_SPIRAM));
+    LOGI("  PSRAM free:     %6lu B", (unsigned long)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
     LOGI("  PSRAM min-ever: %6lu B", (unsigned long)heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM));
-    LOGI("=== BSP init OK v %lu ms ===", (unsigned long)s_boot_time);
+    LOGI("=== BSP init OK in %lu ms ===", (unsigned long)s_boot_time);
 }
 
 bool bsp_wire1_ok()           { return s_wire1_ok; }
@@ -365,5 +333,5 @@ void bsp_tca_reset() {
     delay(5);
     digitalWrite(PIN_TCA_RESET, HIGH);
     delay(TCA_RECOVERY_WAIT_MS);
-    LOGI("TCA9548A reset OK");
+    LOGI("TCA9548A reset OK (IO%d)", PIN_TCA_RESET);
 }

@@ -303,13 +303,13 @@ static void apply_tof() {
 
     char buf[20];
     for (int i = 0; i < 6; i++) {
-        if (s_tof_mm[i] == 0) {
+        if (s_tof_mm[i] == 0 || s_tof_mm[i] == TOF_ERR) {
             if (tofDiag.error_count[i] > 0) {
                 snprintf(buf, sizeof(buf), "ERR %u", tofDiag.error_count[i]);
                 lv_label_set_text(s_tof[i].lbl_val, buf);
                 lv_obj_set_style_text_color(s_tof[i].lbl_val, C_ERR, LV_PART_MAIN);
             } else {
-                lv_label_set_text(s_tof[i].lbl_val, "--");
+                lv_label_set_text(s_tof[i].lbl_val, "---");
                 lv_obj_set_style_text_color(s_tof[i].lbl_val, C_TEXT_DIM, LV_PART_MAIN);
             }
         } else {

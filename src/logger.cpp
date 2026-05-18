@@ -40,8 +40,12 @@
 #include "logger.h"
 #include "config.h"
 #include "sd_mgr.h"
+#include "light_logic.h"
+#include "vehicle_recog.h"
+#include "hal_radar.h"
 #include <freertos/semphr.h>
 #include <time.h>
+#include <esp_heap_caps.h>
 
 // ============================================================
 // KONSTANTE
@@ -58,10 +62,11 @@
 // INTERNO STANJE
 // ============================================================
 
-static char*             s_ram_buf        = nullptr;   // PSRAM krožni buffer
+static char*             s_ram_buf        = nullptr;   // PSRAM ring buffer
 static uint32_t          s_ram_size       = 0;
 static uint32_t          s_ram_write_pos  = 0;         // write pointer
-static bool              s_ram_wrapped    = false;     // ali je buffer že kroži
+static bool              s_ram_wrapped    = false;     // has buffer wrapped
+static bool              s_ram_in_psram   = false;     // alloc source (for log)
 
 static char*             s_sd_buf         = nullptr;   // PSRAM — alocira logger_init()
 static uint32_t          s_sd_buf_pos     = 0;
@@ -82,6 +87,10 @@ static uint32_t          s_flush_errors   = 0;
 // Med cooldownom se logi akumulirajo samo v s_sd_buf (PSRAM), ne gredo na SD.
 static uint32_t s_sd_flush_disabled_until_ms = 0;
 
+// SD dump position — tracks write_pos at time of last logger_dump_to_sd() call.
+// Only content added after this position is written on the next dump call.
+static uint32_t s_dump_pos = 0;
+
 // ============================================================
 // POMOŽNE — INTERNE
 // ============================================================
@@ -95,21 +104,18 @@ static void give_mutex() {
     if (s_mutex) xSemaphoreGive(s_mutex);
 }
 
-// Sestavi timestamp string
-// Z NTP:    "14:32:01"   (samo ura — datum je balast v normalnem delovanju)
-// Brez NTP: "M000123456" (millis — pred NTP sinhronizacijo)
-// TODO: SD log datoteke bi morale obdržati datum za lažje iskanje po arhivu.
-//   Za zdaj oba izhoda (Serial + SD) dobita kratek format.
-//   Kasnejša ločitev: ločen format parameter ali ločena build_timestamp_sd().
+// Build timestamp — fixed-width, always in brackets.
+// Z NTP:    "[HH:MM:SS]"   — 10 chars
+// Brez NTP: "[M000123456]" — 12 chars (M + 9-digit millis)
 static void build_timestamp(char* out, size_t out_len) {
     time_t now = time(nullptr);
     if (s_ntp_synced && now > 1577836800UL) {
         struct tm t;
         localtime_r(&now, &t);
-        snprintf(out, out_len, "%02d:%02d:%02d",
+        snprintf(out, out_len, "[%02d:%02d:%02d]",
                  t.tm_hour, t.tm_min, t.tm_sec);
     } else {
-        snprintf(out, out_len, "M%010lu", (unsigned long)millis());
+        snprintf(out, out_len, "[M%09lu]", (unsigned long)millis());
     }
 }
 
@@ -206,40 +212,37 @@ static void sd_buf_write(const char* line, size_t len, bool force_flush) {
 bool logger_init() {
     if (s_initialized) return true;
 
-    // Alociraj RAM buffer v PSRAM
+    // Alloc RAM ring buffer — prefer PSRAM
     s_ram_size = LOG_RAM_BUF_SIZE;
     s_ram_buf  = (char*)ps_malloc(s_ram_size);
-
-    if (!s_ram_buf) {
-        // PSRAM ni dostopen — fallback na navadni heap (manjši)
+    if (s_ram_buf) {
+        s_ram_in_psram = true;
+    } else {
+        // PSRAM unavailable — fallback to heap (smaller buffer)
         s_ram_size = 4096;
         s_ram_buf  = (char*)malloc(s_ram_size);
-        Serial.printf("[LOGGER][W] PSRAM ni dostopen — RAM buffer %d bytes\n", s_ram_size);
+        s_ram_in_psram = false;
+        Serial.printf("[LOGGER][W] PSRAM unavailable — RAM buf fallback %d B HEAP\n", s_ram_size);
     }
 
     if (!s_ram_buf) {
-        Serial.printf("[LOGGER][E] RAM buffer alokacija NAPAKA — logger brez bufferja!\n");
+        Serial.printf("[LOGGER][E] RAM buf alloc failed — logger without buffer!\n");
         s_ram_size = 0;
-        // Nadaljujemo brez bufferja — vsaj Serial bo delal
     } else {
         memset(s_ram_buf, 0, s_ram_size);
-        Serial.printf("[LOGGER][I] RAM buffer OK — %d bytes %s\n",
-                      s_ram_size,
-                      (s_ram_buf == (char*)ps_malloc(0) ? "(HEAP)" : "(PSRAM)"));
     }
 
-    // SD flush buffer — v PSRAM (prihrani 8192 B SRAM)
+    // SD flush buffer — PSRAM (saves 8192 B SRAM)
     s_sd_buf = (char*)ps_malloc(SD_FLUSH_BUF_SIZE);
     if (!s_sd_buf) {
         s_sd_buf = (char*)malloc(SD_FLUSH_BUF_SIZE);
-        Serial.printf("[LOGGER][W] s_sd_buf: PSRAM ni dostopen — v SRAM (%d B)\n",
+        Serial.printf("[LOGGER][W] s_sd_buf: PSRAM unavailable — SRAM fallback (%d B)\n",
                       SD_FLUSH_BUF_SIZE);
     }
     if (!s_sd_buf) {
-        Serial.printf("[LOGGER][E] s_sd_buf alokacija NAPAKA — SD flush onemogočen!\n");
+        Serial.printf("[LOGGER][E] s_sd_buf alloc failed — SD flush disabled!\n");
     } else {
         memset(s_sd_buf, 0, SD_FLUSH_BUF_SIZE);
-        Serial.printf("[LOGGER][I] s_sd_buf OK — %d B PSRAM\n", SD_FLUSH_BUF_SIZE);
     }
 
     s_ram_write_pos = 0;
@@ -251,22 +254,22 @@ bool logger_init() {
     s_flush_errors  = 0;
     s_initialized   = true;
 
-    // Logiramo direktno na Serial (logger sam ne more klicati sebe tukaj)
-    Serial.printf("[LOGGER][I] logger_init OK — Faza 1 (Serial + RAM)\n");
+    Serial.printf("[LOGGER][I] init OK phase1 | RAM=%uB %s NTP=no\n",
+                  (unsigned)s_ram_size, s_ram_in_psram ? "PSRAM" : "HEAP");
     return true;
 }
 
 void logger_sd_attach() {
     if (!s_initialized) {
-        Serial.printf("[LOGGER][E] logger_sd_attach: logger ni inicializiran!\n");
+        Serial.printf("[LOGGER][E] logger_sd_attach: not initialized!\n");
         return;
     }
 
-    // Mutex kreacija — scheduler še ne teče, varno iz bsp_init()
+    // Create mutex — scheduler not yet running, safe from bsp_init()
     if (!s_mutex) {
         s_mutex = xSemaphoreCreateMutex();
         if (!s_mutex) {
-            Serial.printf("[LOGGER][E] Mutex kreacija NAPAKA!\n");
+            Serial.printf("[LOGGER][E] mutex create failed!\n");
             return;
         }
     }
@@ -274,23 +277,21 @@ void logger_sd_attach() {
     s_sd_attached = sd_mgr_ready();
 
     if (s_sd_attached) {
-        Serial.printf("[LOGGER][I] logger_sd_attach OK — Faza 2 (Serial + RAM + SD)\n");
-        // Varnostni flush SD staging bufferja (s_sd_buf).
-        // V normalnem zagonu je s_sd_buf_pos == 0 ker sd_buf_write()
-        // preskoči vpis dokler !s_sd_attached. Blok je zaščita za
-        // morebitne direktne vpise v s_sd_buf pred tem klicem.
-        // Opomba: logi iz Faze 1 so v RAM bufferju (s_ram_buf) in
-        // dostopni prek logger_get_recent() — na SD jih ne pišemo.
+        Serial.printf("[LOGGER][I] attach OK phase2 | Serial+RAM+SD\n");
+        // Safety flush of SD staging buffer (s_sd_buf).
+        // Normally s_sd_buf_pos == 0 here. This guards against any
+        // direct s_sd_buf writes that might have occurred before attach.
+        // Phase-1 logs remain in s_ram_buf, accessible via logger_get_recent().
         if (s_sd_buf_pos > 0) {
             size_t written = sd_mgr_log_flush(s_sd_buf, s_sd_buf_pos);
             if (written > 0) {
                 s_flush_count++;
                 s_sd_buf_pos = 0;
-                Serial.printf("[LOGGER][I] SD staging buffer flushed: %d bytes\n", written);
+                Serial.printf("[LOGGER][I] SD staging buf flushed: %d B\n", (int)written);
             }
         }
     } else {
-        Serial.printf("[LOGGER][W] logger_sd_attach: SD ni ready — SD izhod onemogočen\n");
+        Serial.printf("[LOGGER][W] SD not ready — SD output disabled\n");
     }
 }
 
@@ -361,12 +362,12 @@ void logger_log(LogLevel level, const char* tag,
         strcpy(safe_tag, "?");
     }
 
-    // Sestavi log vrstico
-    // Format: "HH:MM:SS|[TAG:L] message\n"  (po NTP)
-    //         "M0000003440|[TAG:L] message\n" (pred NTP)
+    // Assemble log line
+    // Format: "[HH:MM:SS][TAG:L] message\n"  (with NTP)
+    //         "[M000123456][TAG:L] message\n" (without NTP)
     char line[MAX_LINE_LEN];
     int len = snprintf(line, sizeof(line),
-                       "%s|[%s:%c] %s\n",
+                       "%s[%s:%c] %s\n",
                        timestamp, safe_tag, level_char, message);
 
     if (len <= 0) return;
@@ -380,8 +381,27 @@ void logger_log(LogLevel level, const char* tag,
         len = sizeof(line) - 1;
     }
 
-    // 1. Vedno na Serial
-    Serial.print(line);
+    // 1. Vedno na Serial — en sam write() da ne pride do prepletanja med taski
+#if LOG_ANSI_COLORS
+    {
+        const char* ansi_prefix;
+        switch (level) {
+            case LOG_LEVEL_ERROR: ansi_prefix = "\033[31m"; break;  // rdeča
+            case LOG_LEVEL_WARN:  ansi_prefix = "\033[33m"; break;  // rumena
+            case LOG_LEVEL_DEBUG: ansi_prefix = "\033[90m"; break;  // temno siva
+            default:              ansi_prefix = "\033[0m";  break;  // bela/default (INFO)
+        }
+        // Sestavi: prefix + line + reset — v en buffer, en atomarni write
+        char serial_buf[MAX_LINE_LEN + 16];
+        int serial_len = snprintf(serial_buf, sizeof(serial_buf),
+                                  "%s%s\033[0m", ansi_prefix, line);
+        if (serial_len > 0) {
+            Serial.write((const uint8_t*)serial_buf, (size_t)serial_len);
+        }
+    }
+#else
+    Serial.write((const uint8_t*)line, (size_t)len);
+#endif
 
     // 2. V RAM buffer + SD buffer (thread-safe)
     bool got_mutex = take_mutex();
@@ -443,7 +463,7 @@ void logger_flush() {
 size_t logger_get_recent(char* out, size_t out_len, uint16_t max_lines) {
     if (!out || out_len == 0) return 0;
     if (!s_ram_buf || s_ram_size == 0) {
-        strncpy(out, "(RAM buffer ni dostopen)\n", out_len - 1);
+        strncpy(out, "(RAM buffer unavailable)\n", out_len - 1);
         return strlen(out);
     }
 
@@ -555,4 +575,137 @@ LoggerStats logger_get_stats() {
     st.sd_attached     = s_sd_attached;
     st.ntp_synced      = s_ntp_synced;
     return st;
+}
+
+// ============================================================
+// SD DUMP — incremental ring buffer → SD (for hourly flush)
+// ============================================================
+// Writes only new content added since the last dump call.
+// Allocates a temp PSRAM buffer sized to the new content — freed immediately.
+// On wrap: dumps at most s_ram_size bytes (full buffer content).
+// Thread-safe.
+
+size_t logger_dump_to_sd() {
+    if (!s_sd_attached || !sd_mgr_ready()) return 0;
+    if (!s_ram_buf || s_ram_size == 0) return 0;
+    if (!take_mutex()) return 0;
+
+    uint32_t write_pos = s_ram_write_pos;
+    uint32_t dump_pos  = s_dump_pos;
+    give_mutex();
+
+    // Calculate new bytes since last dump
+    uint32_t new_bytes;
+    bool wraps;
+    if (write_pos >= dump_pos) {
+        new_bytes = write_pos - dump_pos;
+        wraps = false;
+    } else {
+        // write_pos wrapped past dump_pos
+        new_bytes = (s_ram_size - dump_pos) + write_pos;
+        wraps = true;
+    }
+
+    if (new_bytes == 0) return 0;
+    if (new_bytes > s_ram_size) new_bytes = s_ram_size;  // safety cap
+
+    // Allocate temp buffer in PSRAM — freed after write
+    char* tmp = (char*)ps_malloc(new_bytes);
+    if (!tmp) tmp = (char*)malloc(new_bytes);
+    if (!tmp) return 0;
+
+    // Copy new bytes from ring buffer (handle wrap)
+    if (!wraps) {
+        memcpy(tmp, s_ram_buf + dump_pos, new_bytes);
+    } else {
+        uint32_t first  = s_ram_size - dump_pos;
+        uint32_t second = write_pos;
+        memcpy(tmp,         s_ram_buf + dump_pos, first);
+        memcpy(tmp + first, s_ram_buf,             second);
+    }
+
+    size_t written = sd_mgr_log_flush(tmp, new_bytes);
+    free(tmp);
+
+    if (written > 0) {
+        s_dump_pos = write_pos;
+    }
+    return written;
+}
+
+// ============================================================
+// SYSTEM HEALTH SUMMARY
+// ============================================================
+// Compact multi-line health report — boot or periodic.
+// is_boot=true:  called once from appTask after parking_log_init()
+// is_boot=false: called every 120s from light_logic_tick()
+//
+// Radar on-demand stats (hal_radar_log_stats) only on boot —
+// radar has its own 60s log in radarTask, do not duplicate.
+
+void logger_log_system_health(bool is_boot) {
+    // --- SSR + ENV from light_logic ---
+    LightLogicState ll = light_logic_get_state();
+
+    // --- Logger stats ---
+    LoggerStats ls = logger_get_stats();
+
+    // --- SD ---
+    bool sd_ok = sd_mgr_ready();
+
+    // --- VR diagnostics ---
+    vr_diagnostics_t vr = vehicle_recog_get_diagnostics();
+
+    // --- Radar ---
+    const RadarSensorStatus& r0 = hal_radar_get_status(RADAR_SENSOR_VHOD);
+    const RadarSensorStatus& r1 = hal_radar_get_status(RADAR_SENSOR_CESTA_L);
+    const RadarSensorStatus& r2 = hal_radar_get_status(RADAR_SENSOR_CESTA_D);
+    const RadarSensorStatus& r3 = hal_radar_get_status(RADAR_SENSOR_GARAZA);
+
+    uint32_t uptime_s = (uint32_t)(millis() / 1000UL);
+
+    LOG_INFO("LOGGER", "%s", is_boot ? "=== BOOT HEALTH ===" : "=== SYS HEALTH ===");
+
+    auto ssr_on = [](const SsrState& s) -> bool {
+        return s.state == SsrLogicState::ON_AUTO || s.state == SsrLogicState::ON_MANUAL;
+    };
+
+    LOG_INFO("LOGGER", "SSR:  1=%s%s 2=%s%s 3=%s%s 4=%s%s",
+             ssr_on(ll.ssr[1]) ? "on" : "off", ll.ssr[1].disabled ? "(dis)" : "",
+             ssr_on(ll.ssr[2]) ? "on" : "off", ll.ssr[2].disabled ? "(dis)" : "",
+             ssr_on(ll.ssr[3]) ? "on" : "off", ll.ssr[3].disabled ? "(dis)" : "",
+             ssr_on(ll.ssr[4]) ? "on" : "off", ll.ssr[4].disabled ? "(dis)" : "");
+
+    LOG_INFO("LOGGER", "ENV:  %s  lux=%.1f  motion=%s  alarm=%s",
+             ll.is_night ? "NIGHT" : "DAY",
+             (double)ll.lux,
+             ll.any_motion ? "yes" : "no",
+             ll.alarm_active ? "ON" : "off");
+
+    LOG_INFO("LOGGER", "RAM:  buf=%uB %s  used=%uB  dropped=%lu",
+             (unsigned)ls.buf_total_bytes,
+             s_ram_in_psram ? "PSRAM" : "HEAP",
+             (unsigned)ls.buf_used_bytes,
+             (unsigned long)ls.dropped_lines);
+
+    LOG_INFO("LOGGER", "SD:   %s  NTP=%s  uptime=%lus",
+             sd_ok ? "ok" : "err",
+             ls.ntp_synced ? "ok" : "no",
+             (unsigned long)uptime_s);
+
+    LOG_INFO("LOGGER", "VR:   A=%s(%u) B=%s(%u)  recs=%lu aborted=%lu",
+             vr.baseline_A_valid ? "calib" : "uncalib", (unsigned)vr.models_A,
+             vr.baseline_B_valid ? "calib" : "uncalib", (unsigned)vr.models_B,
+             (unsigned long)vr.total_recognitions,
+             (unsigned long)vr.total_aborted);
+
+    LOG_INFO("LOGGER", "RADAR: Vhod=%s CestaL=%s CestaD=%s Garaza=%s",
+             r0.active ? "ok" : "err",
+             r1.active ? "ok" : "err",
+             r2.active ? "ok" : "err",
+             r3.active ? "ok" : "err");
+
+    if (is_boot) {
+        hal_radar_log_stats();
+    }
 }

@@ -127,7 +127,7 @@ static void update_status(WifiState state) {
 // ============================================================
 
 static bool wifi_connect_one(const char* ssid, const char* pass) {
-    WF_I("Poskušam: SSID='%s' ...", ssid);
+    WF_I("Connecting: SSID='%s' ...", ssid);
 
     WiFi.begin(ssid, pass);
 
@@ -136,17 +136,17 @@ static bool wifi_connect_one(const char* ssid, const char* pass) {
     while (WiFi.status() != WL_CONNECTED) {
         vTaskDelay(pdMS_TO_TICKS(WIFI_CONNECT_POLL_MS));
         elapsed = millis() - start;
-        WF_D("  ... čakam %lu ms (status=%d)", elapsed, WiFi.status());
+        WF_D("  ... waiting %lu ms (status=%d)", elapsed, WiFi.status());
 
         if (elapsed >= WIFI_CONNECT_TIMEOUT_MS) {
-            WF_W("  Timeout %lu ms — SSID '%s' nedosegljiv", elapsed, ssid);
+            WF_W("  Timeout %lu ms — SSID '%s' unreachable", elapsed, ssid);
             WiFi.disconnect(true);
             vTaskDelay(pdMS_TO_TICKS(200));
             return false;
         }
     }
 
-    WF_I("Povezan z '%s' v %lu ms", ssid, millis() - start);
+    WF_I("Connected to '%s' in %lu ms", ssid, millis() - start);
     WF_I("  IP:   %s", WiFi.localIP().toString().c_str());
     WF_I("  GW:   %s", WiFi.gatewayIP().toString().c_str());
     WF_I("  RSSI: %d dBm", WiFi.RSSI());
@@ -158,11 +158,11 @@ static bool wifi_connect_one(const char* ssid, const char* pass) {
 // ============================================================
 
 static bool wifi_connect_best() {
-    WF_I("=== WiFi connect — %d omrežij v seznamu ===", WIFI_NETWORK_COUNT);
+    WF_I("=== WiFi connect — %d networks in list ===", WIFI_NETWORK_COUNT);
 
     // Statična IP konfiguracija pred WiFi.begin()
     if (!WiFi.config(WIFI_LOCAL_IP, WIFI_GATEWAY, WIFI_SUBNET, WIFI_DNS)) {
-        WF_W("Statična IP konfiguracija napaka — DHCP bo uporabljen");
+        WF_W("Static IP config failed — using DHCP");
     } else {
         WF_I("Statična IP: %s GW: %s",
              WIFI_LOCAL_IP.toString().c_str(),
@@ -175,7 +175,7 @@ static bool wifi_connect_best() {
     update_status(WifiState::CONNECTING);
 
     for (int i = 0; i < WIFI_NETWORK_COUNT; i++) {
-        WF_I("Omrežje %d/%d: '%s'", i + 1, WIFI_NETWORK_COUNT, WIFI_SSID_LIST[i]);
+        WF_I("Network %d/%d: '%s'", i + 1, WIFI_NETWORK_COUNT, WIFI_SSID_LIST[i]);
 
         if (wifi_connect_one(WIFI_SSID_LIST[i], WIFI_PASS_LIST[i])) {
             if (take_mutex()) {
@@ -188,12 +188,12 @@ static bool wifi_connect_best() {
         }
 
         if (i < WIFI_NETWORK_COUNT - 1) {
-            WF_D("Premor 2s pred naslednjim omrežjem...");
+            WF_D("2s pause before next network...");
             vTaskDelay(pdMS_TO_TICKS(2000));
         }
     }
 
-    WF_E("Nobeno omrežje ni dosegljivo (%d poskusov)", WIFI_NETWORK_COUNT);
+    WF_E("No network reachable (%d attempts)", WIFI_NETWORK_COUNT);
     update_status(WifiState::FAILED);
     return false;
 }
@@ -224,11 +224,11 @@ static bool wifi_ntp_sync() {
         if (now > 1577836800UL) {   // 2020-01-01 = sinhroniziran
             break;
         }
-        WF_D("NTP čakam... %lu ms (time=%lu)", elapsed, (unsigned long)now);
+        WF_D("NTP waiting... %lu ms (time=%lu)", elapsed, (unsigned long)now);
     }
 
     if (now <= 1577836800UL) {
-        WF_W("NTP sync TIMEOUT po %lu ms — timestamps bodo millis()", elapsed);
+        WF_W("NTP sync TIMEOUT after %lu ms — timestamps will use millis()", elapsed);
         return false;
     }
 
@@ -240,7 +240,7 @@ static bool wifi_ntp_sync() {
              t.tm_year + 1900, t.tm_mon + 1, t.tm_mday,
              t.tm_hour, t.tm_min, t.tm_sec);
 
-    WF_I("NTP sync OK v %lu ms — lokalni čas: %s (CET/CEST)", elapsed, time_str);
+    WF_I("NTP sync OK in %lu ms — local time: %s (CET/CEST)", elapsed, time_str);
 
     // Obvesti logger, EventBus in midnight flush task
     logger_set_ntp_synced(true);
@@ -266,7 +266,7 @@ static void wifi_ntp_check() {
     if ((millis() - s_last_ntp_check_ms) < NTP_CHECK_INTERVAL_MS) return;
 
     s_last_ntp_check_ms = millis();
-    WF_D("NTP periodično preverjanje...");
+    WF_D("NTP periodic check...");
 
     // Preveri drift med SNTP in lokalnim časom
     // esp_sntp_get_sync_status() vrne SNTP_SYNC_STATUS_COMPLETED ko je sync svež
@@ -279,7 +279,7 @@ static void wifi_ntp_check() {
     // Preveri ali je čas smiseln
     time_t now = time(nullptr);
     if (now <= 1577836800UL) {
-        WF_W("NTP: čas ni veljaven po 6h — ponovni sync...");
+        WF_W("NTP: time invalid after 6h — re-sync...");
         logger_set_ntp_synced(false);
         wifi_ntp_sync();
     } else {
@@ -304,17 +304,17 @@ static bool wifi_watchdog_check() {
          status, rssi, WiFi.SSID().c_str());
 
     if (status != WL_CONNECTED) {
-        WF_W("Watchdog: WiFi status=%d — ni WL_CONNECTED!", status);
+        WF_W("Watchdog: WiFi status=%d — not WL_CONNECTED!", status);
         return false;
     }
 
     if (rssi == 0) {
-        WF_W("Watchdog: RSSI=0 — izgubljena povezava (status lažno OK)");
+        WF_W("Watchdog: RSSI=0 — connection lost (status falsely OK)");
         return false;
     }
 
     if (rssi < -85) {
-        WF_W("Watchdog: RSSI=%d dBm — slab signal, možen izpad", rssi);
+        WF_W("Watchdog: RSSI=%d dBm — weak signal, possible dropout", rssi);
         // Ne prekinemo — samo opozorilo
     }
 
@@ -346,7 +346,7 @@ static void wifi_reconnect() {
 
     // Čakaj backoff interval (s watchdog reset-i)
     if (backoff_ms > 0) {
-        WF_I("Čakam %lu ms pred reconnectom...", (unsigned long)backoff_ms);
+        WF_I("Waiting %lu ms before reconnect...", (unsigned long)backoff_ms);
         update_status(WifiState::DISCONNECTED);
 
         uint32_t waited = 0;
@@ -365,7 +365,7 @@ static void wifi_reconnect() {
     bool ok = wifi_connect_best();
 
     if (ok) {
-        WF_I("Reconnect uspešen — IP: %s", WiFi.localIP().toString().c_str());
+        WF_I("Reconnect OK — IP: %s", WiFi.localIP().toString().c_str());
 
         // Reset backoff
         if (take_mutex()) {
@@ -385,7 +385,7 @@ static void wifi_reconnect() {
             // Preveri ali je čas še veljaven
             time_t now = time(nullptr);
             if (now <= 1577836800UL) {
-                WF_W("NTP: čas izgubljen ob reconnectu — ponovni sync");
+                WF_W("NTP: time lost after reconnect — re-sync");
                 wifi_ntp_sync();
             }
         }
@@ -399,7 +399,7 @@ static void wifi_reconnect() {
                                       (uint32_t)BACKOFF_MAX_MS);
             give_mutex();
         }
-        WF_W("Reconnect neuspešen — naslednji backoff: %lu ms",
+        WF_W("Reconnect failed — next backoff: %lu ms",
              (unsigned long)s_status.backoff_ms);
     }
 }
@@ -418,7 +418,7 @@ void wifiTask(void* pvParams) {
     // Mutex kreacija
     s_mutex = xSemaphoreCreateMutex();
     if (!s_mutex) {
-        WF_E("Mutex kreacija NAPAKA — wifiTask konča!");
+        WF_E("Mutex create failed — wifiTask exits!");
         vTaskDelete(nullptr);
         return;
     }
@@ -431,7 +431,7 @@ void wifiTask(void* pvParams) {
     strncpy(s_status.ntp_time, "--", sizeof(s_status.ntp_time));
 
     // Kratka zakasnitev — daj ostalim taskom čas za init
-    WF_D("Čakam 1s da se ostali taski inicializirajo...");
+    WF_D("1s init delay for other tasks...");
     vTaskDelay(pdMS_TO_TICKS(1000));
 
     // --------------------------------------------------------
@@ -468,35 +468,35 @@ void wifiTask(void* pvParams) {
         // DOKUMENTIRANO: ram_problem4.md (Patch 4, 2026-05)
         // --------------------------------------------------------
         if (!led_mgr_is_ready()) {
-            WF_I("Čakam LED startup delay pred web_ui_begin()...");
+            WF_I("Waiting for LED startup delay before web_ui_begin()...");
             while (!led_mgr_is_ready()) {
                 vTaskDelay(pdMS_TO_TICKS(500));
             }
-            WF_I("LED startup delay iztekel — nadaljujem z web_ui_begin()");
+            WF_I("LED startup delay elapsed — continuing with web_ui_begin()");
         }
 
         // --------------------------------------------------------
         // FAZA 4 — Web UI start (PO LED delay — SRAM stabilen)
         // --------------------------------------------------------
         WF_I("=== SRAM pred web_ui_begin ===");
-        WF_I("  SRAM prosto:        %lu B",
+        WF_I("  SRAM free:          %lu B",
              (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
         WF_I("  SRAM min-ever:      %lu B",
              (unsigned long)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-        WF_I("  SRAM največji blok: %lu B",
+        WF_I("  SRAM max-block:     %lu B",
              (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
         if (!web_ui_running()) {
             web_ui_begin();
         }
         _web_start_ms = millis();
         WF_I("=== SRAM po  web_ui_begin ===");
-        WF_I("  SRAM prosto:        %lu B",
+        WF_I("  SRAM free:          %lu B",
              (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
         WF_I("  SRAM min-ever:      %lu B",
              (unsigned long)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-        WF_I("  SRAM največji blok: %lu B",
+        WF_I("  SRAM max-block:     %lu B",
              (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-        WF_I("  PSRAM prosto:       %lu B",
+        WF_I("  PSRAM free:         %lu B",
              (unsigned long)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
 
         // FAZA 5 — mDNS ODSTRANJEN (statična IP 192.168.2.170, mDNS ni potreben)
@@ -505,7 +505,7 @@ void wifiTask(void* pvParams) {
 
     } else {
         // Prva povezava ni uspela — začni reconnect zanko
-        WF_W("Prva WiFi povezava neuspešna — začenjam reconnect zanko");
+        WF_W("First WiFi connect failed — entering reconnect loop");
         EventBus::publish(EventType::WIFI_DISCONNECTED, 0);
     }
 
@@ -529,10 +529,10 @@ void wifiTask(void* pvParams) {
             tcp_self_test_done = true;
             WiFiClient client;
             if (client.connect("192.168.2.170", 80)) {
-                WF_I("TCP self-connect 192.168.2.170:80 → USPEL");
+                WF_I("TCP self-connect 192.168.2.170:80 → OK");
                 client.stop();
             } else {
-                WF_I("TCP self-connect 192.168.2.170:80 → NEUSPEL (server morda ne posluša)");
+                WF_I("TCP self-connect 192.168.2.170:80 → FAILED (server may not be listening)");
             }
         }
         uint32_t now_ms = millis();
@@ -548,19 +548,19 @@ void wifiTask(void* pvParams) {
         if ((now_ms - last_watchdog_ms) >= WATCHDOG_INTERVAL_MS) {
             last_watchdog_ms = now_ms;
             WF_I("--- RAM status ---");
-            WF_I("  SRAM prosto:        %lu B  (min-ever: %lu B)",
+            WF_I("  SRAM free:          %lu B  (min-ever: %lu B)",
                  (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
                  (unsigned long)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-            WF_I("  SRAM največji blok: %lu B",
+            WF_I("  SRAM max-block:     %lu B",
                  (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-            WF_I("  PSRAM prosto:       %lu B",
+            WF_I("  PSRAM free:         %lu B",
                  (unsigned long)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
             WF_I("  wifiTask stack:     %lu B free / %d B total",
                  (unsigned long)uxTaskGetStackHighWaterMark(nullptr) * sizeof(StackType_t),
                  TASK_WIFI_STACK);
 
             if (!wifi_watchdog_check()) {
-                WF_W("Watchdog: izgubljena WiFi povezava — reconnect");
+                WF_W("Watchdog: WiFi connection lost — reconnecting");
                 wifi_reconnect();
                 last_watchdog_ms = millis();   // reset po reconnectu
             }
@@ -614,5 +614,5 @@ const char* wifi_manager_get_wled_ip() {
 }
 
 void wifi_manager_trigger_flush() {
-    logger_flush();
+    logger_dump_to_sd();
 }

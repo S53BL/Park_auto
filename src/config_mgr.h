@@ -167,6 +167,13 @@ struct Config {
     // Radar polling interval in overflow prag (hal_radar v2.0)
     uint32_t radar_poll_interval_ms;      // default: 50, min: 10, max: 100
     uint32_t radar_max_consec_overflows;  // default: 10, min: 1,  max: 100
+
+    // ----------------------------------------------------------
+    // Tab: Party / WLED
+    // ----------------------------------------------------------
+
+    // IP naslov Party ESP (WLED), dostopen prek /api/party/config.
+    char wled_ip[32];   // default: "192.168.4.1"
 };
 
 // ============================================================
@@ -220,6 +227,9 @@ inline Config config_defaults() {
     c.radar_persistence_n        = 3;
     c.radar_poll_interval_ms     = RADAR_POLL_INTERVAL_MS_DEFAULT;  // 50
     c.radar_max_consec_overflows = RADAR_MAX_CONSECUTIVE_OVERFLOWS;  // 10
+    // Party / WLED
+    strncpy(c.wled_ip, "192.168.4.1", sizeof(c.wled_ip));
+    c.wled_ip[sizeof(c.wled_ip) - 1] = '\0';
     return c;
 }
 

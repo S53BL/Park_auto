@@ -50,12 +50,17 @@
 #include "event_bus.h"
 #include "vehicle_recog.h"
 
+#include "led_manager.h"
+#include "screen_party.h"
+
 #include <LittleFS.h>
 #include <ESPAsyncWebServer.h>
 #include <ArduinoJson.h>
+#include <HTTPClient.h>
 #include <esp_ota_ops.h>
 #include <Update.h>
 #include <freertos/semphr.h>
+#include <freertos/queue.h>
 #include <esp_heap_caps.h>
 
 // ============================================================
@@ -82,6 +87,32 @@ static PsramAllocator s_psram_alloc;
 static char*          _json_buf    = nullptr;
 static const size_t   _json_buf_sz = 8192;
 
+static uint8_t*        _index_html_buf   = nullptr;  // PSRAM cache za SPA fallback
+static size_t          _index_html_sz    = 0;
+static SemaphoreHandle_t _json_buf_mutex = nullptr;  // serializa sočasne _sendJson klice
+
+// ============================================================
+// WLED COMMAND QUEUE (A2/A4)
+// ============================================================
+
+enum class WledCmdType : uint8_t {
+    TOGGLE,      // payload: 1=on, 0=off
+    EFFECT,      // payload: fx_id
+    COLOR,       // payload: (R<<16)|(G<<8)|B
+    BRIGHTNESS,  // payload: 0-255
+    SPEED,       // payload: 0-255
+    PRESET,      // payload: preset_idx 0-3; reads full state from screen_party
+};
+
+struct WledCmd {
+    WledCmdType type;
+    uint32_t    payload;
+};
+
+static QueueHandle_t s_wled_q    = nullptr;
+static TaskHandle_t  s_wled_task = nullptr;
+static bool          s_wled_on   = false;   // mirror: je WLED prižgan
+
 // ============================================================
 // SECTION 2 — POMOŽNE FUNKCIJE
 // ============================================================
@@ -94,12 +125,14 @@ static void _sendError(AsyncWebServerRequest* req, int code, const char* msg) {
 }
 
 // Pošlje JsonDocument prek statičnega PSRAM bufferja — brez cbuf verige v SRAM.
-// _json_buf je 8 KB v PSRAM; beginResponse() naredi bounded String kopijo (max 8 KB)
-// ki se pravilno sprosti ko AsyncBasicResponse uniči objekt (ni cbuf leak ob TCP RST).
+// _json_buf je 8 KB v PSRAM; beginResponse() naredi String kopijo takojšnje (data safe po klicu).
+// Mutex serializa sočasne klice (AsyncTCP multi-conn scenarij).
 static void _sendJson(AsyncWebServerRequest* req, int code, JsonDocument& doc) {
     if (!_json_buf) { _sendError(req, 503, "json buf not initialized"); return; }
+    if (_json_buf_mutex) xSemaphoreTake(_json_buf_mutex, portMAX_DELAY);
     size_t len = serializeJson(doc, _json_buf, _json_buf_sz);
     AsyncWebServerResponse* resp = req->beginResponse(code, "application/json", _json_buf);
+    if (_json_buf_mutex) xSemaphoreGive(_json_buf_mutex);
     resp->addHeader("Cache-Control", "no-cache");
     req->send(resp);
     LOG_DEBUG(TAG, "HTTP %d → %s [%u B] | SRAM: %lu B",
@@ -149,6 +182,13 @@ static void _handleStatusLight(AsyncWebServerRequest* req) {
             s["id"] = i; s["on"] = false; s["countdown_s"] = 0;
             s["disabled"] = false; s["state_str"] = "UNKNOWN";
         }
+    }
+
+    // Lux + noč/dan (za diagnostiko na spletni strani)
+    if (light_logic_ok()) {
+        LightLogicState st = light_logic_get_state();
+        doc["lux"]      = (double)st.lux;
+        doc["is_night"] = st.is_night;
     }
 
     GpioState gpio = hal_gpio_get_state();
@@ -314,85 +354,28 @@ static void _handleLogsGet(AsyncWebServerRequest* req) {
         if (n > 0 && n <= 1000) max_lines = (uint16_t)n;
     }
 
-    // Log buffer v PSRAM
-    char* buf = (char*)ps_malloc(WEB_LOG_BUF_SIZE);
-    if (!buf) buf = (char*)malloc(WEB_LOG_BUF_SIZE);
+    // PSRAM — brez SRAM fallback (PSRAM je v izobilju, SRAM je dragocen).
+    char* buf = (char*)heap_caps_malloc(WEB_LOG_BUF_SIZE, MALLOC_CAP_SPIRAM);
     if (!buf) { _sendError(req, 503, "out of memory"); return; }
 
-    size_t len = logger_get_recent(buf, WEB_LOG_BUF_SIZE, max_lines);
+    size_t len = logger_get_recent(buf, WEB_LOG_BUF_SIZE - 1, max_lines);
     buf[len] = '\0';
 
-    bool has_filter = req->hasParam("level");
-    String lvl_filter = "";
-    if (has_filter) {
-        lvl_filter = req->getParam("level")->value();
-        lvl_filter.toUpperCase();
-    }
-
-    // JSON izhod v ločenem PSRAM bufferju.
-    // AsyncResponseStream::_fillBuffer kliče StreamString::read() → String::remove(0,1)
-    // → memmove celotnega preostalega stringa za vsak bajt → O(n²) → WDT crash pri >~5 KB.
-    // Rešitev: predhodno sestavimo JSON v PSRAM, pošljemo prek AwsResponseFiller
-    // (direkten memcpy iz PSRAM v TCP buffer) → O(n) skupaj, brez memmove.
-    const size_t JSON_BUF = WEB_LOG_BUF_SIZE * 2 + 32;  // worst case: vsak znak escaped
-    char* json = (char*)ps_malloc(JSON_BUF);
-    if (!json) json = (char*)malloc(JSON_BUF);
-    if (!json) { free(buf); _sendError(req, 503, "out of memory"); return; }
-
-    size_t jpos = 0;
-    json[jpos++] = '[';
-
-    bool first = true;
-    char* line = buf;
-    char* end  = buf + len;
-
-    while (line < end) {
-        char* nl    = (char*)memchr(line, '\n', end - line);
-        size_t llen = nl ? (size_t)(nl - line) : (size_t)(end - line);
-
-        if (llen > 0) {
-            bool include = true;
-            if (has_filter) {
-                if      (lvl_filter == "ERROR") include = (strstr(line, ":ERROR]") != nullptr);
-                else if (lvl_filter == "WARN")  include = (strstr(line, ":WARN]")  != nullptr ||
-                                                           strstr(line, ":ERROR]") != nullptr);
-                else if (lvl_filter == "INFO")  include = (strstr(line, ":ERROR]") != nullptr ||
-                                                           strstr(line, ":WARN]")  != nullptr ||
-                                                           strstr(line, ":INFO]")  != nullptr);
-            }
-
-            if (include && jpos + llen * 2 + 4 < JSON_BUF - 2) {
-                if (!first) json[jpos++] = ',';
-                first = false;
-                json[jpos++] = '"';
-                for (size_t i = 0; i < llen; i++) {
-                    char c = line[i];
-                    if      (c == '"')  { json[jpos++] = '\\'; json[jpos++] = '"';  }
-                    else if (c == '\\') { json[jpos++] = '\\'; json[jpos++] = '\\'; }
-                    else if (c == '\r') { /* skip */ }
-                    else if (c < 0x20)  json[jpos++] = ' ';
-                    else                json[jpos++] = c;
-                }
-                json[jpos++] = '"';
-            }
-        }
-        line = nl ? nl + 1 : end;
-    }
-
-    json[jpos++] = ']';
-    json[jpos]   = '\0';
-    free(buf);
-
-    size_t json_len = jpos;
+    // Strežemo text/plain direktno iz PSRAM — brez JSON enkodiranja, brez drugega bufferja.
+    // Filtriranje, parsiranje in rendering opravi brskalnik.
+    // X-Log-Total: monotoni števec → brskalnik ve točno koliko novih vrstic appenda (O(1) cursor).
+    // AwsResponseFiller: direkten memcpy PSRAM → TCP buffer, brez String kopije v SRAM.
+    uint32_t total = logger_total_lines();
     AsyncWebServerResponse* resp = req->beginResponse(
-        "application/json", json_len,
-        [json, json_len](uint8_t* outBuf, size_t maxLen, size_t index) -> size_t {
-            if (index >= json_len) { free(json); return 0; }
-            size_t n = (json_len - index < maxLen) ? (json_len - index) : maxLen;
-            memcpy(outBuf, (const uint8_t*)json + index, n);
+        "text/plain; charset=utf-8", len,
+        [buf, len](uint8_t* out, size_t maxLen, size_t index) -> size_t {
+            if (index >= len) { free(buf); return 0; }
+            size_t n = (len - index < maxLen) ? (len - index) : maxLen;
+            memcpy(out, (const uint8_t*)buf + index, n);
             return n;
         });
     resp->addHeader("Cache-Control", "no-cache");
+    resp->addHeader("X-Log-Total", String(total).c_str());
     req->send(resp);
 }
 
@@ -1058,15 +1041,34 @@ static void _handleNotFound(AsyncWebServerRequest* req) {
 
     String url = req->url();
 
-    // SPA fallback — pot ki ni /api ali /files → index.html (Alpine.js router)
-    if (!url.startsWith("/api") && !url.startsWith("/files")) {
-        bool idx_exists = LittleFS.exists(WEB_ASSETS_PATH "/index.html");
-        LOG_INFO(TAG, "SPA fallback: %s → index.html exists=%d", url.c_str(), idx_exists);
-        if (!idx_exists) {
-            req->send(503, "text/plain", "LittleFS: index.html not found — run uploadfs");
+    // Binarni/medijski resursi ki ne obstajajo → 404 (ne SPA fallback).
+    // Brskalnik cachira 404, zato po prvem page load-u ne zahteva več.
+    // Brez tega: vsak font dobi index.html (napačen Content-Type), brskalnik zavrže in
+    // ponavlja zahteve pri vsaki obnovi → nepotrebne VFS operacije.
+    static const char* const s_no_spa[] = {
+        ".woff", ".woff2", ".ttf", ".otf", ".eot",
+        ".ico", ".png", ".jpg", ".jpeg", ".gif", ".svg",
+        ".mp3", ".mp4", ".webm", nullptr
+    };
+    for (int i = 0; s_no_spa[i]; i++) {
+        if (url.endsWith(s_no_spa[i])) {
+            req->send(404, "text/plain", "not found");
             return;
         }
-        req->send(LittleFS, WEB_ASSETS_PATH "/index.html", "text/html");
+    }
+
+    // SPA fallback — pot ki ni /api ali /files → index.html (Alpine.js router).
+    // Strežemo iz PSRAM bufferja (prednaložen ob startu) — brez VFS fopen() v hot potu.
+    // Prej: 3× fopen() na zahtevo × 5 sočasnih fontov → SRAM OOM → abort().
+    if (!url.startsWith("/api") && !url.startsWith("/files")) {
+        if (!_assets_ok || !_index_html_buf) {
+            req->send(503, "text/plain", "LittleFS: index.html not loaded — run uploadfs");
+            return;
+        }
+        LOG_INFO(TAG, "SPA fallback: %s → index.html (PSRAM %u B)", url.c_str(), (unsigned)_index_html_sz);
+        AsyncWebServerResponse* resp = req->beginResponse_P(200, "text/html", _index_html_buf, _index_html_sz);
+        resp->addHeader("Cache-Control", "no-cache");
+        req->send(resp);
         return;
     }
 
@@ -1078,6 +1080,182 @@ static void _handleNotFound(AsyncWebServerRequest* req) {
     String body;
     serializeJson(doc, body);
     req->send(404, "application/json", body);
+}
+
+// ============================================================
+// SECTION 3c — WLED TASK (A2/A3/A4)
+// ============================================================
+
+static void _wled_post(const char* ip, const char* body) {
+    char url[64];
+    snprintf(url, sizeof(url), "http://%s/json/state", ip);
+    HTTPClient http;
+    http.begin(url);
+    http.addHeader("Content-Type", "application/json");
+    http.setTimeout(2000);
+    int code = http.POST((uint8_t*)body, strlen(body));
+    if (code > 0) {
+        LOG_DEBUG(TAG, "WLED POST %s → HTTP %d", body, code);
+    } else {
+        LOG_WARN(TAG, "WLED POST napaka: %d (%s) body=%s",
+                 code, HTTPClient::errorToString(code).c_str(), body);
+    }
+    http.end();
+}
+
+static void _wled_poll(const char* ip) {
+    char url[64];
+    snprintf(url, sizeof(url), "http://%s/json/state", ip);
+    HTTPClient http;
+    http.begin(url);
+    http.setTimeout(2000);
+    int code = http.GET();
+    if (code == 200) {
+        String resp = http.getString();
+        JsonDocument doc(&s_psram_alloc);
+        if (!deserializeJson(doc, resp)) {
+            PartyState ps  = screen_party_get_state();
+            ps.party_on    = doc["on"].as<bool>();
+            ps.brightness  = doc["bri"] | ps.brightness;
+            if (doc["seg"].is<JsonArray>() && doc["seg"].as<JsonArray>().size() > 0) {
+                ps.fx_id = doc["seg"][0]["fx"] | ps.fx_id;
+                ps.speed = doc["seg"][0]["sx"] | ps.speed;
+            }
+            screen_party_set_state(ps);
+        }
+    } else if (code > 0) {
+        LOG_DEBUG(TAG, "WLED poll HTTP %d", code);
+    }
+    http.end();
+}
+
+static void wledTask(void* pv) {
+    static const uint32_t POLL_MS = 5000;
+    uint32_t last_poll = millis() - POLL_MS;
+
+    WledCmd cmd;
+    while (true) {
+        uint32_t now     = millis();
+        uint32_t elapsed = now - last_poll;
+        uint32_t wait    = (elapsed >= POLL_MS) ? 0 : (POLL_MS - elapsed);
+
+        bool got = (xQueueReceive(s_wled_q, &cmd, pdMS_TO_TICKS(wait)) == pdTRUE);
+
+        const Config cfg = config_get();
+        const char* ip   = cfg.wled_ip;
+        char body[160];
+
+        if (got) {
+            switch (cmd.type) {
+                case WledCmdType::TOGGLE:
+                    if (cmd.payload) {
+                        // ON: MUX HIGH je že nastavljen v screen_party.cpp
+                        vTaskDelay(pdMS_TO_TICKS(MUX_SWITCH_DELAY_MS));
+                        _wled_post(ip, "{\"on\":true}");
+                        s_wled_on = true;
+                        LOG_INFO(TAG, "WLED ON → %s", ip);
+                    } else {
+                        // OFF: ugasni WLED, nato vrni MUX
+                        _wled_post(ip, "{\"on\":false}");
+                        vTaskDelay(pdMS_TO_TICKS(MUX_SWITCH_DELAY_MS));
+                        led_mgr_set_party_mode(false);
+                        s_wled_on = false;
+                        LOG_INFO(TAG, "WLED OFF, MUX → PRIMARY");
+                    }
+                    break;
+                case WledCmdType::EFFECT:
+                    snprintf(body, sizeof(body),
+                             "{\"seg\":[{\"fx\":%lu}]}", (unsigned long)cmd.payload);
+                    _wled_post(ip, body);
+                    break;
+                case WledCmdType::COLOR: {
+                    uint8_t r = (cmd.payload >> 16) & 0xFF;
+                    uint8_t g = (cmd.payload >> 8)  & 0xFF;
+                    uint8_t b =  cmd.payload        & 0xFF;
+                    snprintf(body, sizeof(body),
+                             "{\"seg\":[{\"col\":[[%u,%u,%u]]}]}", r, g, b);
+                    _wled_post(ip, body);
+                    break;
+                }
+                case WledCmdType::BRIGHTNESS:
+                    snprintf(body, sizeof(body),
+                             "{\"bri\":%lu}", (unsigned long)cmd.payload);
+                    _wled_post(ip, body);
+                    break;
+                case WledCmdType::SPEED:
+                    snprintf(body, sizeof(body),
+                             "{\"seg\":[{\"sx\":%lu}]}", (unsigned long)cmd.payload);
+                    _wled_post(ip, body);
+                    break;
+                case WledCmdType::PRESET: {
+                    PartyState ps = screen_party_get_state();
+                    uint8_t r = (ps.color_rgb >> 16) & 0xFF;
+                    uint8_t g = (ps.color_rgb >> 8)  & 0xFF;
+                    uint8_t b =  ps.color_rgb        & 0xFF;
+                    snprintf(body, sizeof(body),
+                             "{\"on\":true,\"bri\":%u,"
+                             "\"seg\":[{\"fx\":%u,\"sx\":%u,\"col\":[[%u,%u,%u]]}]}",
+                             ps.brightness, ps.fx_id, ps.speed, r, g, b);
+                    _wled_post(ip, body);
+                    break;
+                }
+                default: break;
+            }
+        }
+
+        now = millis();
+        if ((now - last_poll) >= POLL_MS) {
+            if (s_wled_on) _wled_poll(ip);
+            last_poll = now;
+        }
+    }
+}
+
+// ============================================================
+// SECTION 3d — HANDLER-JI: /api/party/config (A3)
+// ============================================================
+
+static void _handlePartyConfigGet(AsyncWebServerRequest* req) {
+    _stats.req_total++;
+    _stats.req_api++;
+    LOG_DEBUG(TAG, "GET /api/party/config");
+    const Config cfg = config_get();
+    JsonDocument doc(&s_psram_alloc);
+    doc["wled_ip"] = cfg.wled_ip;
+    _sendJson(req, 200, doc);
+}
+
+static void _handlePartyConfigPost(AsyncWebServerRequest* req, uint8_t* data,
+                                   size_t len, size_t index, size_t total) {
+    _stats.req_total++;
+    _stats.req_api++;
+    if (index + len < total) return;
+
+    LOG_INFO(TAG, "POST /api/party/config [%u B]", (unsigned)len);
+    JsonDocument doc(&s_psram_alloc);
+    if (deserializeJson(doc, data, len)) {
+        _sendError(req, 400, "invalid JSON"); return;
+    }
+    if (!doc["wled_ip"].is<const char*>()) {
+        _sendError(req, 400, "missing wled_ip"); return;
+    }
+    const char* ip = doc["wled_ip"].as<const char*>();
+    size_t iplen = ip ? strlen(ip) : 0;
+    if (iplen == 0 || iplen >= 32) {
+        _sendError(req, 400, "wled_ip invalid (1-31 chars)"); return;
+    }
+
+    Config cfg = config_get();
+    strncpy(cfg.wled_ip, ip, sizeof(cfg.wled_ip));
+    cfg.wled_ip[sizeof(cfg.wled_ip) - 1] = '\0';
+    config_set(cfg);
+    config_save();
+    LOG_INFO(TAG, "WLED IP nastavljen: %s", cfg.wled_ip);
+
+    JsonDocument resp(&s_psram_alloc);
+    resp["ok"]      = true;
+    resp["wled_ip"] = cfg.wled_ip;
+    _sendJson(req, 200, resp);
 }
 
 // ============================================================
@@ -1299,6 +1477,14 @@ static void _registerHandlers() {
         _sendJson(req, 200, doc);
     });
 
+    // Party / WLED config
+    _server->on("/api/party/config", HTTP_GET, _handlePartyConfigGet);
+    _server->on("/api/party/config", HTTP_POST,
+        [](AsyncWebServerRequest* req) {},
+        nullptr,
+        _handlePartyConfigPost
+    );
+
     // Restart
     _server->on("/api/restart", HTTP_POST, _handleRestart);
 
@@ -1315,7 +1501,7 @@ static void _registerHandlers() {
     // Statične datoteke iz LittleFS
     _server->serveStatic("/", LittleFS, WEB_ASSETS_PATH "/")
            .setDefaultFile("index.html")
-           .setCacheControl("max-age=86400");
+           .setCacheControl("no-cache");
 
     // Not found
     _server->onNotFound(_handleNotFound);
@@ -1331,6 +1517,47 @@ bool web_ui_init() {
     LOG_INFO(TAG, "web_ui_init()");
     memset(&_stats, 0, sizeof(_stats));
 
+    _json_buf_mutex = xSemaphoreCreateMutex();
+    if (!_json_buf_mutex) LOG_WARN(TAG, "web_ui_init: _json_buf_mutex napaka");
+
+    // WLED queue + EventBus subscriptions (A2)
+    s_wled_q = xQueueCreate(8, sizeof(WledCmd));
+    if (!s_wled_q) {
+        LOG_ERROR(TAG, "web_ui_init: WLED queue napaka");
+    } else {
+        EventBus::subscribe(EventType::BUTTON_PARTY_TOGGLE, [](const Event& ev) {
+            if (!s_wled_q) return;
+            WledCmd c = { WledCmdType::TOGGLE, ev.payload };
+            xQueueSend(s_wled_q, &c, 0);
+        });
+        EventBus::subscribe(EventType::BUTTON_PARTY_EFFECT, [](const Event& ev) {
+            if (!s_wled_q) return;
+            WledCmd c = { WledCmdType::EFFECT, ev.payload };
+            xQueueSend(s_wled_q, &c, 0);
+        });
+        EventBus::subscribe(EventType::BUTTON_PARTY_COLOR, [](const Event& ev) {
+            if (!s_wled_q) return;
+            WledCmd c = { WledCmdType::COLOR, ev.payload };
+            xQueueSend(s_wled_q, &c, 0);
+        });
+        EventBus::subscribe(EventType::BUTTON_PARTY_BRIGHTNESS, [](const Event& ev) {
+            if (!s_wled_q) return;
+            WledCmd c = { WledCmdType::BRIGHTNESS, ev.payload };
+            xQueueSend(s_wled_q, &c, 0);
+        });
+        EventBus::subscribe(EventType::BUTTON_PARTY_SPEED, [](const Event& ev) {
+            if (!s_wled_q) return;
+            WledCmd c = { WledCmdType::SPEED, ev.payload };
+            xQueueSend(s_wled_q, &c, 0);
+        });
+        EventBus::subscribe(EventType::BUTTON_PARTY_PRESET, [](const Event& ev) {
+            if (!s_wled_q) return;
+            WledCmd c = { WledCmdType::PRESET, ev.payload };
+            xQueueSend(s_wled_q, &c, 0);
+        });
+        LOG_INFO(TAG, "WLED EventBus subscribers registrirani");
+    }
+
     if (!LittleFS.begin(false, "/littlefs", 10, "littlefs")) {
         LOG_WARN(TAG, "LittleFS mount failed — assets ne bodo na voljo");
         _littlefs_ok = false;
@@ -1344,6 +1571,21 @@ bool web_ui_init() {
         _assets_ok = true;
         _stats.assets_ok = true;
         LOG_INFO(TAG, "LittleFS assets OK (index.html najden)");
+        // Pre-load index.html v PSRAM — _handleNotFound hot path ne kliče VFS fopen().
+        // Brez tega: 3× fopen() na SPA fallback request; s 5 sočasnimi fonti → SRAM OOM → abort().
+        File f = LittleFS.open(WEB_ASSETS_PATH "/index.html", "r");
+        if (f) {
+            size_t sz = f.size();
+            _index_html_buf = (uint8_t*)heap_caps_malloc(sz, MALLOC_CAP_SPIRAM);
+            if (_index_html_buf) {
+                f.readBytes((char*)_index_html_buf, sz);
+                _index_html_sz = sz;
+                LOG_INFO(TAG, "index.html prednaložen v PSRAM (%u B)", (unsigned)sz);
+            } else {
+                LOG_WARN(TAG, "ps_malloc index.html NEUSPEL — SPA fallback bo klical fopen()");
+            }
+            f.close();
+        }
     } else {
         _assets_ok = false;
         LOG_WARN(TAG, "LittleFS assets: index.html NI najden v %s/", WEB_ASSETS_PATH);
@@ -1385,6 +1627,18 @@ bool web_ui_begin() {
     }
 
     _registerHandlers();
+
+    // Start WLED worker task (A2/A4) — po WiFi connect, na CORE_WIFI
+    if (s_wled_q && !s_wled_task) {
+        BaseType_t r = xTaskCreatePinnedToCore(
+            wledTask, "WLED", 6144, nullptr, 1, &s_wled_task, CORE_WIFI);
+        if (r != pdPASS) {
+            LOG_ERROR(TAG, "wledTask napaka (%d)", (int)r);
+            s_wled_task = nullptr;
+        } else {
+            LOG_INFO(TAG, "wledTask zagnan (Core%d, 6KB stack)", CORE_WIFI);
+        }
+    }
 
     _server->begin();
     // AsyncServer::begin() je void — ne moremo direktno preveriti uspeha.

@@ -77,7 +77,7 @@ bool led_mgr_is_party_mode();
 // speed_ms = skupni čas za fill celotne matrike (iz config.fill_speed_ms).
 // Kliče se ob SSR1 vklopu (svetloba ON).
 // Neblokirajoče — animacija teče v ledTask.
-void led_mgr_fill(uint32_t speed_ms = 0);   // 0 = vzame iz config
+void led_mgr_fill(uint32_t speed_ms = 0, bool reverse = false);  // reverse: desno→levo
 
 // Unfill animacija: postopno gašenje matrike od LED 89 do 0.
 // speed_ms = skupni čas (iz config.unfill_speed_ms).
