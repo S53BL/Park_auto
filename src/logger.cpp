@@ -44,6 +44,7 @@
 #include "vehicle_recog.h"
 #include "hal_radar.h"
 #include <freertos/semphr.h>
+#include <freertos/timers.h>
 #include <time.h>
 #include <esp_heap_caps.h>
 
@@ -76,6 +77,12 @@ static bool              s_initialized    = false;
 static bool              s_sd_attached    = false;
 static bool              s_ntp_synced     = false;
 
+// Timestamp cache — updated every second by FreeRTOS timer task (adequate stack).
+// build_timestamp() reads from here — avoids localtime_r on async_tcp 4096B stack.
+// Intentional benign race: worst case is one log line with a garbled timestamp.
+static char              s_ts_cache[16]   = "[M000000000]";
+static TimerHandle_t     s_ts_timer       = nullptr;
+
 static uint32_t          s_total_lines    = 0;
 static uint32_t          s_dropped_lines  = 0;
 static uint32_t          s_flush_count    = 0;
@@ -104,16 +111,26 @@ static void give_mutex() {
     if (s_mutex) xSemaphoreGive(s_mutex);
 }
 
-// Build timestamp — fixed-width, always in brackets.
-// Z NTP:    "[HH:MM:SS]"   — 10 chars
-// Brez NTP: "[M000123456]" — 12 chars (M + 9-digit millis)
-static void build_timestamp(char* out, size_t out_len) {
+// FreeRTOS timer callback — runs in timer task (large stack), safe for localtime_r.
+// Fires every 1 second after NTP sync; primes s_ts_cache immediately on start.
+static void ts_timer_cb(TimerHandle_t) {
     time_t now = time(nullptr);
     if (s_ntp_synced && now > 1577836800UL) {
         struct tm t;
         localtime_r(&now, &t);
-        snprintf(out, out_len, "[%02d:%02d:%02d]",
+        snprintf(s_ts_cache, sizeof(s_ts_cache), "[%02d:%02d:%02d]",
                  t.tm_hour, t.tm_min, t.tm_sec);
+    } else {
+        snprintf(s_ts_cache, sizeof(s_ts_cache), "[M%09lu]", (unsigned long)millis());
+    }
+}
+
+// Build timestamp — reads from cache (safe on any stack, including async_tcp 4096B).
+// Brez NTP: millis() directly (no localtime_r needed).
+static void build_timestamp(char* out, size_t out_len) {
+    if (s_ntp_synced) {
+        strncpy(out, s_ts_cache, out_len - 1);
+        out[out_len - 1] = '\0';
     } else {
         snprintf(out, out_len, "[M%09lu]", (unsigned long)millis());
     }
@@ -297,6 +314,13 @@ void logger_sd_attach() {
 
 void logger_set_ntp_synced(bool synced) {
     s_ntp_synced = synced;
+    if (synced && !s_ts_timer) {
+        s_ts_timer = xTimerCreate("ts_cache", pdMS_TO_TICKS(1000), pdTRUE, nullptr, ts_timer_cb);
+        if (s_ts_timer) {
+            ts_timer_cb(s_ts_timer);    // prime cache immediately before first NTP log
+            xTimerStart(s_ts_timer, 0);
+        }
+    }
     // Ne kličemo LOG_INFO tukaj — avoid recursive call
     // wifi_manager.cpp bo logiral NTP sync sam
 }
