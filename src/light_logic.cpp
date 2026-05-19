@@ -151,6 +151,7 @@ static bool s_initialized = false;
 
 static bool     s_party_active          = false;  // party je vklopljen
 static bool     s_party_suspended       = false;  // party je začasno prekinjen
+static bool     s_party_priority        = false;  // gibanje ne prekinja party
 static uint8_t  s_party_slot            = 0xFF;   // aktiven slot ob prekinitvi
 static uint32_t s_party_resume_deadline = 0;      // millis() kdaj smemo nadaljevati
 
@@ -433,9 +434,14 @@ bool light_logic_is_party_suspended() {
     return s_party_suspended;
 }
 
+bool light_logic_get_party_priority() {
+    return s_party_priority;
+}
+
 // Prekinitev party ob gibanju/rampi — podaljša deadline ob vsakem novem eventu
 static void _party_extend_or_suspend() {
     if (!s_party_active) return;
+    if (s_party_priority) return;   // Priority mod: gibanje ne prekinja party
     const Config cfg = config_get();
     uint32_t delay_ms = (uint32_t)cfg.party_resume_delay_s * 1000UL;
     if (!s_party_suspended) {
@@ -789,15 +795,29 @@ bool light_logic_init() {
     EventBus::subscribe(EventType::CELL_BROKEN,              on_cell_broken);
     EventBus::subscribe(EventType::ALARM_STATE_CHANGED,      on_alarm_state_changed);
 
-    // Party toggle — sledimo s_party_active; ročni toggle resetira suspended flag
+    // Party toggle — sledimo s_party_active; ročni toggle resetira suspended + priority
     EventBus::subscribe(EventType::BUTTON_PARTY_TOGGLE, [](const Event& ev) {
         bool on = (ev.payload == 1);
         s_party_active    = on;
         s_party_suspended = false;
         if (!on) {
-            LLD("Party: ročni izklop — s_party_active=false");
+            s_party_priority = false;   // priority reset ob izklopu
+            LLD("Party: ročni izklop — s_party_active=false, priority reset");
         } else {
             LLD("Party: ročni vklop — s_party_active=true");
+        }
+    });
+
+    // Party priority toggle — gibanje ne prekinja party; takojšen resume če bil suspended
+    EventBus::subscribe(EventType::BUTTON_PARTY_PRIORITY, [](const Event& ev) {
+        bool prio = (ev.payload != 0);
+        s_party_priority = prio;
+        LLI("Party PRIORITY: %s", prio ? "ON" : "OFF");
+        if (prio && s_party_suspended && s_party_active) {
+            LLI("Party PRIORITY vklopljen med suspended → takojšen resume slot=%d", s_party_slot);
+            s_party_suspended = false;
+            digitalWrite(PIN_MUX_SELECT, HIGH);
+            EventBus::publish(EventType::PARTY_RESUMED, (uint32_t)s_party_slot);
         }
     });
 
@@ -1144,11 +1164,13 @@ LightLogicState light_logic_get_state() {
         st.last_motion_ms = s_last_motion_ms;
         st.alarm_active   = s_alarm_active;
         st.alarm_state    = s_alarm_state;
+        st.party_priority = s_party_priority;
         xSemaphoreGive(s_mutex);
     } else {
         // Fallback: brez mutexa (morda init ni bil klican)
-        st.is_night = s_is_night;
-        st.lux      = s_lux;
+        st.is_night       = s_is_night;
+        st.lux            = s_lux;
+        st.party_priority = s_party_priority;
     }
     return st;
 }

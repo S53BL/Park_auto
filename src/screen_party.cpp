@@ -57,6 +57,7 @@
 #include "event_bus.h"
 #include "config.h"
 #include "config_mgr.h"
+#include "light_logic.h"
 #include <Arduino.h>
 #include <freertos/semphr.h>
 
@@ -79,6 +80,8 @@
 #define C_BORDER_ON       lv_color_hex(0x06B6D4)
 #define C_PARTY_PRIMARY   lv_color_hex(0x06B6D4)   // cyan — primarna party barva (slider indicator)
 #define C_PARTY_ACTIVE    lv_color_hex(0x22D3EE)   // svetel cyan — aktiven element
+#define C_PRIO_ACTIVE     lv_color_hex(0xF59E0B)   // amber — priority gumb aktiven
+#define C_PRIO_ON_BG      lv_color_hex(0x3D2A08)   // temno ozadje priority gumb ON
 #define C_PARTY_DIM_TEXT  lv_color_hex(0x94A3B8)   // tekst sekcijskih headerjev (ločen od ozadja)
 #define C_PARTY_DIM_BG    lv_color_hex(0x2D3A4F)   // ozadje aktivnih gumbov (svetlejši odtenek)
 #define C_TEXT            lv_color_hex(0xF1F5F9)
@@ -99,8 +102,10 @@
 #define PAD               8
 #define SECTION_W         (SCR_W - PAD * 2)
 
-// Toggle
-#define TOGGLE_W          (SECTION_W)
+// Toggle (75%) + Priority gumb (25%), oba v isti vrstici
+#define TOGGLE_PRIO_GAP   4
+#define PRIO_W            74
+#define TOGGLE_W          (SECTION_W - TOGGLE_PRIO_GAP - PRIO_W)
 #define TOGGLE_H          52
 
 // Sloti 3×3
@@ -160,6 +165,11 @@ static bool s_created = false;
 static lv_obj_t* s_toggle_btn   = nullptr;
 static lv_obj_t* s_toggle_lbl   = nullptr;
 static lv_obj_t* s_toggle_dot   = nullptr;
+
+// Priority gumb
+static lv_obj_t* s_prio_btn     = nullptr;
+static lv_obj_t* s_prio_lbl     = nullptr;
+static bool      s_prio_on      = false;   // lokalna kopija za takojšen odziv na dotik
 
 // Sloti 3×3
 static SlotBtn   s_slot[9]      = {};
@@ -256,6 +266,33 @@ static void toggle_event_cb(lv_event_t* e) {
     //       if (on) { setMuxParty(); vTaskDelay(200); wledPost("{\"on\":true}"); }
     //       else    { wledPost("{\"on\":false}"); vTaskDelay(200); setMuxPrimary(); }
     //   });
+}
+
+// ============================================================
+// PRIORITY GUMB
+// ============================================================
+
+static void priority_update_visual() {
+    if (!s_prio_btn || !s_prio_lbl) return;
+    if (s_prio_on) {
+        lv_obj_set_style_bg_color(s_prio_btn, C_PRIO_ON_BG, LV_PART_MAIN);
+        lv_obj_set_style_border_color(s_prio_btn, C_PRIO_ACTIVE, LV_PART_MAIN);
+        lv_obj_set_style_text_color(s_prio_lbl, C_PRIO_ACTIVE, LV_PART_MAIN);
+        lv_label_set_text(s_prio_lbl, "PRIO\nON");
+    } else {
+        lv_obj_set_style_bg_color(s_prio_btn, C_CARD_BG, LV_PART_MAIN);
+        lv_obj_set_style_border_color(s_prio_btn, C_BORDER_OFF, LV_PART_MAIN);
+        lv_obj_set_style_text_color(s_prio_lbl, C_TEXT_DIM, LV_PART_MAIN);
+        lv_label_set_text(s_prio_lbl, "PRIO\nOFF");
+    }
+}
+
+static void priority_event_cb(lv_event_t* e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    s_prio_on = !s_prio_on;
+    priority_update_visual();
+    EventBus::publish(EventType::BUTTON_PARTY_PRIORITY, s_prio_on ? 1 : 0);
+    PARTY_D("BUTTON_PARTY_PRIORITY: %s", s_prio_on ? "ON" : "OFF");
 }
 
 // ============================================================
@@ -404,7 +441,7 @@ void screen_party_create(lv_obj_t* parent) {
     // TOGGLE — vklop/izklop party mode
     // --------------------------------------------------------
     s_toggle_btn = lv_obj_create(parent);
-    lv_obj_set_size(s_toggle_btn, SECTION_W, TOGGLE_H);
+    lv_obj_set_size(s_toggle_btn, TOGGLE_W, TOGGLE_H);
     lv_obj_set_pos(s_toggle_btn, PAD, cy);
     lv_obj_set_style_bg_color(s_toggle_btn, C_TOGGLE_OFF, LV_PART_MAIN);
     lv_obj_set_style_border_color(s_toggle_btn, C_BORDER_OFF, LV_PART_MAIN);
@@ -430,6 +467,28 @@ void screen_party_create(lv_obj_t* parent) {
     lv_obj_set_style_text_color(s_toggle_lbl, C_TEXT_DIM, LV_PART_MAIN);
     lv_obj_set_style_text_font(s_toggle_lbl, &lv_font_montserrat_16, LV_PART_MAIN);
     lv_obj_align(s_toggle_lbl, LV_ALIGN_CENTER, 0, 0);
+
+    // --------------------------------------------------------
+    // PRIORITY gumb — desno od toggle, 25% širine
+    // --------------------------------------------------------
+    s_prio_btn = lv_obj_create(parent);
+    lv_obj_set_size(s_prio_btn, PRIO_W, TOGGLE_H);
+    lv_obj_set_pos(s_prio_btn, PAD + TOGGLE_W + TOGGLE_PRIO_GAP, cy);
+    lv_obj_set_style_bg_color(s_prio_btn, C_CARD_BG, LV_PART_MAIN);
+    lv_obj_set_style_border_color(s_prio_btn, C_BORDER_OFF, LV_PART_MAIN);
+    lv_obj_set_style_border_width(s_prio_btn, 2, LV_PART_MAIN);
+    lv_obj_set_style_radius(s_prio_btn, 10, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(s_prio_btn, 0, LV_PART_MAIN);
+    lv_obj_clear_flag(s_prio_btn, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_prio_btn, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(s_prio_btn, priority_event_cb, LV_EVENT_CLICKED, nullptr);
+
+    s_prio_lbl = lv_label_create(s_prio_btn);
+    lv_label_set_text(s_prio_lbl, "PRIO\nOFF");
+    lv_obj_set_style_text_color(s_prio_lbl, C_TEXT_DIM, LV_PART_MAIN);
+    lv_obj_set_style_text_font(s_prio_lbl, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_text_align(s_prio_lbl, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_obj_align(s_prio_lbl, LV_ALIGN_CENTER, 0, 0);
 
     cy += TOGGLE_H + PAD * 2;
 
@@ -602,6 +661,13 @@ void screen_party_apply_updates() {
         xSemaphoreGive(s_mutex);
     } else {
         return;
+    }
+
+    // Sync priority stanje iz light_logic (thread-safe bool read)
+    bool prio_now = light_logic_get_party_priority();
+    if (prio_now != s_prio_on) {
+        s_prio_on = prio_now;
+        priority_update_visual();
     }
 
     toggle_update_visual();

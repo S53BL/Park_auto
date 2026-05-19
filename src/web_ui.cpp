@@ -1309,25 +1309,35 @@ static void _handlePartyConfigPost(AsyncWebServerRequest* req, uint8_t* data,
     if (deserializeJson(doc, data, len)) {
         _sendError(req, 400, "invalid JSON"); return;
     }
-    if (!doc["wled_ip"].is<const char*>()) {
-        _sendError(req, 400, "missing wled_ip"); return;
-    }
-    const char* ip = doc["wled_ip"].as<const char*>();
-    size_t iplen = ip ? strlen(ip) : 0;
-    if (iplen == 0 || iplen >= 32) {
-        _sendError(req, 400, "wled_ip invalid (1-31 chars)"); return;
-    }
-
     Config cfg = config_get();
-    strncpy(cfg.wled_ip, ip, sizeof(cfg.wled_ip));
-    cfg.wled_ip[sizeof(cfg.wled_ip) - 1] = '\0';
+    bool changed = false;
+
+    if (doc["wled_ip"].is<const char*>()) {
+        const char* ip = doc["wled_ip"].as<const char*>();
+        size_t iplen = ip ? strlen(ip) : 0;
+        if (iplen > 0 && iplen < 32) {
+            strncpy(cfg.wled_ip, ip, sizeof(cfg.wled_ip));
+            cfg.wled_ip[sizeof(cfg.wled_ip) - 1] = '\0';
+            changed = true;
+            LOG_INFO(TAG, "WLED IP nastavljen: %s", cfg.wled_ip);
+        }
+    }
+    if (doc["resume_delay_s"].is<uint32_t>()) {
+        uint32_t rd = doc["resume_delay_s"].as<uint32_t>();
+        if (rd >= 5 && rd <= 300) {
+            cfg.party_resume_delay_s = rd;
+            changed = true;
+        }
+    }
+    if (!changed) { _sendError(req, 400, "no valid fields"); return; }
+
     config_set(cfg);
     config_save();
-    LOG_INFO(TAG, "WLED IP nastavljen: %s", cfg.wled_ip);
 
     JsonDocument resp(&s_psram_alloc);
-    resp["ok"]      = true;
-    resp["wled_ip"] = cfg.wled_ip;
+    resp["ok"]            = true;
+    resp["wled_ip"]       = cfg.wled_ip;
+    resp["resume_delay_s"]= cfg.party_resume_delay_s;
     _sendJson(req, 200, resp);
 }
 
@@ -1490,6 +1500,23 @@ static void _handlePartySchedulesDelete(AsyncWebServerRequest* req) {
     _sendJson(req, 200, resp);
 }
 
+static void _handlePartyPriorityPost(AsyncWebServerRequest* req, uint8_t* data,
+                                      size_t len, size_t index, size_t total) {
+    _stats.req_total++; _stats.req_api++;
+    if (index + len < total) return;
+    LOG_INFO(TAG, "POST /api/party/priority [%u B]", (unsigned)len);
+    JsonDocument doc(&s_psram_alloc);
+    if (deserializeJson(doc, data, len)) { _sendError(req, 400, "invalid JSON"); return; }
+    if (!doc["on"].is<int>()) { _sendError(req, 400, "missing on"); return; }
+    bool prio = (doc["on"].as<int>() != 0);
+    EventBus::publish(EventType::BUTTON_PARTY_PRIORITY, prio ? 1u : 0u);
+    LOG_INFO(TAG, "Party priority → %s", prio ? "ON" : "OFF");
+    JsonDocument resp(&s_psram_alloc);
+    resp["ok"]       = true;
+    resp["priority"] = prio;
+    _sendJson(req, 200, resp);
+}
+
 static void _handlePartyStatusGet(AsyncWebServerRequest* req) {
     _stats.req_total++; _stats.req_api++;
     LOG_DEBUG(TAG, "GET /api/party/status");
@@ -1497,6 +1524,7 @@ static void _handlePartyStatusGet(AsyncWebServerRequest* req) {
     JsonDocument doc(&s_psram_alloc);
     doc["party_on"]       = s_wled_on;
     doc["suspended"]      = light_logic_is_party_suspended();
+    doc["priority"]       = light_logic_get_party_priority();
     doc["active_slot"]    = s_active_slot;
     doc["wled_on"]        = s_wled_on;
     doc["resume_delay_s"] = cfg.party_resume_delay_s;
@@ -1756,8 +1784,13 @@ static void _registerHandlers() {
         _handlePartySchedulesPost
     );
     _server->on("/api/party/schedules", HTTP_DELETE, _handlePartySchedulesDelete);
-    // Party status
+    // Party status + priority
     _server->on("/api/party/status", HTTP_GET, _handlePartyStatusGet);
+    _server->on("/api/party/priority", HTTP_POST,
+        [](AsyncWebServerRequest* req) {},
+        nullptr,
+        _handlePartyPriorityPost
+    );
 
     // Restart
     _server->on("/api/restart", HTTP_POST, _handleRestart);

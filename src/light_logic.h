@@ -106,6 +106,8 @@ struct LightLogicState {
     // Alarm stanje (za LCD polling in web UI)
     bool           alarm_active;
     AlarmStateEnum alarm_state;
+    // Party priority — party ne prekinja ob gibanju/rampi
+    bool     party_priority;
 };
 
 // ============================================================
@@ -168,6 +170,9 @@ bool light_logic_ok();
 
 // Vrne true če je party začasno prekinjen (gibanje/rampa) in čaka na nadaljevanje.
 bool light_logic_is_party_suspended();
+
+// Vrne true če je party priority mod aktiven (gibanje ne prekinja party).
+bool light_logic_get_party_priority();
 
 // Vrne true če sistem miruje (ni gibanja, ni rampe, noben SSR ni ON).
 bool light_logic_is_system_idle();

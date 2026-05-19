@@ -57,6 +57,7 @@ enum class EventType : uint16_t {
     // Party stanje
     PARTY_SUSPENDED     = 0x0051,   // payload = 0; light_logic → web_ui SUSPEND
     PARTY_RESUMED       = 0x0052,   // payload = slot_idx ki se nadaljuje
+    BUTTON_PARTY_PRIORITY = 0x0053, // payload: 1=priority on, 0=off; party ne prekinja ob gibanju
     // Alarm
     ALARM_TRIGGERED     = 0x0060,
     ALARM_STATE_CHANGED = 0x0061,
