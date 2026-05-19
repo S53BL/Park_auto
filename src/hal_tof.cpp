@@ -965,14 +965,26 @@ bool hal_tof_startup_scan() {
     if (!s_initialized) return false;
     TOFI("=== TOF startup health scan (vseh 6 kanalov) ===");
     SemaphoreHandle_t mtx = bsp_get_wire1_mutex();
-    if (xSemaphoreTake(mtx, pdMS_TO_TICKS(WIRE1_MUTEX_TIMEOUT_MS)) != pdTRUE) {
-        TOFW("startup_scan: Wire1 mutex timeout — ponavljam");
+    // Radar konfiguracija teče vzporedno na Wire1 prvih ~8s — čakamo toliko časa kolikor treba.
+    if (xSemaphoreTake(mtx, pdMS_TO_TICKS(5000)) != pdTRUE) {
+        TOFW("startup_scan: Wire1 mutex timeout 5s — preskočeno");
         return false;
     }
     for (uint8_t ch = 0; ch < 6; ch++) {
         uint16_t mm = read_channel(ch);
-        TOFI("  %s: %s", ch_name(ch),
-             (mm == TOF_ERR) ? "ERR" : String(mm).c_str());
+        if (mm != TOF_ERR) {
+            TOFI("  %s: %d mm", ch_name(ch), mm);
+        } else if (s_tof[ch].last_status != 0) {
+            TOFW("  %s: I2C napaka (status=%d)", ch_name(ch), s_tof[ch].last_status);
+        } else if (s_tof[ch].ranging_data.range_status != VL53L1X::RangeValid) {
+            TOFI("  %s: brez cilja (RangeStatus=%d)",
+                 ch_name(ch), (int)s_tof[ch].ranging_data.range_status);
+        } else {
+            TOFI("  %s: %d mm (izven dosega [%d-%d])",
+                 ch_name(ch),
+                 (int)s_tof[ch].ranging_data.range_mm_final,
+                 TOF_MIN_RANGE_MM, TOF_MAX_RANGE_MM);
+        }
     }
     xSemaphoreGive(mtx);
     TOFI("startup_scan zaključen");

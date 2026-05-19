@@ -7,16 +7,12 @@
 // IMPLEMENTIRA: wifiTask() — zamenja BSP stub
 //
 // POTEK wifiTask():
-//   1. wifi_connect_best()  — scan vseh SSID, vzame prvega ki odgovori
-//   2. wifi_ntp_sync()      — configTime + čakanje na sync (max 15s)
-//                             MORA biti pred web_ui_begin() — NTP vzame ~8 KB SRAM.
-//                             Po NTP se heap ustali, AsyncTCP dobi zaporedni blok.
-//   3. čakaj led_mgr_is_ready() — počakamo da LED startup delay (120s) poteče.
-//                                  Zagotavlja stabilen SRAM preden AsyncTCP task
-//                                  kreira xTaskCreatePinnedToCore. (ram_problem4.md)
-//   4. web_ui_begin()       — web server start (po LED delay — SRAM stabilen)
-//   5. mDNS ODSTRANJEN      — statična IP 192.168.2.170
-//   5. Watchdog zanka       — vsakih 30s preveri, reconnect po potrebi
+//   1. wifi_connect_best()      — scan vseh SSID, vzame prvega ki odgovori
+//   2. wifi_ntp_sync()          — configTime + čakanje na sync (max 15s)
+//   3. stabilizacija 45s po NTP — radar config, TOF scan, clock anim, fill anim
+//   4. web_ui_begin()           — web server start (~55s od boota)
+//   5. LED enable               — led_mgr_set_ready(true) 5s po web serverju
+//   6. Watchdog zanka           — vsakih 30s preveri, reconnect po potrebi
 //
 // ============================================================
 
@@ -32,7 +28,6 @@
 #include <esp_sntp.h>
 #include <freertos/semphr.h>
 #include <time.h>
-#include <WiFiClient.h>
 #include "led_manager.h"
 
 // ============================================================
@@ -66,6 +61,11 @@
 // Watchdog interval
 #define WATCHDOG_INTERVAL_MS        30000   // [ms] interval WiFi health check
 
+// Stabilizacija po NTP — čakanje pred web_ui_begin()
+// Zajame: radar config (~8s), TOF scan (~6s), clock animacija (~18s), fill animacija (~23s).
+#define NTP_WEB_STABILIZE_MS        45000   // [ms] po NTP sync; web server zažene pri ~55s od boota
+#define WEB_LED_GAP_MS              5000    // [ms] po web_ui_begin(); LED se vklopi 5s za serverjem
+
 // Reconnect backoff
 #define BACKOFF_INITIAL_MS          15000   // [ms] začetni backoff
 #define BACKOFF_MAX_MS              120000  // [ms] maksimalni backoff (2 min)
@@ -78,7 +78,6 @@
 static SemaphoreHandle_t s_mutex    = nullptr;
 static WifiStatus        s_status   = {};
 static uint32_t          s_last_ntp_check_ms = 0;
-static uint32_t          _web_start_ms       = 0;
 
 // ============================================================
 // POMOŽNE FUNKCIJE
@@ -460,23 +459,23 @@ void wifiTask(void* pvParams) {
              (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
 
         // --------------------------------------------------------
-        // FAZA 3 — Čakaj LED startup delay
-        // led_mgr_is_ready() postane true po 120s od zagona ledTask-a.
-        // Zagotavlja da je SRAM stabilen preden AsyncTCP task kreira
-        // xTaskCreatePinnedToCore — pri min-ever < 300 B task kreacija
-        // tiho odpove, server ne posluša (AsyncServer::begin() je void).
-        // DOKUMENTIRANO: ram_problem4.md (Patch 4, 2026-05)
+        // FAZA 3 — Stabilizacija sistema po NTP
+        // Čakamo NTP_WEB_STABILIZE_MS po NTP sync, da se zaključijo:
+        //   radar konfiguracija (~8s od boota), TOF startup scan (~6s),
+        //   clock animacija (~18s), začetni SSR prižig in fill animacija (~23s).
+        // Po izteku spustimo web server, nato +WEB_LED_GAP_MS za LED.
         // --------------------------------------------------------
-        if (!led_mgr_is_ready()) {
-            WF_I("Waiting for LED startup delay before web_ui_begin()...");
-            while (!led_mgr_is_ready()) {
-                vTaskDelay(pdMS_TO_TICKS(500));
+        {
+            WF_I("Stabilizacija %ds po NTP — čakam...", NTP_WEB_STABILIZE_MS / 1000);
+            uint32_t stab_start = millis();
+            while ((millis() - stab_start) < NTP_WEB_STABILIZE_MS) {
+                vTaskDelay(pdMS_TO_TICKS(1000));
             }
-            WF_I("LED startup delay elapsed — continuing with web_ui_begin()");
+            WF_I("Stabilizacija OK — zaganjam web server");
         }
 
         // --------------------------------------------------------
-        // FAZA 4 — Web UI start (PO LED delay — SRAM stabilen)
+        // FAZA 4 — Web UI start (po stabilizaciji ~55s od boota)
         // --------------------------------------------------------
         WF_I("=== SRAM pred web_ui_begin ===");
         WF_I("  SRAM free:          %lu B",
@@ -488,7 +487,6 @@ void wifiTask(void* pvParams) {
         if (!web_ui_running()) {
             web_ui_begin();
         }
-        _web_start_ms = millis();
         WF_I("=== SRAM po  web_ui_begin ===");
         WF_I("  SRAM free:          %lu B",
              (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
@@ -499,7 +497,11 @@ void wifiTask(void* pvParams) {
         WF_I("  PSRAM free:         %lu B",
              (unsigned long)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
 
-        // FAZA 5 — mDNS ODSTRANJEN (statična IP 192.168.2.170, mDNS ni potreben)
+        // FAZA 5 — LED enable po WEB_LED_GAP_MS
+        // LED se vklopi WEB_LED_GAP_MS po web serverju, ko so LwIP PCB-ji ustalivljeni.
+        WF_I("LED enable čez %ds...", WEB_LED_GAP_MS / 1000);
+        vTaskDelay(pdMS_TO_TICKS(WEB_LED_GAP_MS));
+        led_mgr_set_ready(true);
 
         update_status(WifiState::NTP_SYNCED);
 
@@ -515,26 +517,8 @@ void wifiTask(void* pvParams) {
     WF_I("Vstopam v watchdog zanko (interval: %ds)", WATCHDOG_INTERVAL_MS / 1000);
 
     uint32_t last_watchdog_ms  = millis();
-    // last_log_flush_ms ODSTRANJEN — flush je preseljen v appTask (2026-05)
-    static bool tcp_self_test_done = false;
 
     while (true) {
-        // --------------------------------------------------------
-        // TCP SELF-CONNECT TEST — enkraten, 30s po web_ui_begin()
-        // 30s zagotavlja da je browser že naložil stran in sprostil PCB-je.
-        // 2s je prekratko — tekmuje z brskalnikovo vzporedno inicializacijo
-        // (style.css + alpine.min.js + settings.js), MAX_ACTIVE_TCP=6 je zaseden.
-        // --------------------------------------------------------
-        if (!tcp_self_test_done && web_ui_running() && (millis() - _web_start_ms) >= 30000) {
-            tcp_self_test_done = true;
-            WiFiClient client;
-            if (client.connect("192.168.2.170", 80)) {
-                WF_I("TCP self-connect 192.168.2.170:80 → OK");
-                client.stop();
-            } else {
-                WF_I("TCP self-connect 192.168.2.170:80 → FAILED (server may not be listening)");
-            }
-        }
         uint32_t now_ms = millis();
 
         // Periodični log flush je preseljen v appTask (light_logic.cpp)

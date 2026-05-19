@@ -48,3 +48,8 @@ struct RadarArcData {
 };
 
 void screen_main_set_radar_arc(uint8_t idx, const RadarArcData& data);
+
+// Vizualna pozicija praga na arcu (% od max).
+// Ko energy doseže to vrednost, prag je presežen → peak sproži.
+// Ista vrednost se uporablja v hal_display.cpp za skaliranje energije.
+#define RAD_THRESHOLD_PCT  75

@@ -99,6 +99,9 @@
 // Besedilo v sredini arc-a: bela za razdaljo, svetlo siva za "m"
 #define C_RAD_DIST_TXT  lv_color_hex(0xFFFFFF)
 #define C_RAD_M_TXT     lv_color_hex(0x94A3B8)
+// arc_over: oranžna (nad pragom) — thr_tick: bela črtice — peak_arc: rumena
+#define C_RAD_OVER      lv_color_hex(0xF97316)
+#define C_RAD_PEAK      lv_color_hex(0xFBBF24)
 
 // ============================================================
 // DIMENZIJE
@@ -188,8 +191,10 @@ struct PkgWidget {
 // peak_duration_ms: čas celotnega padanja (iz unmanned_s NVS parametra, privzeto 5000ms).
 // ─────────────────────────────────────────────────────────────────────────────
 struct RadWidget {
-    lv_obj_t*        arc;           // Glavni radar arc
-    lv_obj_t*        peak_arc;      // Notranji peak arc (prikazan samo ob peaku)
+    lv_obj_t*        arc;           // Glavni radar arc (dim zelena, 0–energy%)
+    lv_obj_t*        arc_over;      // Oranžni nad-prag arc (75%–energy%, skrit ko < 75)
+    lv_obj_t*        thr_tick;      // Bela črtice pri RAD_THRESHOLD_PCT (vedno vidna)
+    lv_obj_t*        peak_arc;      // Notranji peak arc, rumena, sproži pri energy>=75
     lv_obj_t*        lbl_dist;      // Razdalja v sredini (npr. "1,6" ali "0")
     lv_obj_t*        lbl_m;         // Enota "m" — vrstico nižje, siva, samo če dist>0
     lv_obj_t*        lbl_name;      // Ime senzorja pod arcem (nespremenjen)
@@ -360,6 +365,8 @@ static void peak_stop(RadWidget& w) {
     w.peak_pct = 0.0f;
     lv_arc_set_value(w.peak_arc, 0);
     lv_obj_add_flag(w.peak_arc, LV_OBJ_FLAG_HIDDEN);
+    lv_arc_set_value(w.arc_over, 0);
+    lv_obj_add_flag(w.arc_over, LV_OBJ_FLAG_HIDDEN);
 }
 
 // ============================================================
@@ -423,11 +430,19 @@ static void rad_apply(RadWidget& w, const RadarArcData& data) {
                 snprintf(dist_buf, sizeof(dist_buf), "0");
                 show_m = false;
             }
-            // Peak efekt: samo pri energy=100%
-            if (data.energy >= 100) {
+            // arc_over (oranžna): prikaže prekoračeni del nad RAD_THRESHOLD_PCT
+            if (data.energy >= RAD_THRESHOLD_PCT) {
+                // Preslika energy RAD_THRESHOLD_PCT..100 → arc_over 0..100
+                int32_t over_val = (int32_t)(data.energy - RAD_THRESHOLD_PCT) * 100
+                                   / (100 - RAD_THRESHOLD_PCT);
+                if (over_val > 100) over_val = 100;
+                lv_arc_set_value(w.arc_over, over_val);
+                lv_obj_remove_flag(w.arc_over, LV_OBJ_FLAG_HIDDEN);
                 peak_trigger(w);
+            } else {
+                lv_arc_set_value(w.arc_over, 0);
+                lv_obj_add_flag(w.arc_over, LV_OBJ_FLAG_HIDDEN);
             }
-            // Če energy pade pod 100%, peak timer teče naprej (ne prekinjamo)
             break;
 
         // ── STATIONARY ────────────────────────────────────────
@@ -441,7 +456,9 @@ static void rad_apply(RadWidget& w, const RadarArcData& data) {
                 snprintf(dist_buf, sizeof(dist_buf), "0");
                 show_m = false;
             }
-            // Peak timer teče do naravnega konca — ne prekinjamo ob MOVING→STATIONARY.
+            // arc_over ni relevanten za statično zaznavanje — skrij
+            lv_arc_set_value(w.arc_over, 0);
+            lv_obj_add_flag(w.arc_over, LV_OBJ_FLAG_HIDDEN);
             break;
 
         // ── CONFIG_ERROR ──────────────────────────────────────
@@ -545,13 +562,49 @@ static void rad_create(uint8_t idx, lv_obj_t* parent, int x, int y) {
     lv_obj_remove_flag(w.peak_arc, LV_OBJ_FLAG_CLICKABLE);
     // Ozadje notranjega arc-a: prozorno (ne prikazujemo nedoseženega dela)
     lv_obj_set_style_arc_opa(w.peak_arc, LV_OPA_TRANSP, LV_PART_MAIN);
-    // Indikator: svetlejša zelena (jasno vidna znotraj glavnega zelengega arca)
-    lv_obj_set_style_arc_color(w.peak_arc, lv_color_hex(0xFB923C), LV_PART_INDICATOR);
+    lv_obj_set_style_arc_color(w.peak_arc, C_RAD_PEAK, LV_PART_INDICATOR);
     lv_obj_set_style_arc_width(w.peak_arc, RAD_ARC_WIDTH, LV_PART_INDICATOR);
     lv_obj_set_style_bg_opa(w.peak_arc, LV_OPA_TRANSP, LV_PART_KNOB);
     lv_obj_set_style_pad_all(w.peak_arc, 0, LV_PART_KNOB);
     // Privzeto skrit — prikaže se samo ob peak efektu
     lv_obj_add_flag(w.peak_arc, LV_OBJ_FLAG_HIDDEN);
+
+    // ── arc_over: oranžni nad-prag arc (na vrhu glavnega) ────
+    // Začne pri kotu črtice (75% od 270°), zapolni razliko do energy.
+    // Skrit dokler energy < RAD_THRESHOLD_PCT.
+    {
+        int32_t tick_ang = (int32_t)270 * RAD_THRESHOLD_PCT / 100;  // 202°
+
+        w.arc_over = lv_arc_create(parent);
+        lv_obj_set_size(w.arc_over, RAD_ARC_SZ, RAD_ARC_SZ);
+        lv_obj_set_pos(w.arc_over, arc_x, arc_y);
+        lv_arc_set_rotation(w.arc_over, 135);
+        lv_arc_set_bg_angles(w.arc_over, (uint16_t)tick_ang, 270);
+        lv_arc_set_value(w.arc_over, 0);
+        lv_arc_set_range(w.arc_over, 0, 100);
+        lv_obj_remove_flag(w.arc_over, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_style_arc_opa(w.arc_over, LV_OPA_TRANSP, LV_PART_MAIN);
+        lv_obj_set_style_arc_color(w.arc_over, C_RAD_OVER, LV_PART_INDICATOR);
+        lv_obj_set_style_arc_width(w.arc_over, RAD_ARC_WIDTH, LV_PART_INDICATOR);
+        lv_obj_set_style_bg_opa(w.arc_over, LV_OPA_TRANSP, LV_PART_KNOB);
+        lv_obj_set_style_pad_all(w.arc_over, 0, LV_PART_KNOB);
+        lv_obj_add_flag(w.arc_over, LV_OBJ_FLAG_HIDDEN);
+
+        // ── thr_tick: bela črtice 3° pri poziciji praga ──────
+        w.thr_tick = lv_arc_create(parent);
+        lv_obj_set_size(w.thr_tick, RAD_ARC_SZ, RAD_ARC_SZ);
+        lv_obj_set_pos(w.thr_tick, arc_x, arc_y);
+        lv_arc_set_rotation(w.thr_tick, 135);
+        lv_arc_set_bg_angles(w.thr_tick, (uint16_t)tick_ang, (uint16_t)(tick_ang + 3));
+        lv_arc_set_value(w.thr_tick, 100);
+        lv_arc_set_range(w.thr_tick, 0, 100);
+        lv_obj_remove_flag(w.thr_tick, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_style_arc_opa(w.thr_tick, LV_OPA_TRANSP, LV_PART_MAIN);
+        lv_obj_set_style_arc_color(w.thr_tick, lv_color_white(), LV_PART_INDICATOR);
+        lv_obj_set_style_arc_width(w.thr_tick, 2, LV_PART_INDICATOR);
+        lv_obj_set_style_bg_opa(w.thr_tick, LV_OPA_TRANSP, LV_PART_KNOB);
+        lv_obj_set_style_pad_all(w.thr_tick, 0, LV_PART_KNOB);
+    }
 
     // ── Razdalja v sredini arca (lbl_dist) ───────────────────
     // Vertikalna pozicija: center arc-a minus polovica fonta (pribl.)

@@ -542,6 +542,8 @@ static void _handleRadarGet(AsyncWebServerRequest* req) {
         s["config_verified"] = rs.config_verified;
         s["detection"]       = rs.last_frame.detection;
         s["dist_cm"]         = rs.last_frame.detect_dist_cm;
+        s["moving_dist_cm"]  = rs.last_frame.moving_dist_cm;
+        s["static_dist_cm"]  = rs.last_frame.static_dist_cm;
         s["move_energy"]     = rs.last_frame.moving_energy;
         s["static_energy"]   = rs.last_frame.static_energy;
         s["frames_ok"]       = rs.frames_ok;

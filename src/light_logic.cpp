@@ -679,8 +679,9 @@ void light_logic_tick() {
                 case SsrCmdType::TRIGGER_ON_AUTO:
                     // Log samo če SSR1 ni že ON (prižig) — timer reset je tih
                     if (!s_ssr[1].on) {
-                        LLD("CMD: TRIGGER_ON_AUTO → prižig SSR1 (speed=%lu ms)",
-                            (unsigned long)cmd.payload);
+                        LLD("CMD: TRIGGER_ON_AUTO → prižig SSR1 (speed=%lu ms, rev=%d)",
+                            (unsigned long)(cmd.payload & 0x7FFFFFFFu),
+                            (int)(cmd.payload >> 31));
                     }
                     trigger_ssr1_auto(cmd.payload);
                     break;

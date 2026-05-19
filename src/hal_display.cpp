@@ -130,10 +130,16 @@ static uint32_t lvgl_tick_cb() { return millis(); }
 
 static void lvgl_flush_cb(lv_display_t* disp, const lv_area_t* area, uint8_t* px_map) {
     static uint32_t s_flush_cnt = 0;
-    if (s_flush_cnt < 20) {
-        DISPD("flush #%lu x1=%d y1=%d x2=%d y2=%d",
-              (unsigned long)s_flush_cnt,
-              area->x1, area->y1, area->x2, area->y2);
+    static uint32_t s_log_ms    = 0;
+    if (s_flush_cnt == 0) {
+        DISPD("flush #0 — display OK");
+        s_log_ms = millis();
+    } else {
+        uint32_t now = millis();
+        if ((now - s_log_ms) >= 60000UL) {
+            s_log_ms = now;
+            DISPD("flush cnt=%lu", (unsigned long)s_flush_cnt);
+        }
     }
     s_flush_cnt++;
     if (!s_gfx) { lv_display_flush_ready(disp); return; }
@@ -329,6 +335,22 @@ static void ui_refresh_cb(lv_timer_t*) {
     // ── Radar arci (4 arci spodaj) — ARC4x v2.2.0 ────────────────────────
     // Preslikava: RadarSensorStatus → RadarArcData
     //
+    // Koščkasto skaliranje surove energije na vizualni % za arc:
+    //   0..threshold  →  0..RAD_THRESHOLD_PCT (75)   — pristopna cona
+    //   threshold..100 → RAD_THRESHOLD_PCT..100       — prekoračitvena cona
+    // Prag (threshold) je vedno pri 75% arca, ne glede na nastavljeno sensitivity.
+    auto radar_scale_energy = [](uint8_t raw, uint8_t threshold) -> uint8_t {
+        if (threshold == 0) return raw;
+        if (raw <= threshold) {
+            return (uint8_t)((uint32_t)raw * RAD_THRESHOLD_PCT / threshold);
+        }
+        uint8_t over = raw - threshold;
+        uint8_t room = (threshold >= 100u) ? 1u : (100u - threshold);
+        uint32_t ext = (uint32_t)over * (100u - RAD_THRESHOLD_PCT) / room;
+        uint8_t add  = (ext > (100u - RAD_THRESHOLD_PCT)) ? (100u - RAD_THRESHOLD_PCT) : (uint8_t)ext;
+        return RAD_THRESHOLD_PCT + add;
+    };
+    //
     //   !rs.active                  → CONFIG_ERROR + is_permanent_error=true
     //                                 (senzor se ni inicializiral ob zagonu)
     //   rs.active && !rs.config_ok  → CONFIG_ERROR + is_permanent_error=false
@@ -365,19 +387,19 @@ static void ui_refresh_cb(lv_timer_t*) {
                 case 1:
                     // Samo gibanje
                     arc.state   = RadarArcState::MOVING;
-                    arc.energy  = rs.last_frame.moving_energy;
+                    arc.energy  = radar_scale_energy(rs.last_frame.moving_energy, rs.configured_move_sens);
                     arc.dist_cm = rs.last_frame.moving_dist_cm;
                     break;
                 case 2:
                     // Samo statično
                     arc.state   = RadarArcState::STATIONARY;
-                    arc.energy  = rs.last_frame.static_energy;
+                    arc.energy  = radar_scale_energy(rs.last_frame.static_energy, rs.configured_static_sens);
                     arc.dist_cm = rs.last_frame.static_dist_cm;
                     break;
                 case 3:
                     // Oboje — prednost MOVING (po ARC4x spec)
                     arc.state   = RadarArcState::MOVING;
-                    arc.energy  = rs.last_frame.moving_energy;
+                    arc.energy  = radar_scale_energy(rs.last_frame.moving_energy, rs.configured_move_sens);
                     arc.dist_cm = rs.last_frame.moving_dist_cm;
                     break;
                 default:

@@ -211,7 +211,7 @@ static uint32_t s_tick_ms   = 20;
 // Eksplicitna kontrola prek led_mgr_set_ready() za web/LCD uporabo.
 static volatile bool s_startup_ready    = false;
 static uint32_t      s_startup_time_ms  = 0;  // čas ko je ledTask začel
-#define LED_STARTUP_DELAY_MS  120000           // 2 minuti
+#define LED_STARTUP_DELAY_MS  120000           // fallback: brez WiFi/NTP LED start po 2 min; normalno sproži wifiTask
 
 // ============================================================
 // POMOŽNE FUNKCIJE
