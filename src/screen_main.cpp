@@ -43,6 +43,8 @@
 #include "hal_display.h"    // hal_display_setBacklight — bujenje ob peaku
 #include "hal_radar.h"      // hal_radar_get_status — peak_duration_ms iz unmanned_s
 #include "vehicle_recog.h"  // vr_place_state_t, vehicle_recog_get_*
+#include "config_mgr.h"     // config_get() za ssr_label
+#include <time.h>           // time(), localtime_r() — topbar datum/ura
 
 #include "logger.h"
 #define SMNI(fmt, ...) LOG_INFO ("SMAIN", fmt, ##__VA_ARGS__)
@@ -109,10 +111,10 @@
 #define SCR_W  320
 #define PAD    6
 
-#define TOPBAR_H    22
+#define TOPBAR_H    30
 
 #define SSR_BTN_W   ((SCR_W - PAD * 3) / 2)
-#define SSR_BTN_H   112
+#define SSR_BTN_H   88
 #define SSR_SEC_H   (SSR_BTN_H * 2 + PAD * 3)
 #define SSR_BAR_H   4
 #define HOLD_MS     1200
@@ -121,7 +123,7 @@
 
 #define PKG_Y       (SSR_Y_START + SSR_SEC_H + PAD)
 #define PKG_W       ((SCR_W - PAD * 3) / 2)
-#define PKG_H       110
+#define PKG_H       140
 #define PKG_SEC_H   (PKG_H + PAD * 2)
 
 #define RAD_Y       (PKG_Y + PKG_SEC_H)
@@ -146,7 +148,6 @@ struct SsrWidget {
     lv_obj_t*      btn;
     lv_obj_t*      lbl_name;
     lv_obj_t*      lbl_countdown;
-    lv_obj_t*      lbl_status;
     lv_obj_t*      lbl_icon;
     lv_obj_t*      bar_hold;
     lv_obj_t*      lbl_lock;
@@ -216,12 +217,15 @@ static PkgWidget   s_pkg[2]            = {};
 static RadWidget   s_rad[4]            = {};
 static lv_timer_t* s_countdown_timer   = nullptr;
 static lv_obj_t*   s_topbar            = nullptr;
-static lv_obj_t*   s_topbar_icon       = nullptr;
-static lv_obj_t*   s_topbar_lux        = nullptr;
+static lv_obj_t*   s_topbar_date       = nullptr;   // levo: dd.mes.yyyy
+static lv_obj_t*   s_topbar_time       = nullptr;   // center: HH:MM:SS
+static lv_obj_t*   s_topbar_icon       = nullptr;   // desno: "))) 42lx" / "* 70lx"
+static int         s_topbar_last_mday  = -1;        // za redko posodabljanje datuma
 static bool        s_created           = false;
 static lv_obj_t*   s_parent_scr        = nullptr;  // screen_alarm_hide() se vrne na ta objekt; brez getterja bi moral screen_alarm vključiti screen_main internals
 
-static const char* SSR_NAMES[4]   = { "Glavna\nveriga", "Glavna\ndodatno", "Pred\ngaražo", "Pred\nlopo" };
+// SSR labeli — ob kreaciji se preberejo iz config_get().ssr_label[]
+// (SSR_NAMES[] je odstranjeno — labeli so zdaj nastavljivi prek web)
 static const char* RADAR_NAMES[4] = { "Vhod", "Cesta L", "Cesta D", "Garaža" };
 static const char* PHASE_NAMES[4] = { "·", "DETECT", "SCAN", "DTW" };
 
@@ -649,24 +653,20 @@ static void rad_create(uint8_t idx, lv_obj_t* parent, int x, int y) {
 
 static void ssr_style(SsrWidget& w) {
     lv_color_t bg, tc;
-    const char* st_txt;
     const char* icon_txt;
 
     switch (w.data.state) {
         case DisplaySsrState::ON:
             bg = C_ON_BG;
             tc = w.data.is_manual ? C_ON_MANUAL_TXT : C_ON_TXT;
-            st_txt   = w.data.is_manual ? "Ročno" : "Auto";
-            icon_txt = w.data.is_manual ? "R" : "A";
+            icon_txt = w.data.is_manual ? "\xE2\x9C\x8B" : "\xE2\x96\xB6";   // ✋ / ▶
             break;
         case DisplaySsrState::SSR_DISABLED:
             bg = C_DIS_BG; tc = C_DIS_TXT;
-            st_txt   = "Onemogočeno";
-            icon_txt = "×";
+            icon_txt = "\xE2\x9C\x96";   // ✖
             break;
         default:
             bg = C_OFF_BG; tc = C_OFF_TXT;
-            st_txt   = "Izključeno";
             icon_txt = "";
             break;
     }
@@ -678,8 +678,7 @@ static void ssr_style(SsrWidget& w) {
             LV_PART_MAIN | LV_STATE_PRESSED);
     }
 
-    lv_obj_set_style_text_color(w.lbl_name,   tc, LV_PART_MAIN);
-    lv_obj_set_style_text_color(w.lbl_status, tc, LV_PART_MAIN);
+    lv_obj_set_style_text_color(w.lbl_name, tc, LV_PART_MAIN);
     lv_obj_set_style_bg_color(w.bar_hold, tc, LV_PART_INDICATOR);
 
     lv_label_set_text(w.lbl_icon, icon_txt);
@@ -695,25 +694,23 @@ static void ssr_style(SsrWidget& w) {
         lv_obj_add_flag(w.lbl_icon, LV_OBJ_FLAG_HIDDEN);
     }
 
+    // Countdown — countdown barva je vedno modra (neodvisno od stanja)
     if (w.data.state == DisplaySsrState::ON && w.data.countdown_s > 0) {
         char buf[8]; fmt_cd(buf, sizeof(buf), w.data.countdown_s);
         lv_label_set_text(w.lbl_countdown, buf);
         if (w.data.countdown_s < 60) {
             lv_obj_set_style_text_font(w.lbl_countdown,
                 &font_montserrat_28_sl, LV_PART_MAIN);
-            lv_obj_set_style_text_color(w.lbl_countdown,
-                lv_color_hex(0xFF4444), LV_PART_MAIN);
         } else {
             lv_obj_set_style_text_font(w.lbl_countdown,
                 &font_montserrat_24_sl, LV_PART_MAIN);
-            lv_obj_set_style_text_color(w.lbl_countdown, tc, LV_PART_MAIN);
         }
+        lv_obj_set_style_text_color(w.lbl_countdown,
+            lv_color_hex(0x60A5FA), LV_PART_MAIN);
         lv_obj_remove_flag(w.lbl_countdown, LV_OBJ_FLAG_HIDDEN);
     } else {
         lv_obj_add_flag(w.lbl_countdown, LV_OBJ_FLAG_HIDDEN);
     }
-
-    lv_label_set_text(w.lbl_status, st_txt);
 
     if (w.data.state == DisplaySsrState::SSR_DISABLED)
         lv_obj_remove_flag(w.lbl_lock, LV_OBJ_FLAG_HIDDEN);
@@ -759,8 +756,6 @@ static void ssr_countdown_cb(lv_timer_t*) {
         if (w.data.countdown_s == 59) {
             lv_obj_set_style_text_font(w.lbl_countdown,
                 &font_montserrat_28_sl, LV_PART_MAIN);
-            lv_obj_set_style_text_color(w.lbl_countdown,
-                lv_color_hex(0xFF4444), LV_PART_MAIN);
         }
     }
 }
@@ -849,37 +844,32 @@ static void ssr_create(uint8_t idx, lv_obj_t* parent, int x, int y) {
         LV_PART_MAIN | LV_STATE_PRESSED);
 
     w.lbl_name = lv_label_create(w.btn);
-    lv_label_set_text(w.lbl_name, SSR_NAMES[idx]);
+    lv_label_set_text(w.lbl_name, config_get().ssr_label[idx]);
     lv_obj_set_style_text_color(w.lbl_name, C_OFF_TXT, LV_PART_MAIN);
     lv_obj_set_style_text_font(w.lbl_name, &font_montserrat_18_sl, LV_PART_MAIN);
-    lv_obj_align(w.lbl_name, LV_ALIGN_TOP_LEFT, 8, 8);
+    lv_obj_align(w.lbl_name, LV_ALIGN_TOP_LEFT, 8, 6);
     lv_label_set_long_mode(w.lbl_name, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(w.lbl_name, SSR_BTN_W / 2);
 
+    // Badge ikona desno zgoraj — font_24 za večjo vidnost
     w.lbl_icon = lv_label_create(w.btn);
     lv_label_set_text(w.lbl_icon, "");
-    lv_obj_set_style_text_font(w.lbl_icon, &font_montserrat_14_sl, LV_PART_MAIN);
+    lv_obj_set_style_text_font(w.lbl_icon, &font_montserrat_24_sl, LV_PART_MAIN);
     lv_obj_set_style_text_color(w.lbl_icon, C_OFF_TXT, LV_PART_MAIN);
     lv_obj_set_style_bg_opa(w.lbl_icon, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_bg_color(w.lbl_icon, C_BADGE_AUTO, LV_PART_MAIN);
-    lv_obj_set_style_radius(w.lbl_icon, 4, LV_PART_MAIN);
-    lv_obj_set_style_pad_hor(w.lbl_icon, 4, LV_PART_MAIN);
-    lv_obj_set_style_pad_ver(w.lbl_icon, 2, LV_PART_MAIN);
-    lv_obj_align(w.lbl_icon, LV_ALIGN_TOP_RIGHT, -6, 6);
+    lv_obj_set_style_radius(w.lbl_icon, 5, LV_PART_MAIN);
+    lv_obj_set_style_pad_hor(w.lbl_icon, 5, LV_PART_MAIN);
+    lv_obj_set_style_pad_ver(w.lbl_icon, 3, LV_PART_MAIN);
+    lv_obj_align(w.lbl_icon, LV_ALIGN_TOP_RIGHT, -6, 5);
     lv_obj_add_flag(w.lbl_icon, LV_OBJ_FLAG_HIDDEN);
 
     w.lbl_countdown = lv_label_create(w.btn);
     lv_label_set_text(w.lbl_countdown, "00:00");
-    lv_obj_set_style_text_color(w.lbl_countdown, C_OFF_TXT, LV_PART_MAIN);
+    lv_obj_set_style_text_color(w.lbl_countdown, lv_color_hex(0x60A5FA), LV_PART_MAIN);
     lv_obj_set_style_text_font(w.lbl_countdown, &font_montserrat_24_sl, LV_PART_MAIN);
-    lv_obj_align(w.lbl_countdown, LV_ALIGN_CENTER, 0, 6);
+    lv_obj_align(w.lbl_countdown, LV_ALIGN_BOTTOM_MID, 20, -8);
     lv_obj_add_flag(w.lbl_countdown, LV_OBJ_FLAG_HIDDEN);
-
-    w.lbl_status = lv_label_create(w.btn);
-    lv_label_set_text(w.lbl_status, "Izključeno");
-    lv_obj_set_style_text_color(w.lbl_status, C_OFF_TXT, LV_PART_MAIN);
-    lv_obj_set_style_text_font(w.lbl_status, &font_montserrat_14_sl, LV_PART_MAIN);
-    lv_obj_align(w.lbl_status, LV_ALIGN_BOTTOM_LEFT, 8, -(SSR_BAR_H + 8));
 
     w.bar_hold = lv_bar_create(w.btn);
     lv_obj_set_size(w.bar_hold, SSR_BTN_W - 2, SSR_BAR_H);
@@ -892,11 +882,9 @@ static void ssr_create(uint8_t idx, lv_obj_t* parent, int x, int y) {
     lv_obj_set_style_radius(w.bar_hold, 0, LV_PART_INDICATOR);
     lv_obj_add_flag(w.bar_hold, LV_OBJ_FLAG_HIDDEN);
 
+    // lbl_lock — ✖ badge (lbl_icon) prevzame vlogo disabled indikatorja
     w.lbl_lock = lv_label_create(w.btn);
-    lv_label_set_text(w.lbl_lock, LV_SYMBOL_CLOSE);
-    lv_obj_set_style_text_color(w.lbl_lock, C_DIS_TXT, LV_PART_MAIN);
-    lv_obj_set_style_text_font(w.lbl_lock, &font_montserrat_18_sl, LV_PART_MAIN);
-    lv_obj_align(w.lbl_lock, LV_ALIGN_TOP_RIGHT, -8, 8);
+    lv_label_set_text(w.lbl_lock, "");
     lv_obj_add_flag(w.lbl_lock, LV_OBJ_FLAG_HIDDEN);
 }
 
@@ -1212,30 +1200,30 @@ static void pkg_apply(PkgWidget& w) {
         lv_obj_add_flag(w.lbl_phase, LV_OBJ_FLAG_HIDDEN);
     }
 
-    // H senzor (horizontalni)
+    // H senzor (horizontalni/vhodni) — vrednost v cm
     if (w.data.horiz_mm > 0 && w.data.horiz_mm < 8000) {
         char buf[12];
-        snprintf(buf, sizeof(buf), "H:%ucm", w.data.horiz_mm / 10);
+        snprintf(buf, sizeof(buf), "%u cm", w.data.horiz_mm / 10);
         lv_label_set_text(w.lbl_horiz, buf);
         lv_obj_remove_flag(w.lbl_horiz, LV_OBJ_FLAG_HIDDEN);
     } else {
         lv_obj_add_flag(w.lbl_horiz, LV_OBJ_FLAG_HIDDEN);
     }
 
-    // P1 senzor (stropni, spredaj)
+    // P1 senzor (stropni, spredaj) — vrednost v cm, zgornja vrstica
     if (w.data.p1_mm > 0 && w.data.p1_mm < 8000) {
         char buf[12];
-        snprintf(buf, sizeof(buf), "P1:%ucm", w.data.p1_mm / 10);
+        snprintf(buf, sizeof(buf), "%u cm", w.data.p1_mm / 10);
         lv_label_set_text(w.lbl_p1, buf);
         lv_obj_remove_flag(w.lbl_p1, LV_OBJ_FLAG_HIDDEN);
     } else {
         lv_obj_add_flag(w.lbl_p1, LV_OBJ_FLAG_HIDDEN);
     }
 
-    // P2 senzor (stropni, zadaj)
+    // P2 senzor (stropni, zadaj) — vrednost v cm, zgornja vrstica
     if (w.data.p2_mm > 0 && w.data.p2_mm < 8000) {
         char buf[12];
-        snprintf(buf, sizeof(buf), "P2:%ucm", w.data.p2_mm / 10);
+        snprintf(buf, sizeof(buf), "%u cm", w.data.p2_mm / 10);
         lv_label_set_text(w.lbl_p2, buf);
         lv_obj_remove_flag(w.lbl_p2, LV_OBJ_FLAG_HIDDEN);
     } else {
@@ -1265,26 +1253,30 @@ static void pkg_create(uint8_t idx, lv_obj_t* parent, int x, int y) {
     lv_obj_add_flag(w.card, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(w.card, pkg_event_cb, LV_EVENT_ALL, &w);
 
+    // Leva zgornja oznaka — samo "A" ali "B", font_28, amber
     w.lbl_title = lv_label_create(w.card);
-    lv_label_set_text(w.lbl_title, idx == 0 ? "Mesto A" : "Mesto B");
-    lv_obj_set_style_text_color(w.lbl_title, C_PKG_TITLE, LV_PART_MAIN);
-    lv_obj_set_style_text_font(w.lbl_title, &font_montserrat_14_sl, LV_PART_MAIN);
-    lv_obj_align(w.lbl_title, LV_ALIGN_TOP_LEFT, 8, 6);
+    lv_label_set_text(w.lbl_title, idx == 0 ? "A" : "B");
+    lv_obj_set_style_text_color(w.lbl_title, lv_color_hex(0xFBBF24), LV_PART_MAIN);
+    lv_obj_set_style_text_font(w.lbl_title, &font_montserrat_28_sl, LV_PART_MAIN);
+    lv_obj_align(w.lbl_title, LV_ALIGN_TOP_LEFT, 8, 4);
 
+    // Ime vozila / stanje — y=42 (pod font_28 oznako)
     w.lbl_name = lv_label_create(w.card);
     lv_label_set_text(w.lbl_name, "Prazno");
     lv_obj_set_style_text_color(w.lbl_name, C_PKG_EMPTY_NAME, LV_PART_MAIN);
     lv_obj_set_style_text_font(w.lbl_name, &font_montserrat_18_sl, LV_PART_MAIN);
-    lv_obj_set_pos(w.lbl_name, 8, 28);
+    lv_obj_set_pos(w.lbl_name, 8, 42);
     lv_label_set_long_mode(w.lbl_name, LV_LABEL_LONG_DOT);
     lv_obj_set_width(w.lbl_name, PKG_W - 76);
 
+    // Statistike DTW — spodaj levo
     w.lbl_stats = lv_label_create(w.card);
     lv_label_set_text(w.lbl_stats, "");
     lv_obj_set_style_text_color(w.lbl_stats, C_PKG_STATS, LV_PART_MAIN);
     lv_obj_set_style_text_font(w.lbl_stats, &font_montserrat_14_sl, LV_PART_MAIN);
     lv_obj_align(w.lbl_stats, LV_ALIGN_BOTTOM_LEFT, 8, -20);
 
+    // TOF faza (DETECT/SCAN/DTW) — spodaj levo
     w.lbl_phase = lv_label_create(w.card);
     lv_label_set_text(w.lbl_phase, "");
     lv_obj_set_style_text_font(w.lbl_phase, &font_montserrat_14_sl, LV_PART_MAIN);
@@ -1292,28 +1284,72 @@ static void pkg_create(uint8_t idx, lv_obj_t* parent, int x, int y) {
     lv_obj_align(w.lbl_phase, LV_ALIGN_BOTTOM_LEFT, 8, -5);
     lv_obj_add_flag(w.lbl_phase, LV_OBJ_FLAG_HIDDEN);
 
-    w.lbl_horiz = lv_label_create(w.card);
-    lv_label_set_text(w.lbl_horiz, "");
-    lv_obj_set_style_text_font(w.lbl_horiz, &font_montserrat_14_sl, LV_PART_MAIN);
-    lv_obj_set_style_text_color(w.lbl_horiz, C_PKG_STATS, LV_PART_MAIN);
-    lv_obj_align(w.lbl_horiz, LV_ALIGN_BOTTOM_RIGHT, -6, -4);
-    lv_obj_add_flag(w.lbl_horiz, LV_OBJ_FLAG_HIDDEN);
-
+    // P1 senzor (sprednji) — zgornja vrstica levo-sredina, bel, font_16
     w.lbl_p1 = lv_label_create(w.card);
     lv_label_set_text(w.lbl_p1, "");
-    lv_obj_set_style_text_font(w.lbl_p1, &font_montserrat_14_sl, LV_PART_MAIN);
-    lv_obj_set_style_text_color(w.lbl_p1, C_PKG_STATS, LV_PART_MAIN);
-    lv_obj_align(w.lbl_p1, LV_ALIGN_BOTTOM_RIGHT, -6, -22);
+    lv_obj_set_style_text_font(w.lbl_p1, &font_montserrat_16_sl, LV_PART_MAIN);
+    lv_obj_set_style_text_color(w.lbl_p1, lv_color_white(), LV_PART_MAIN);
+    lv_obj_set_pos(w.lbl_p1, 34, 8);
+    lv_obj_set_width(w.lbl_p1, 56);
+    lv_obj_set_style_text_align(w.lbl_p1, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
     lv_obj_add_flag(w.lbl_p1, LV_OBJ_FLAG_HIDDEN);
 
+    // P2 senzor (zadnji) — zgornja vrstica desno, bel, font_16
     w.lbl_p2 = lv_label_create(w.card);
     lv_label_set_text(w.lbl_p2, "");
-    lv_obj_set_style_text_font(w.lbl_p2, &font_montserrat_14_sl, LV_PART_MAIN);
-    lv_obj_set_style_text_color(w.lbl_p2, C_PKG_STATS, LV_PART_MAIN);
-    lv_obj_align(w.lbl_p2, LV_ALIGN_BOTTOM_RIGHT, -6, -40);
+    lv_obj_set_style_text_font(w.lbl_p2, &font_montserrat_16_sl, LV_PART_MAIN);
+    lv_obj_set_style_text_color(w.lbl_p2, lv_color_white(), LV_PART_MAIN);
+    lv_obj_set_pos(w.lbl_p2, 91, 8);
+    lv_obj_set_width(w.lbl_p2, 60);
+    lv_obj_set_style_text_align(w.lbl_p2, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
     lv_obj_add_flag(w.lbl_p2, LV_OBJ_FLAG_HIDDEN);
 
-    car_create(w, PKG_W - 68, 16, C_CAR_EMPTY);
+    // H senzor (horizontalni/vhodni) — spodaj desno, font_16 bel (kot P1/P2)
+    w.lbl_horiz = lv_label_create(w.card);
+    lv_label_set_text(w.lbl_horiz, "");
+    lv_obj_set_style_text_font(w.lbl_horiz, &font_montserrat_16_sl, LV_PART_MAIN);
+    lv_obj_set_style_text_color(w.lbl_horiz, lv_color_white(), LV_PART_MAIN);
+    lv_obj_align(w.lbl_horiz, LV_ALIGN_BOTTOM_RIGHT, -6, -6);
+    lv_obj_add_flag(w.lbl_horiz, LV_OBJ_FLAG_HIDDEN);
+
+    car_create(w, PKG_W - 68, 55, C_CAR_EMPTY);
+}
+
+// ============================================================
+// TOPBAR — TIMER CALLBACK (1s interval, samo LVGL kontekst)
+// ============================================================
+// Ura se posodablja vsako sekundo.
+// Datum se posodablja samo kadar se dan spremeni (s_topbar_last_mday).
+// Pred NTP sinhronizacijo (now <= 2020): prikaže placeholder.
+// ─────────────────────────────────────────────────────────────
+static const char* s_meseci[12] = {
+    "jan","feb","mar","apr","maj","jun",
+    "jul","avg","sep","okt","nov","dec"
+};
+
+static void topbar_tick_cb(lv_timer_t*) {
+    if (!s_topbar_time || !s_topbar_date) return;
+    time_t now = time(nullptr);
+    if (now <= 1577836800UL) {   // NTP ni sinhroniziran
+        lv_label_set_text(s_topbar_time, "--:--:--");
+        if (s_topbar_last_mday != 0) {
+            s_topbar_last_mday = 0;
+            lv_label_set_text(s_topbar_date, "--.---.----");
+        }
+        return;
+    }
+    struct tm t;
+    localtime_r(&now, &t);
+    char buf[12];
+    snprintf(buf, sizeof(buf), "%02d:%02d:%02d", t.tm_hour, t.tm_min, t.tm_sec);
+    lv_label_set_text(s_topbar_time, buf);
+    if (t.tm_mday != s_topbar_last_mday) {
+        s_topbar_last_mday = t.tm_mday;
+        char dbuf[16];
+        snprintf(dbuf, sizeof(dbuf), "%02d.%s.%04d",
+                 t.tm_mday, s_meseci[t.tm_mon], t.tm_year + 1900);
+        lv_label_set_text(s_topbar_date, dbuf);
+    }
 }
 
 // ============================================================
@@ -1330,17 +1366,29 @@ static void topbar_create(lv_obj_t* parent) {
     lv_obj_set_style_pad_all(s_topbar, 0, LV_PART_MAIN);
     lv_obj_clear_flag(s_topbar, LV_OBJ_FLAG_SCROLLABLE);
 
+    // Levo: datum  dd.mes.yyyy  (font_16 — malo večji)
+    s_topbar_date = lv_label_create(s_topbar);
+    lv_label_set_text(s_topbar_date, "--.---.----");
+    lv_obj_set_style_text_font(s_topbar_date, &font_montserrat_16_sl, LV_PART_MAIN);
+    lv_obj_set_style_text_color(s_topbar_date, C_NIGHT_TXT, LV_PART_MAIN);
+    lv_obj_align(s_topbar_date, LV_ALIGN_LEFT_MID, 6, 0);
+
+    // Center: ura  HH:MM:SS  (font_18, fiksna bela — ne sledi dan/noč)
+    s_topbar_time = lv_label_create(s_topbar);
+    lv_label_set_text(s_topbar_time, "--:--:--");
+    lv_obj_set_style_text_font(s_topbar_time, &font_montserrat_18_sl, LV_PART_MAIN);
+    lv_obj_set_style_text_color(s_topbar_time, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+    lv_obj_align(s_topbar_time, LV_ALIGN_CENTER, 0, 0);
+
+    // Desno: dan/noč ikona + lux  "◑ 42lx" / "☀ 70lx"
     s_topbar_icon = lv_label_create(s_topbar);
-    lv_label_set_text(s_topbar_icon, "))) NOC");
+    lv_label_set_text(s_topbar_icon, "\xE2\x97\x91 --lx");   // ◑ placeholder
     lv_obj_set_style_text_font(s_topbar_icon, &font_montserrat_14_sl, LV_PART_MAIN);
     lv_obj_set_style_text_color(s_topbar_icon, C_NIGHT_TXT, LV_PART_MAIN);
-    lv_obj_align(s_topbar_icon, LV_ALIGN_LEFT_MID, 8, 0);
+    lv_obj_align(s_topbar_icon, LV_ALIGN_RIGHT_MID, -6, 0);
 
-    s_topbar_lux = lv_label_create(s_topbar);
-    lv_label_set_text(s_topbar_lux, "-- lx");
-    lv_obj_set_style_text_font(s_topbar_lux, &font_montserrat_14_sl, LV_PART_MAIN);
-    lv_obj_set_style_text_color(s_topbar_lux, C_NIGHT_TXT, LV_PART_MAIN);
-    lv_obj_align(s_topbar_lux, LV_ALIGN_RIGHT_MID, -8, 0);
+    // Timer za auto-update datuma in ure (1s interval, LVGL task kontekst)
+    lv_timer_create(topbar_tick_cb, 1000, nullptr);
 }
 
 // ============================================================
@@ -1386,7 +1434,16 @@ void screen_main_apply_updates() {
 void screen_main_set_ssr(uint8_t idx, const SsrDisplayData& data) {
     if (idx >= 4 || !s_created) return;
     s_ssr[idx].data = data;
+    // Posodobi label iz config če se je spremenil (web UI nastavitve, ~1s latenca)
+    const char* cfg_lbl = config_get().ssr_label[idx];
+    if (strcmp(cfg_lbl, lv_label_get_text(s_ssr[idx].lbl_name)) != 0)
+        lv_label_set_text(s_ssr[idx].lbl_name, cfg_lbl);
     ssr_style(s_ssr[idx]);
+}
+
+void screen_main_set_ssr_label(uint8_t idx, const char* label) {
+    if (idx >= 4 || !s_created || !label) return;
+    lv_label_set_text(s_ssr[idx].lbl_name, label);
 }
 
 void screen_main_set_parking(uint8_t idx, const ParkingDisplayData& data) {
@@ -1449,19 +1506,20 @@ void screen_main_set_radar_arc(uint8_t idx, const RadarArcData& data) {
 
 void screen_main_set_daynight(bool is_night, float lux) {
     if (!s_created || !s_topbar) return;
-    lv_label_set_text(s_topbar_icon, is_night ? "))) NOC" : "* * DAN");
+    lv_color_t tc = is_night ? C_NIGHT_TXT : C_DAY_TXT;
     lv_obj_set_style_bg_color(s_topbar, is_night ? C_NIGHT_BG : C_DAY_BG, LV_PART_MAIN);
-    lv_obj_set_style_text_color(s_topbar_icon,
-        is_night ? C_NIGHT_TXT : C_DAY_TXT, LV_PART_MAIN);
-    lv_obj_set_style_text_color(s_topbar_lux,
-        is_night ? C_NIGHT_TXT : C_DAY_TXT, LV_PART_MAIN);
-    char buf[16];
+    lv_obj_set_style_text_color(s_topbar_date, tc, LV_PART_MAIN);
+    // Ura ostane bela — ne sledi dan/noč barvam
+    lv_obj_set_style_text_color(s_topbar_icon, tc, LV_PART_MAIN);
+    // ◑ (U+25D1) = noč,  ☀ (U+2600) = dan
+    const char* icon = is_night ? "\xE2\x97\x91" : "\xE2\x98\x80";
+    char buf[24];
     if (lux < 0.1f) {
-        lv_label_set_text(s_topbar_lux, "-- lx");
+        snprintf(buf, sizeof(buf), "%s --lx", icon);
     } else {
-        snprintf(buf, sizeof(buf), "%.0f lx", lux);
-        lv_label_set_text(s_topbar_lux, buf);
+        snprintf(buf, sizeof(buf), "%s %.0flx", icon, (double)lux);
     }
+    lv_label_set_text(s_topbar_icon, buf);
 }
 
 lv_obj_t* screen_main_get_screen() {

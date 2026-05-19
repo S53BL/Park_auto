@@ -376,7 +376,8 @@ html, body {
 }
 .btn-danger:hover { background: rgba(239,68,68,0.1); }
 
-.btn-sm { padding: 4px 9px; font-size: 10px; }
+.btn-sm  { padding: 4px 9px; font-size: 10px; }
+.btn-dim { opacity: 0.6; }
 
 /* --- LOG STREAM --- */
 #log-output {

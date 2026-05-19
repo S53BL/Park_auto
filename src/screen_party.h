@@ -52,11 +52,11 @@
 // Stanje party zaslona — za sinhronizacijo z web_ui.cpp
 struct PartyState {
     bool    party_on;
+    uint8_t active_slot;  // 0-8 = aktiven slot; 0xFF = custom (ni slot)
     uint8_t fx_id;
     uint8_t brightness;
     uint8_t speed;
     uint32_t color_rgb;   // packed: (R<<16)|(G<<8)|B
-    uint8_t  preset_id;   // 0xFF = brez prednastavitve
 };
 
 // Glavne funkcije — klicati samo iz lvglTask
@@ -64,8 +64,15 @@ void screen_party_create(lv_obj_t* parent);
 void screen_party_apply_updates();
 
 // Posodobitev stanja iz zunaj (web_ui.cpp ko dobi WLED status)
-// Thread-safe — prek interni mutex
+// Thread-safe — prek interni mutex; nastavi dirty flag za lvglTask
 void screen_party_set_state(const PartyState& state);
 
 // Vrne trenutno stanje zaslona (za web_ui.cpp sinhronizacijo)
 PartyState screen_party_get_state();
+
+// Posodobi labele slot gumbov iz config_mgr (kliče samo lvglTask prek apply_updates)
+void screen_party_reload_slots();
+
+// Nastavi zahtevo za reload slotov — thread-safe, kliči iz kateregakoli taska.
+// lvglTask jo pobere v naslednjem screen_party_apply_updates() klicu.
+void screen_party_request_slot_reload();

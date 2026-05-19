@@ -77,14 +77,29 @@
 <!-- ── TAB: OSVETLITEV ──────────────────────── -->
 <div class="tab-panel active card" id="spanel-light">
   ${_field('timeout_ssr1_s',      'Timeout SSR1',           's',     180, 'Čas brez gibanja pred ugasnitvijo glavne luči (SSR1)', 1)}
-  ${_field('manual_extend_min',   'Ročni podaljšek',        'min',    30, 'Podaljšanje timera ob dotiku gumba na LCD', 1)}
+  ${_field('manual_extend_min',   'Podaljšek SSR1',         'min',    10, 'V auto načinu: dotik podaljša za ta čas. V ročnem: čas vklopa.', 1)}
   ${_field('antiforgot_ssr2_min', 'Anti-forget SSR2',       'min',     5, 'Samodejni izklop LED panelov ob odsotnosti gibanja', 1)}
   ${_field('antiforgot_ssr3_min', 'Anti-forget SSR3',       'min',     5, 'Samodejni izklop reflektorja ob odsotnosti gibanja', 1)}
-  ${_toggle('ssr2_auto_night',    'SSR2 avtomatski ponoči',  true,       'Samodejni vklop LED panelov ob prehodu v nočni način')}
-  <div class="section-label mt16">Hystereza noč / dan</div>
+  ${_toggle('ssr2_auto_night',    'SSR2 sledi SSR1 (slave)', true,       'SSR2 (LED paneli) sledi SSR1 v avtomatiki. Ročno sta vedno neodvisna.')}
+  <div class="section-label mt16">DND — Ne moti (časovno okno)</div>
+  <div class="form-hint mt4 mb8">Med DND urami: zmanjšan brightness ob prižigu, opcijsko brez SSR2. Zahteva NTP sinhronizacijo.</div>
+  <div class="flex-row" style="gap:12px;align-items:flex-end">
+    ${_field('dnd_start_h', 'DND začetek', 'h', 22, 'Začetek tihega okna (ura 0–23)', 1)}
+    ${_field('dnd_end_h',   'DND konec',   'h',  6, 'Konec tihega okna (ura 0–23)', 1)}
+  </div>
+  ${_toggle('ssr2_dnd_disable',   'SSR2 izklopi v DND',     false,      'Med DND urami SSR2 ne sledi SSR1 — samo ročno')}
+  ${_field('brightness_night',    'Brightness v DND',        '0–255', 120, 'Znižana svetlost LED matrike ob prižigu med DND urami', 1)}
+  <div class="section-label mt16">Hystereza noč / dan (BH1750)</div>
   ${_field('lux_threshold',       'Prag NOČ (lux)',          'lx',     40, 'Pod to vrednostjo → noč (BH1750)', 1)}
   ${_field('lux_day',             'Prag DAN (lux)',          'lx',     70, 'Nad to vrednostjo → dan (mora biti > prag noč)', 1)}
-  ${_field('brightness_night',    'Nočni brightness',        '0–255', 120, 'Znižana svetlost LED matrike med 22:00–6:00', 1)}
+  <div class="section-label mt16">SSR gumb labeli (LCD zaslon)</div>
+  <div class="form-hint mt8">Dve vrstici — vsaka max 11 znakov. Vrstica 2 je neobvezna.</div>
+  ${[0,1,2,3].map(i => `
+  <div class="form-row">
+    <div class="form-label">SSR${i+1}</div>
+    <input class="form-input" id="cfg-ssr_lbl_${i}_a" type="text" maxlength="11" placeholder="vrstica 1" style="width:88px">
+    <input class="form-input" id="cfg-ssr_lbl_${i}_b" type="text" maxlength="11" placeholder="vrstica 2" style="width:88px">
+  </div>`).join('')}
   ${_saveBtn('light')}
 </div>
 
@@ -208,12 +223,19 @@
   // ── Polni form iz /api/config odgovora ───────────────────
   function _fill(cfg) {
     if (!cfg) return;
-    // Združi vse sub-objekte v en flat objekt
-    const flat = Object.assign({},
-      cfg.light  || {},
-      cfg.led    || {},
-      cfg.ident  || {}
-    );
+    // SSR labeli — array v cfg.light.ssr_labels, razcepimo na \n za dve polji
+    const lbls = (cfg.light || {}).ssr_labels || [];
+    lbls.forEach((lbl, i) => {
+      const parts = lbl.split('\n');
+      const a = document.getElementById('cfg-ssr_lbl_' + i + '_a');
+      const b = document.getElementById('cfg-ssr_lbl_' + i + '_b');
+      if (a) a.value = parts[0] || '';
+      if (b) b.value = parts[1] || '';
+    });
+    // Združi vse sub-objekte v en flat objekt (brez ssr_labels)
+    const lightFlat = Object.assign({}, cfg.light || {});
+    delete lightFlat.ssr_labels;
+    const flat = Object.assign({}, lightFlat, cfg.led || {}, cfg.ident || {});
     Object.entries(flat).forEach(([k, v]) => {
       const el = document.getElementById('cfg-' + k);
       if (!el) return;
@@ -226,7 +248,8 @@
   function _collect(tab) {
     const keys = {
       light: ['timeout_ssr1_s','manual_extend_min','antiforgot_ssr2_min','antiforgot_ssr3_min',
-              'ssr2_auto_night','lux_threshold','lux_day','brightness_night'],
+              'ssr2_auto_night','dnd_start_h','dnd_end_h','ssr2_dnd_disable',
+              'brightness_night','lux_threshold','lux_day'],
       led:   ['fill_speed_ms','unfill_speed_ms','fade_duration_ms','target_brightness',
               'ssr2_delay_ms','pa_thresh1_mm','pa_thresh2_mm','pa_thresh3_mm',
               'pa_stability_s','photocell_timer_min','clock_duration_s'],
@@ -244,6 +267,16 @@
         obj[k] = isNaN(v) ? el.value : v;
       }
     });
+    // SSR labeli — združimo dve polji z \n, samo za light tab
+    if (tab === 'light') {
+      obj.ssr_labels = [0,1,2,3].map(i => {
+        const a = document.getElementById('cfg-ssr_lbl_' + i + '_a');
+        const b = document.getElementById('cfg-ssr_lbl_' + i + '_b');
+        const v1 = a ? a.value.trim() : '';
+        const v2 = b ? b.value.trim() : '';
+        return v2 ? v1 + '\n' + v2 : (v1 || ('SSR' + (i + 1)));
+      });
+    }
     return obj;
   }
 

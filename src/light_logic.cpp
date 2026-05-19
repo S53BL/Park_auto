@@ -84,9 +84,12 @@
 #include "logger.h"
 #include "vehicle_recog.h"
 #include "parking_log.h"
+#include "screen_party.h"
 #include <freertos/semphr.h>
 #include <freertos/queue.h>
+#include <freertos/timers.h>
 #include <esp_task_wdt.h>
+#include <time.h>
 
 // ============================================================
 // LOGGING
@@ -142,6 +145,17 @@ static uint32_t      s_ssr2_arm_ms  = 0;   // ko je bil SSR1 vklopljen
 // Inicializacijski flag
 static bool s_initialized = false;
 
+// ============================================================
+// PARTY STANJE
+// ============================================================
+
+static bool     s_party_active          = false;  // party je vklopljen
+static bool     s_party_suspended       = false;  // party je začasno prekinjen
+static uint8_t  s_party_slot            = 0xFF;   // aktiven slot ob prekinitvi
+static uint32_t s_party_resume_deadline = 0;      // millis() kdaj smemo nadaljevati
+
+// FreeRTOS timer za urnik checker (enkrat na 60s)
+static TimerHandle_t s_schedule_timer   = nullptr;
 
 // ============================================================
 // SSR COMMAND QUEUE
@@ -201,6 +215,24 @@ static uint32_t ssr_remaining_s(uint8_t idx) {
 }
 
 // ============================================================
+// DND (Do Not Disturb) — je trenutna ura v tihem oknu?
+// ============================================================
+// Zahteva NTP (logger_ntp_synced()), brez NTP vrne false (DND neaktiven).
+// Overnight podprt: start_h=22, end_h=6 → h>=22 || h<6.
+static bool is_in_dnd(const Config& cfg) {
+    if (!logger_ntp_synced()) return false;
+    time_t t = time(nullptr);
+    if (t <= 1577836800UL) return false;  // NTP ni sinhroniziran
+    struct tm tm;
+    localtime_r(&t, &tm);
+    uint8_t h = (uint8_t)tm.tm_hour;
+    uint8_t s = cfg.dnd_start_h;
+    uint8_t e = cfg.dnd_end_h;
+    if (s < e) return h >= s && h < e;       // npr. 8–18
+    return h >= s || h < e;                  // overnight, npr. 22–6
+}
+
+// ============================================================
 // VKLOP SSR1 — centralna funkcija
 // ============================================================
 // Kliče se ob vsakem avtomatskem triggerju (radar, rampa, raluc).
@@ -251,16 +283,22 @@ static void trigger_ssr1_auto(uint32_t fill_payload) {
     uint32_t now = millis();
 
     if (s_ssr[1].on) {
-        // SSR1 je že fizično ON — samo resetiraj timer.
-        // Ne ponavljaj fill animacije pri vsakem radar pulzu!
-        s_ssr[1].deadline_ms    = now + timeout_ms;
+        // SSR1 je že fizično ON — ne ponavljaj fill animacije.
+        // MAX logika: radar lahko samo podaljša deadline, ne sme skrajšati.
+        // Primer: user podaljša na 30min, radar (timeout=3min) ne sme overridati.
+        uint32_t new_deadline = now + timeout_ms;
+        if (new_deadline > s_ssr[1].deadline_ms) {
+            s_ssr[1].deadline_ms = new_deadline;
+            if (s_ssr[2].on && s_ssr[2].is_auto) {
+                s_ssr[2].deadline_ms = new_deadline;
+            }
+        }
         s_ssr[2].last_motion_ms = now;
-        // Timer reset log samo 1× per 30s — ne za vsak radar event.
+        // Log samo 1× per 30s — ne za vsak radar event.
         static uint32_t s_last_reset_log_ms = 0;
         if ((now - s_last_reset_log_ms) >= 30000) {
             s_last_reset_log_ms = now;
-            LLD("SSR1: timer aktiven (zadnji reset pred <30s), ostalo=%lu s",
-                (unsigned long)ssr_remaining_s(1));
+            LLD("SSR1: ON, ostalo=%lu s", (unsigned long)ssr_remaining_s(1));
         }
         return;
     }
@@ -297,12 +335,25 @@ static void trigger_ssr1_auto(uint32_t fill_payload) {
     // je napajanje stabilno → možni glitchi pri prvi LED.
     vTaskDelay(pdMS_TO_TICKS(SSR1_STABILIZE_MS));
 
+    // DND: znižan brightness med konfiguriranim časovnim oknom.
+    // Appliciramo pred fill — fill nastavi FastLED.setBrightness() iz s_brightness_main.
+    bool in_dnd = is_in_dnd(cfg);
+    uint8_t br = in_dnd ? cfg.brightness_night : cfg.target_brightness;
+    led_mgr_set_brightness(br);
+    if (in_dnd) LLD("SSR1: DND aktiven → brightness=%u", (unsigned)br);
+
     // Začni fill animacijo — hitrost in smer odvisna od triggerja.
     led_mgr_fill(fill_speed_ms, fill_reverse);
 
     // Armiraj SSR2 auto sekvencer.
     // SSR2 (LED paneli) se vklopi POTEM ko fill konča + SSR2_DELAY_MS.
-    if (!s_ssr[2].disabled && cfg.ssr2_auto_night) {
+    // Med DND: SSR2 ne sledi (če je ssr2_dnd_disable=true).
+    bool arm_ssr2 = !s_ssr[2].disabled && cfg.ssr2_auto_night;
+    if (arm_ssr2 && in_dnd && cfg.ssr2_dnd_disable) {
+        arm_ssr2 = false;
+        LLD("SSR2 auto: preskočeno (DND aktiven, ssr2_dnd_disable=true)");
+    }
+    if (arm_ssr2) {
         s_ssr2_auto   = Ssr2AutoState::WAITING;
         s_ssr2_arm_ms = now;
         LLD("SSR2 auto: armirano (čakam fill %lums + delay %dms)",
@@ -363,10 +414,107 @@ static void trigger_ssr1_off() {
 // EVENTBUS HANDLERJI
 // ============================================================
 
+// ============================================================
+// PARTY — pomožne funkcije
+// ============================================================
+
+// Preveri ali je sistem miren (ni gibanja, ni rampe, ni SSR ON)
+bool light_logic_is_system_idle() {
+    if (s_any_motion) return false;
+    for (uint8_t i = 1; i <= 4; i++) {
+        if (s_ssr[i].on) return false;
+    }
+    GpioState gpio = hal_gpio_get_state();
+    if (gpio.rampagor || gpio.vrataod) return false;
+    return true;
+}
+
+bool light_logic_is_party_suspended() {
+    return s_party_suspended;
+}
+
+// Prekinitev party ob gibanju/rampi — podaljša deadline ob vsakem novem eventu
+static void _party_extend_or_suspend() {
+    if (!s_party_active) return;
+    const Config cfg = config_get();
+    uint32_t delay_ms = (uint32_t)cfg.party_resume_delay_s * 1000UL;
+    if (!s_party_suspended) {
+        s_party_suspended = true;
+        s_party_slot = screen_party_get_state().active_slot;
+        EventBus::publish(EventType::PARTY_SUSPENDED, 0);
+        LLI("Party SUSPENDED (slot=%d)", s_party_slot);
+    }
+    s_party_resume_deadline = millis() + delay_ms;
+}
+
+// ============================================================
+// PARTY — urnik checker (FreeRTOS timer callback, 60s interval)
+// ============================================================
+
+static bool _sched_date_in_range(const PartySchedule& sc, const struct tm& t) {
+    int m = t.tm_mon + 1;
+    int d = t.tm_mday;
+    if (sc.from_month == 0 || sc.to_month == 0) return false;
+    if (sc.from_month <= sc.to_month) {
+        if (m < (int)sc.from_month || m > (int)sc.to_month) return false;
+        if (m == (int)sc.from_month && d < (int)sc.from_day)  return false;
+        if (m == (int)sc.to_month   && d > (int)sc.to_day)    return false;
+        return true;
+    } else {
+        bool in_start = (m > (int)sc.from_month) || (m == (int)sc.from_month && d >= (int)sc.from_day);
+        bool in_end   = (m < (int)sc.to_month)   || (m == (int)sc.to_month   && d <= (int)sc.to_day);
+        return in_start || in_end;
+    }
+}
+
+static void party_schedule_tick(TimerHandle_t) {
+    struct tm t;
+    if (!getLocalTime(&t, 0)) return;  // NTP ni sinhroniziran
+
+    float lux = hal_light_get_lux();
+
+    for (int i = 0; i < 10; i++) {
+        PartySchedule sc = config_get_party_schedule((uint8_t)i);
+        if (!sc.enabled) continue;
+        if (!_sched_date_in_range(sc, t)) continue;
+
+        // Preveri čas/lux za vklop
+        bool time_on = false;
+        if (sc.use_lux_on) {
+            time_on = (lux > 0.0f) && ((uint32_t)lux < sc.lux_on);
+        } else {
+            time_on = (t.tm_hour == sc.time_on_h && t.tm_min == sc.time_on_m);
+        }
+
+        // Preveri čas/lux za izklop
+        bool time_off = false;
+        if (sc.use_lux_off) {
+            time_off = (lux > 0.0f) && ((uint32_t)lux > sc.lux_off);
+        } else {
+            time_off = (t.tm_hour == sc.time_off_h && t.tm_min == sc.time_off_m);
+            // Čez-polnoč: izklop je naslednji dan ko je time_off_h < time_on_h
+            if (!time_off && sc.time_off_h < sc.time_on_h) {
+                time_off = (t.tm_hour == sc.time_off_h && t.tm_min == sc.time_off_m);
+            }
+        }
+
+        if (time_on && !s_party_active && !s_party_suspended) {
+            LLI("Party urnik %d: vklop slot %d", i, sc.slot_idx);
+            EventBus::publish(EventType::BUTTON_PARTY_TOGGLE, 1);
+            EventBus::publish(EventType::BUTTON_PARTY_SLOT, sc.slot_idx);
+        }
+        if (time_off && s_party_active) {
+            LLI("Party urnik %d: izklop", i);
+            EventBus::publish(EventType::BUTTON_PARTY_TOGGLE, 0);
+        }
+    }
+}
+
 // RAMP_UP (rampagor) — payload=1: rampa dvignjena; payload=0: rampa spuščena
 static void on_ramp_up(const Event& e) {
     if (e.payload) {
         signal_led_ramp_start(RampDir::UP);
+        _party_extend_or_suspend();
         if (!s_is_night) { LLD("RAMP_UP: animacija (podnevi)"); return; }
         LLD("RAMP_UP → enqueue TRIGGER_ON_AUTO (počasen fill)");
         ssr_cmd_enqueue(SsrCmdType::TRIGGER_ON_AUTO, LIGHT_FADE_SLOW_MS);
@@ -428,6 +576,8 @@ static void on_radar_motion(const Event& e) {
     // -------------------------------------------------------
     s_any_motion     = true;
     s_last_motion_ms = now;
+
+    _party_extend_or_suspend();
 
     // Anti-forget reset — vsako gibanje podaljša SSR2/3/4 timerje.
     // Deluje 24/7 ker so SSR2/3/4 neodvisni od noč/dan (dogovorjeno 2026-05).
@@ -639,8 +789,30 @@ bool light_logic_init() {
     EventBus::subscribe(EventType::CELL_BROKEN,              on_cell_broken);
     EventBus::subscribe(EventType::ALARM_STATE_CHANGED,      on_alarm_state_changed);
 
+    // Party toggle — sledimo s_party_active; ročni toggle resetira suspended flag
+    EventBus::subscribe(EventType::BUTTON_PARTY_TOGGLE, [](const Event& ev) {
+        bool on = (ev.payload == 1);
+        s_party_active    = on;
+        s_party_suspended = false;
+        if (!on) {
+            LLD("Party: ročni izklop — s_party_active=false");
+        } else {
+            LLD("Party: ročni vklop — s_party_active=true");
+        }
+    });
+
+    // Party urnik checker — FreeRTOS periodic timer, 60s
+    s_schedule_timer = xTimerCreate("partySched", pdMS_TO_TICKS(60000),
+                                    pdTRUE, nullptr, party_schedule_tick);
+    if (s_schedule_timer) {
+        xTimerStart(s_schedule_timer, 0);
+        LLI("Party urnik timer zagnan (60s interval)");
+    } else {
+        LLW("Party urnik timer ni bil ustvarjen — ni dovolj RAM-a za timer");
+    }
+
     s_initialized = true;
-    LLI("light_logic_init OK — 8 EventBus subscribers registered");
+    LLI("light_logic_init OK — 9 EventBus subscribers + party schedule timer");
     return true;
 }
 
@@ -697,11 +869,25 @@ void light_logic_tick() {
                     const Config ccfg = config_get();
                     uint32_t t_now = millis();
                     if (s_ssr[idx].on) {
-                        LLI("SSR%d: manual OFF (toggle)", idx);
-                        if (idx == 1) {
-                            trigger_ssr1_off();
+                        if (idx == 1 && s_ssr[1].is_auto) {
+                            // SSR1 v avtomatskem načinu: dotik = podaljšanje timera
+                            uint32_t extend_ms = (uint32_t)ccfg.manual_extend_min * 60UL * 1000UL;
+                            s_ssr[1].deadline_ms = t_now + extend_ms;
+                            // SSR2 (auto slave) sledi SSR1 podaljšanju
+                            if (s_ssr[2].on && s_ssr[2].is_auto) {
+                                s_ssr[2].deadline_ms = s_ssr[1].deadline_ms;
+                            }
+                            LLI("SSR1: auto podaljšek → +%lu min (do=%lu s ostalo)",
+                                (unsigned long)ccfg.manual_extend_min,
+                                (unsigned long)ssr_remaining_s(1));
                         } else {
-                            ssr_physical_off(idx);
+                            // Ročni način ali SSR2-4: toggle OFF
+                            LLI("SSR%d: manual OFF (toggle)", idx);
+                            if (idx == 1) {
+                                trigger_ssr1_off();
+                            } else {
+                                ssr_physical_off(idx);
+                            }
                         }
                     } else {
                         LLI("SSR%d: manual ON", idx);
@@ -713,31 +899,29 @@ void light_logic_tick() {
                                 s_ssr[1].deadline_ms = t_now + timeout_ms;
                                 ssr_physical_on(1);
                                 vTaskDelay(pdMS_TO_TICKS(SSR1_STABILIZE_MS));
+                                led_mgr_set_brightness(ccfg.target_brightness);
                                 led_mgr_fill(LIGHT_FADE_SLOW_MS);
-                                if (!s_ssr[2].disabled && ccfg.ssr2_auto_night) {
-                                    s_ssr2_auto   = Ssr2AutoState::WAITING;
-                                    s_ssr2_arm_ms = t_now;
-                                }
+                                // SSR2 ne sledi ročnemu SSR1 — neodvisno delovanje
                                 break;
                             case 2:
                                 timeout_ms = (uint32_t)ccfg.antiforgot_ssr2_min * 60UL * 1000UL;
                                 s_ssr[2].is_auto     = false;
                                 s_ssr[2].deadline_ms = t_now + timeout_ms;
-                                s_ssr[2].last_motion_ms = t_now;
+                                s_ssr[2].last_motion_ms = now;
                                 ssr_physical_on(2);
                                 break;
                             case 3:
                                 timeout_ms = (uint32_t)ccfg.antiforgot_ssr3_min * 60UL * 1000UL;
                                 s_ssr[3].is_auto     = false;
                                 s_ssr[3].deadline_ms = t_now + timeout_ms;
-                                s_ssr[3].last_motion_ms = t_now;
+                                s_ssr[3].last_motion_ms = now;
                                 ssr_physical_on(3);
                                 break;
                             case 4:
                                 timeout_ms = (uint32_t)ccfg.antiforgot_ssr3_min * 60UL * 1000UL;
                                 s_ssr[4].is_auto     = false;
                                 s_ssr[4].deadline_ms = t_now + timeout_ms;
-                                s_ssr[4].last_motion_ms = t_now;
+                                s_ssr[4].last_motion_ms = now;
                                 ssr_physical_on(4);
                                 break;
                         }
@@ -879,6 +1063,27 @@ void light_logic_tick() {
     // Namen: web UI /api/status in servisni zaslon.
     if (s_any_motion && (now - s_last_motion_ms) >= 5000) {
         s_any_motion = false;
+    }
+
+    // ----------------------------------------------------------
+    // 6b. Party suspension/resumption logika
+    // ----------------------------------------------------------
+    if (s_party_suspended) {
+        if (light_logic_is_system_idle()) {
+            if ((int32_t)(now - s_party_resume_deadline) >= 0) {
+                // Sistem miren in deadline potekel → nadaljuj party
+                LLI("Party RESUME: sistem miren, deadline potekel → slot=%d", s_party_slot);
+                s_party_suspended = false;
+                s_party_active    = true;
+                // MUX HIGH — light_logic nastavi direktno, preden RESUME pošlje web_ui
+                digitalWrite(PIN_MUX_SELECT, HIGH);
+                EventBus::publish(EventType::PARTY_RESUMED, s_party_slot);
+            }
+        } else {
+            // Sistem se je spet aktiviral — podaljšaj deadline
+            const Config rcfg = config_get();
+            s_party_resume_deadline = now + (uint32_t)rcfg.party_resume_delay_s * 1000UL;
+        }
     }
 
     // ----------------------------------------------------------

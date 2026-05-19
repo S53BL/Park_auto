@@ -42,6 +42,42 @@
 #include "config.h"
 
 // ============================================================
+// PARTY STRUKTURY (pred Config — Config jih referencira)
+// ============================================================
+
+struct PartySlot {
+    char     name[16];      // vidno na LCD in web, max 15 znakov + \0
+    uint8_t  fx_id;         // WLED efekt ID (0-255)
+    uint8_t  _pad[3];       // alignment za color_rgb
+    uint32_t color_rgb;     // 0xRRGGBB; 0x000000 = "auto" (ne pošlji barve)
+    uint8_t  brightness;    // 0-255
+    uint8_t  speed;         // 0-255
+    uint8_t  enabled;       // 1 = konfiguriran, 0 = gumb siv na LCD
+    uint8_t  _pad2;         // alignment
+};
+
+struct PartySchedule {
+    char     name[24];      // opis, npr. "Božič 2026"
+    uint8_t  slot_idx;      // kateri slot aktivira (0-8)
+    uint8_t  enabled;       // urnik aktiven
+    uint8_t  from_month;    // 1-12
+    uint8_t  from_day;      // 1-31
+    uint8_t  to_month;      // 1-12
+    uint8_t  to_day;        // 1-31
+    uint8_t  use_lux_on;    // 1 = vklopi ob lux_on, 0 = ob time_on
+    uint8_t  _pad;          // alignment za lux_on
+    uint32_t lux_on;        // lux threshold za vklop (padec pod to vrednost)
+    uint8_t  time_on_h;     // ura vklopa (0-23)
+    uint8_t  time_on_m;     // minuta vklopa
+    uint8_t  use_lux_off;   // 1 = ugasni ob lux_off, 0 = ob time_off
+    uint8_t  _pad2;         // alignment za lux_off
+    uint32_t lux_off;       // lux threshold za izklop (dvig nad to vrednost)
+    uint8_t  time_off_h;    // ura izklopa (0-23), podpira čez polnoč
+    uint8_t  time_off_m;    // minuta izklopa
+    uint8_t  _pad3[2];      // struct alignment
+};
+
+// ============================================================
 // CONFIG STRUKTURA
 // ============================================================
 // Vsa polja ki se persistirajo v NVS.
@@ -57,8 +93,9 @@ struct Config {
     // Retriggerable — vsak RADAR_MOTION resetira timer.
     uint32_t timeout_ssr1_s;        // default: 180,  min: 30,    max: 3600
 
-    // Ročno podaljšanje SSR timera ob dotiku gumba (minute).
-    uint32_t manual_extend_min;     // default: 30,   min: 1,     max: 120
+    // Trajanje ročnega vklopa SSR1 ob dotiku gumba (minute).
+    // V avtomatskem načinu: dotik podaljša timer za ta čas.
+    uint32_t manual_extend_min;     // default: 10,   min: 5,     max: 60
 
     // Anti-forget timer za SSR2 (LED paneli) — ugasne po N minutah.
     uint32_t antiforgot_ssr2_min;   // default: 5,    min: 1,     max: 60
@@ -66,8 +103,14 @@ struct Config {
     // Anti-forget timer za SSR3 (reflektor) — ugasne po N minutah.
     uint32_t antiforgot_ssr3_min;   // default: 5,    min: 1,     max: 60
 
-    // Avtomatski vklop SSR2 ob prehodu v nočni način.
+    // SSR2 sledi SSR1 v avtomatiki (slave). Ko false: SSR2 samo ročno.
     bool     ssr2_auto_night;       // default: true  (bool — validacija: samo 0/1)
+
+    // DND (Do Not Disturb) — časovno okno ko je SSR2 opcijsko izklopljeno
+    // in brightness znižan. Zahteva NTP. Overnight podprt (start > end).
+    uint8_t  dnd_start_h;           // default: 22, min: 0, max: 23
+    uint8_t  dnd_end_h;             // default: 6,  min: 0, max: 23
+    bool     ssr2_dnd_disable;      // default: false — SSR2 ne sledi med DND
 
     // Prag lux za preklop noč/dan (hystereza: night<lux_night, day>lux_day).
     uint32_t lux_night;             // default: 40,   min: 1,     max: 200
@@ -174,6 +217,23 @@ struct Config {
 
     // IP naslov Party ESP (WLED), dostopen prek /api/party/config.
     char wled_ip[32];   // default: "192.168.4.1"
+
+    // 9 nastavljivih party slotov (shranjeni kot NVS blobs).
+    PartySlot party_slots[9];
+
+    // 10 urnikov za avtomatski party vklop/izklop.
+    PartySchedule party_schedules[10];
+
+    // Čas mirovanja (sekunde) pred nadaljevanjem party po prekinitvi.
+    uint32_t party_resume_delay_s;  // default: 30, min: 5, max: 300
+
+    // ----------------------------------------------------------
+    // Tab: Osvetlitev — SSR gumb labeli
+    // ----------------------------------------------------------
+    // Prikazano besedilo na vsakem SSR gumbu (LCD zaslon).
+    // Max 23 znakov; nova vrstica z \n je dovoljena (2 vrstici).
+    // Nastavljivo prek /api/config (web UI, zavihek Osvetlitev).
+    char ssr_label[4][24];  // default: "SSR1".."SSR4"
 };
 
 // ============================================================
@@ -187,10 +247,13 @@ inline Config config_defaults() {
     Config c;
     // Osvetlitev
     c.timeout_ssr1_s       = 180;
-    c.manual_extend_min    = 30;
+    c.manual_extend_min    = 10;
     c.antiforgot_ssr2_min  = 5;
     c.antiforgot_ssr3_min  = 5;
     c.ssr2_auto_night      = true;
+    c.dnd_start_h          = 22;
+    c.dnd_end_h            = 6;
+    c.ssr2_dnd_disable     = false;
     c.lux_night            = 40;
     c.lux_day              = 70;
     c.brightness_night     = 120;
@@ -230,6 +293,32 @@ inline Config config_defaults() {
     // Party / WLED
     strncpy(c.wled_ip, "192.168.4.1", sizeof(c.wled_ip));
     c.wled_ip[sizeof(c.wled_ip) - 1] = '\0';
+    // Party resume delay
+    c.party_resume_delay_s = 30;
+    // Party slots — 9 prednastavitev
+    memset(c.party_slots, 0, sizeof(c.party_slots));
+    // slot 0: Solid
+    strncpy(c.party_slots[0].name, "Solid",     16); c.party_slots[0].fx_id=0;  c.party_slots[0].color_rgb=0xFFFFFF; c.party_slots[0].brightness=180; c.party_slots[0].speed=0;   c.party_slots[0].enabled=1;
+    // slot 1: Breathe
+    strncpy(c.party_slots[1].name, "Breathe",   16); c.party_slots[1].fx_id=2;  c.party_slots[1].color_rgb=0xFBBF24; c.party_slots[1].brightness=80;  c.party_slots[1].speed=60;  c.party_slots[1].enabled=1;
+    // slot 2: Rainbow
+    strncpy(c.party_slots[2].name, "Rainbow",   16); c.party_slots[2].fx_id=9;  c.party_slots[2].color_rgb=0x000000; c.party_slots[2].brightness=191; c.party_slots[2].speed=128; c.party_slots[2].enabled=1;
+    // slot 3: Chase
+    strncpy(c.party_slots[3].name, "Chase",     16); c.party_slots[3].fx_id=28; c.party_slots[3].color_rgb=0xFF0000; c.party_slots[3].brightness=180; c.party_slots[3].speed=150; c.party_slots[3].enabled=1;
+    // slot 4: Twinkle
+    strncpy(c.party_slots[4].name, "Twinkle",   16); c.party_slots[4].fx_id=45; c.party_slots[4].color_rgb=0xFFFFFF; c.party_slots[4].brightness=150; c.party_slots[4].speed=100; c.party_slots[4].enabled=1;
+    // slot 5: Strobe
+    strncpy(c.party_slots[5].name, "Strobe",    16); c.party_slots[5].fx_id=30; c.party_slots[5].color_rgb=0xFFFFFF; c.party_slots[5].brightness=220; c.party_slots[5].speed=200; c.party_slots[5].enabled=1;
+    // slot 6: Fire
+    strncpy(c.party_slots[6].name, "Fire",      16); c.party_slots[6].fx_id=65; c.party_slots[6].color_rgb=0x000000; c.party_slots[6].brightness=200; c.party_slots[6].speed=128; c.party_slots[6].enabled=1;
+    // slot 7: Meteor
+    strncpy(c.party_slots[7].name, "Meteor",    16); c.party_slots[7].fx_id=58; c.party_slots[7].color_rgb=0xFFFFFF; c.party_slots[7].brightness=180; c.party_slots[7].speed=150; c.party_slots[7].enabled=1;
+    // slot 8: Colorloop
+    strncpy(c.party_slots[8].name, "Colorloop", 16); c.party_slots[8].fx_id=38; c.party_slots[8].color_rgb=0x000000; c.party_slots[8].brightness=160; c.party_slots[8].speed=80;  c.party_slots[8].enabled=1;
+    // Party schedules — vsi disabled ob prvem zagonu
+    memset(c.party_schedules, 0, sizeof(c.party_schedules));
+    // SSR labeli
+    for (int i = 0; i < 4; i++) snprintf(c.ssr_label[i], 24, "SSR%d", i + 1);
     return c;
 }
 
@@ -267,3 +356,29 @@ uint8_t config_mgr_replaced_count();
 
 // Vrne true če je config_mgr_init() uspešno zaključil.
 bool config_mgr_ok();
+
+// ============================================================
+// PARTY SLOT API
+// ============================================================
+
+// Vrne kopijo slota (idx 0-8). Thread-safe.
+PartySlot    config_get_party_slot(uint8_t idx);
+
+// Nastavi slot v RAM (ne piše v NVS). Kliči config_save_party_slots() za persistenco.
+void         config_set_party_slot(uint8_t idx, const PartySlot& slot);
+
+// Shrani vseh 9 slotov v NVS kot blobs. Thread-safe.
+bool         config_save_party_slots();
+
+// ============================================================
+// PARTY SCHEDULE API
+// ============================================================
+
+// Vrne kopijo urnika (idx 0-9). Thread-safe.
+PartySchedule config_get_party_schedule(uint8_t idx);
+
+// Nastavi urnik v RAM (ne piše v NVS). Kliči config_save_party_schedules() za persistenco.
+void         config_set_party_schedule(uint8_t idx, const PartySchedule& sched);
+
+// Shrani vseh 10 urnikov v NVS kot blobs. Thread-safe.
+bool         config_save_party_schedules();

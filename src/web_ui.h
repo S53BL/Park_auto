@@ -120,3 +120,8 @@ struct WebUiStats {
 };
 
 WebUiStats web_ui_get_stats();
+
+// Vrne handle WLED command queue — za light_logic.cpp (party suspend/resume).
+// Vrne nullptr če WLED queue ni inicializiran.
+// Kliči samo po web_ui_init() (queue se ustvari v web_ui_init()).
+QueueHandle_t web_ui_get_wled_queue();

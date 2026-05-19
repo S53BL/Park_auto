@@ -56,6 +56,7 @@
 #include "screen_party.h"
 #include "event_bus.h"
 #include "config.h"
+#include "config_mgr.h"
 #include <Arduino.h>
 #include <freertos/semphr.h>
 
@@ -102,12 +103,12 @@
 #define TOGGLE_W          (SECTION_W)
 #define TOGGLE_H          52
 
-// Efekti 2×3
-#define EFF_COLS          3
-#define EFF_ROWS          2
-#define EFF_GAP           6
-#define EFF_BTN_W         ((SECTION_W - EFF_GAP * (EFF_COLS - 1)) / EFF_COLS)
-#define EFF_BTN_H         44
+// Sloti 3×3
+#define SLOT_COLS         3
+#define SLOT_ROWS         3
+#define SLOT_GAP          4
+#define SLOT_BTN_W        ((SECTION_W - SLOT_GAP * (SLOT_COLS - 1)) / SLOT_COLS)
+#define SLOT_BTN_H        44
 
 // Barve — 7 krogcev
 #define CLR_COUNT         7
@@ -117,21 +118,6 @@
 // Sliderji
 #define SLIDER_H          36
 #define SLIDER_ROW_H      52
-
-// Prednastavitve — 2×2
-#define PRE_COLS          2
-#define PRE_ROWS          2
-#define PRE_BTN_W         ((SECTION_W - EFF_GAP) / 2)
-#define PRE_BTN_H         44
-
-// ============================================================
-// WLED FX IDS (skladno z LCD_UI_Arhitektura.docx sekcija 5.2)
-// ============================================================
-
-static const uint8_t EFF_FX_IDS[6] = { 0, 2, 9, 28, 45, 30 };
-static const char*   EFF_NAMES[6]  = {
-    "Solid", "Breathe", "Rainbow", "Chase", "Twinkle", "Strobe"
-};
 
 // ============================================================
 // BARVE PALETA (skladno z LCD_UI_Arhitektura.docx sekcija 5.3)
@@ -149,46 +135,19 @@ static const uint32_t CLR_PALETTE[CLR_COUNT] = {
 };
 
 // ============================================================
-// PREDNASTAVITVE (skladno z LCD_UI_Arhitektura.docx sekcija 5.5)
-// ============================================================
-
-struct Preset {
-    const char* name;
-    uint8_t     fx_id;
-    uint32_t    color_rgb;   // 0 = auto (WLED ne pošljemo barve)
-    uint8_t     brightness;
-    uint8_t     speed;
-};
-
-static const Preset PRESETS[4] = {
-    { "Novo leto", 30, 0xFFFFFF, 220, 200 },   // Strobe, bela
-    { "Zabava",    9,  0x000000, 191, 128 },   // Rainbow, auto
-    { "Ambient",   2,  0xFBBF24, 80,  60  },   // Breathe, amber (prej toplo oranžna)
-    { "Božič",     28, 0xEF4444, 180, 150 },   // Chase, rdeča (zelena doda WLED)
-};
-
-// ============================================================
 // WIDGET STRUKTURE
 // ============================================================
 
-struct EffectBtn {
+struct SlotBtn {
     lv_obj_t* btn;
     lv_obj_t* lbl;
-    uint8_t   fx_id;
-    bool      active;
+    uint8_t   idx;
 };
 
 struct ColorDot {
     lv_obj_t* dot;
     uint32_t  rgb;
     bool      selected;
-};
-
-struct PresetBtn {
-    lv_obj_t* btn;
-    lv_obj_t* lbl;
-    uint8_t   idx;
-    bool      active;
 };
 
 // ============================================================
@@ -200,10 +159,10 @@ static bool s_created = false;
 // Toggle widget
 static lv_obj_t* s_toggle_btn   = nullptr;
 static lv_obj_t* s_toggle_lbl   = nullptr;
-static lv_obj_t* s_toggle_dot   = nullptr;   // indikator lučka
+static lv_obj_t* s_toggle_dot   = nullptr;
 
-// Efekti
-static EffectBtn s_eff[6]       = {};
+// Sloti 3×3
+static SlotBtn   s_slot[9]      = {};
 
 // Barve
 static ColorDot  s_clr[CLR_COUNT] = {};
@@ -214,18 +173,17 @@ static lv_obj_t* s_lbl_bri_val  = nullptr;
 static lv_obj_t* s_slider_spd   = nullptr;
 static lv_obj_t* s_lbl_spd_val  = nullptr;
 
-// Prednastavitve
-static PresetBtn s_pre[4]       = {};
-
-// Party stanje
+// Party stanje + dirty flag
 static SemaphoreHandle_t s_mutex = nullptr;
+static volatile bool s_dirty          = false;
+static volatile bool s_reload_slots   = false;
 static PartyState s_state = {
     false,      // party_on
+    0xFF,       // active_slot = brez
     0,          // fx_id = Solid
     191,        // brightness
     128,        // speed
-    0xFFFFFF,   // color = bela
-    0xFF        // preset = brez
+    0xFFFFFF    // color = bela
 };
 
 // ============================================================
@@ -301,43 +259,37 @@ static void toggle_event_cb(lv_event_t* e) {
 }
 
 // ============================================================
-// EFEKTI
+// SLOTI
 // ============================================================
 
-static void effect_update_visual(uint8_t active_fx_id) {
-    for (int i = 0; i < 6; i++) {
-        bool act = (EFF_FX_IDS[i] == active_fx_id) && s_state.party_on;
-        s_eff[i].active = act;
-        lv_obj_set_style_bg_color(s_eff[i].btn,
+static void slot_update_visual(uint8_t active_slot) {
+    for (int i = 0; i < 9; i++) {
+        if (!s_slot[i].btn) continue;
+        bool act = (i == active_slot) && s_state.party_on;
+        lv_obj_set_style_bg_color(s_slot[i].btn,
             act ? C_PARTY_DIM_BG : C_CARD_BG,   LV_PART_MAIN);
-        lv_obj_set_style_border_color(s_eff[i].btn,
+        lv_obj_set_style_border_color(s_slot[i].btn,
             act ? C_PARTY_ACTIVE : C_BORDER_OFF, LV_PART_MAIN);
-        lv_obj_set_style_text_color(s_eff[i].lbl,
+        lv_obj_set_style_text_color(s_slot[i].lbl,
             act ? C_PARTY_ACTIVE : C_TEXT_DIM,   LV_PART_MAIN);
     }
 }
 
-static void effect_event_cb(lv_event_t* e) {
+static void slot_event_cb(lv_event_t* e) {
     if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
-    EffectBtn* eff = (EffectBtn*)lv_event_get_user_data(e);
-    if (!eff) return;
+    SlotBtn* sb = (SlotBtn*)lv_event_get_user_data(e);
+    if (!sb) return;
     if (!s_state.party_on) {
-        PARTY_D("Efekt ignoriran — party OFF");
+        PARTY_D("Slot ignoriran — party OFF");
         return;
     }
 
-    s_state.fx_id = eff->fx_id;
-    s_state.preset_id = 0xFF;   // prekini prednastavitev
-    effect_update_visual(s_state.fx_id);
+    uint8_t idx = sb->idx;
+    s_state.active_slot = idx;
+    slot_update_visual(idx);
 
-    EventBus::publish(EventType::BUTTON_PARTY_EFFECT, s_state.fx_id);
-    PARTY_D("BUTTON_PARTY_EFFECT fx_id=%d (%s)",
-            s_state.fx_id, eff->lbl ? lv_label_get_text(eff->lbl) : "?");
-
-    // TODO: web_ui.cpp subscriber:
-    //   EventBus::subscribe(EventType::BUTTON_PARTY_EFFECT, [](const Event& ev) {
-    //       wledPost("{\"seg\":[{\"fx\":" + String(ev.payload) + "}]}");
-    //   });
+    EventBus::publish(EventType::BUTTON_PARTY_SLOT, idx);
+    PARTY_D("BUTTON_PARTY_SLOT idx=%d", idx);
 }
 
 // ============================================================
@@ -368,7 +320,7 @@ static void color_event_cb(lv_event_t* e) {
     }
 
     s_state.color_rgb = cd->rgb;
-    s_state.preset_id = 0xFF;
+    s_state.active_slot = 0xFF;
     color_update_visual(s_state.color_rgb);
 
     EventBus::publish(EventType::BUTTON_PARTY_COLOR, s_state.color_rgb);
@@ -429,76 +381,6 @@ static void slider_spd_event_cb(lv_event_t* e) {
 }
 
 // ============================================================
-// PREDNASTAVITVE
-// ============================================================
-
-static void preset_update_visual(uint8_t active_preset) {
-    for (int i = 0; i < 4; i++) {
-        bool act = (i == active_preset) && s_state.party_on;
-        lv_obj_set_style_bg_color(s_pre[i].btn,
-            act ? C_PARTY_DIM_BG : C_CARD_BG,   LV_PART_MAIN);
-        lv_obj_set_style_border_color(s_pre[i].btn,
-            act ? C_PARTY_ACTIVE : C_BORDER_OFF, LV_PART_MAIN);
-        lv_obj_set_style_text_color(s_pre[i].lbl,
-            act ? C_PARTY_ACTIVE : C_TEXT_DIM,   LV_PART_MAIN);
-    }
-}
-
-static void preset_event_cb(lv_event_t* e) {
-    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
-    PresetBtn* pb = (PresetBtn*)lv_event_get_user_data(e);
-    if (!pb) return;
-    if (!s_state.party_on) {
-        PARTY_D("Prednastavitev ignorirana — party OFF");
-        return;
-    }
-
-    uint8_t idx = pb->idx;
-    const Preset& p = PRESETS[idx];
-
-    // Posodobi lokalno stanje
-    s_state.fx_id      = p.fx_id;
-    s_state.brightness = p.brightness;
-    s_state.speed      = p.speed;
-    s_state.preset_id  = idx;
-    if (p.color_rgb != 0x000000) s_state.color_rgb = p.color_rgb;
-
-    // Posodobi vizuale
-    preset_update_visual(idx);
-    effect_update_visual(s_state.fx_id);
-    if (p.color_rgb != 0x000000) color_update_visual(s_state.color_rgb);
-    lv_slider_set_value(s_slider_bri, s_state.brightness, LV_ANIM_ON);
-    lv_slider_set_value(s_slider_spd, s_state.speed,      LV_ANIM_ON);
-
-    char buf[8];
-    snprintf(buf, sizeof(buf), "%d", s_state.brightness);
-    lv_label_set_text(s_lbl_bri_val, buf);
-    snprintf(buf, sizeof(buf), "%d", s_state.speed);
-    lv_label_set_text(s_lbl_spd_val, buf);
-
-    EventBus::publish(EventType::BUTTON_PARTY_PRESET, idx);
-    PARTY_I("BUTTON_PARTY_PRESET idx=%d (%s) fx=%d bri=%d spd=%d",
-            idx, p.name, p.fx_id, p.brightness, p.speed);
-
-    // TODO: web_ui.cpp subscriber za prednastavitve:
-    //   EventBus::subscribe(EventType::BUTTON_PARTY_PRESET, [](const Event& ev) {
-    //       const Preset& p = PRESETS[ev.payload];
-    //       // Pošlji vse parametre v enem API klicu:
-    //       String body = "{\"on\":true,\"bri\":" + String(p.brightness)
-    //                   + ",\"seg\":[{\"fx\":" + String(p.fx_id)
-    //                   + ",\"sx\":" + String(p.speed);
-    //       if (p.color_rgb != 0) {
-    //           uint8_t r=(p.color_rgb>>16)&0xFF,
-    //                   g=(p.color_rgb>>8)&0xFF,
-    //                   b=p.color_rgb&0xFF;
-    //           body += ",\"col\":[["+String(r)+","+String(g)+","+String(b)+"]]";
-    //       }
-    //       body += "}]}";
-    //       wledPost(body);
-    //   });
-}
-
-// ============================================================
 // screen_party_create — kliče samo lvglTask
 // ============================================================
 
@@ -552,41 +434,45 @@ void screen_party_create(lv_obj_t* parent) {
     cy += TOGGLE_H + PAD * 2;
 
     // --------------------------------------------------------
-    // EFEKTI — 2×3 grid
+    // SLOTI — 3×3 grid (9 prednastavitev iz config_mgr)
     // --------------------------------------------------------
-    make_section_header(parent, cy, "EFEKT");
+    make_section_header(parent, cy, "SLOTI");
     cy += 18;
 
-    for (int row = 0; row < EFF_ROWS; row++) {
-        for (int col = 0; col < EFF_COLS; col++) {
-            int idx = row * EFF_COLS + col;
-            int x = PAD + col * (EFF_BTN_W + EFF_GAP);
-            int y = cy + row * (EFF_BTN_H + EFF_GAP);
+    for (int row = 0; row < SLOT_ROWS; row++) {
+        for (int col = 0; col < SLOT_COLS; col++) {
+            int idx = row * SLOT_COLS + col;
+            int x = PAD + col * (SLOT_BTN_W + SLOT_GAP);
+            int y = cy + row * (SLOT_BTN_H + SLOT_GAP);
 
-            s_eff[idx].fx_id  = EFF_FX_IDS[idx];
-            s_eff[idx].active = false;
+            s_slot[idx].idx = (uint8_t)idx;
+            PartySlot sl = config_get_party_slot((uint8_t)idx);
 
-            s_eff[idx].btn = lv_obj_create(parent);
-            lv_obj_set_size(s_eff[idx].btn, EFF_BTN_W, EFF_BTN_H);
-            lv_obj_set_pos(s_eff[idx].btn, x, y);
-            lv_obj_set_style_bg_color(s_eff[idx].btn, C_CARD_BG, LV_PART_MAIN);
-            lv_obj_set_style_border_color(s_eff[idx].btn, C_BORDER_OFF, LV_PART_MAIN);
-            lv_obj_set_style_border_width(s_eff[idx].btn, 1, LV_PART_MAIN);
-            lv_obj_set_style_radius(s_eff[idx].btn, 6, LV_PART_MAIN);
-            lv_obj_set_style_pad_all(s_eff[idx].btn, 0, LV_PART_MAIN);
-            lv_obj_clear_flag(s_eff[idx].btn, LV_OBJ_FLAG_SCROLLABLE);
-            lv_obj_add_flag(s_eff[idx].btn, LV_OBJ_FLAG_CLICKABLE);
-            lv_obj_add_event_cb(s_eff[idx].btn, effect_event_cb,
-                                LV_EVENT_CLICKED, &s_eff[idx]);
+            s_slot[idx].btn = lv_obj_create(parent);
+            lv_obj_set_size(s_slot[idx].btn, SLOT_BTN_W, SLOT_BTN_H);
+            lv_obj_set_pos(s_slot[idx].btn, x, y);
+            lv_obj_set_style_bg_color(s_slot[idx].btn, C_CARD_BG, LV_PART_MAIN);
+            lv_obj_set_style_border_color(s_slot[idx].btn, C_BORDER_OFF, LV_PART_MAIN);
+            lv_obj_set_style_border_width(s_slot[idx].btn, 1, LV_PART_MAIN);
+            lv_obj_set_style_radius(s_slot[idx].btn, 6, LV_PART_MAIN);
+            lv_obj_set_style_pad_all(s_slot[idx].btn, 0, LV_PART_MAIN);
+            lv_obj_clear_flag(s_slot[idx].btn, LV_OBJ_FLAG_SCROLLABLE);
+            lv_obj_add_flag(s_slot[idx].btn, LV_OBJ_FLAG_CLICKABLE);
+            lv_obj_add_event_cb(s_slot[idx].btn, slot_event_cb,
+                                LV_EVENT_CLICKED, &s_slot[idx]);
 
-            s_eff[idx].lbl = lv_label_create(s_eff[idx].btn);
-            lv_label_set_text(s_eff[idx].lbl, EFF_NAMES[idx]);
-            lv_obj_set_style_text_color(s_eff[idx].lbl, C_TEXT_DIM, LV_PART_MAIN);
-            lv_obj_set_style_text_font(s_eff[idx].lbl, &lv_font_montserrat_14, LV_PART_MAIN);
-            lv_obj_align(s_eff[idx].lbl, LV_ALIGN_CENTER, 0, 0);
+            s_slot[idx].lbl = lv_label_create(s_slot[idx].btn);
+            lv_label_set_text(s_slot[idx].lbl, sl.name);
+            lv_obj_set_style_text_color(s_slot[idx].lbl, C_TEXT_DIM, LV_PART_MAIN);
+            lv_obj_set_style_text_font(s_slot[idx].lbl, &lv_font_montserrat_14, LV_PART_MAIN);
+            lv_obj_align(s_slot[idx].lbl, LV_ALIGN_CENTER, 0, 0);
+
+            if (!sl.enabled) {
+                lv_obj_add_state(s_slot[idx].btn, LV_STATE_DISABLED);
+            }
         }
     }
-    cy += EFF_ROWS * (EFF_BTN_H + EFF_GAP) + PAD;
+    cy += SLOT_ROWS * (SLOT_BTN_H + SLOT_GAP) + PAD;
 
     // --------------------------------------------------------
     // BARVE — 7 krogcev v vrsti
@@ -687,42 +573,6 @@ void screen_party_create(lv_obj_t* parent) {
     }
     cy += SLIDER_ROW_H + PAD * 2;
 
-    // --------------------------------------------------------
-    // PREDNASTAVITVE — 2×2 grid
-    // --------------------------------------------------------
-    make_section_header(parent, cy, "PREDNASTAVITVE");
-    cy += 18;
-
-    for (int row = 0; row < PRE_ROWS; row++) {
-        for (int col = 0; col < PRE_COLS; col++) {
-            int idx = row * PRE_COLS + col;
-            int x = PAD + col * (PRE_BTN_W + EFF_GAP);
-            int y = cy + row * (PRE_BTN_H + EFF_GAP);
-
-            s_pre[idx].idx = idx;
-
-            s_pre[idx].btn = lv_obj_create(parent);
-            lv_obj_set_size(s_pre[idx].btn, PRE_BTN_W, PRE_BTN_H);
-            lv_obj_set_pos(s_pre[idx].btn, x, y);
-            lv_obj_set_style_bg_color(s_pre[idx].btn, C_CARD_BG, LV_PART_MAIN);
-            lv_obj_set_style_border_color(s_pre[idx].btn, C_BORDER_OFF, LV_PART_MAIN);
-            lv_obj_set_style_border_width(s_pre[idx].btn, 1, LV_PART_MAIN);
-            lv_obj_set_style_radius(s_pre[idx].btn, 6, LV_PART_MAIN);
-            lv_obj_set_style_pad_all(s_pre[idx].btn, 0, LV_PART_MAIN);
-            lv_obj_clear_flag(s_pre[idx].btn, LV_OBJ_FLAG_SCROLLABLE);
-            lv_obj_add_flag(s_pre[idx].btn, LV_OBJ_FLAG_CLICKABLE);
-            lv_obj_add_event_cb(s_pre[idx].btn, preset_event_cb,
-                                LV_EVENT_CLICKED, &s_pre[idx]);
-
-            s_pre[idx].lbl = lv_label_create(s_pre[idx].btn);
-            lv_label_set_text(s_pre[idx].lbl, PRESETS[idx].name);
-            lv_obj_set_style_text_color(s_pre[idx].lbl, C_TEXT_DIM, LV_PART_MAIN);
-            lv_obj_set_style_text_font(s_pre[idx].lbl, &lv_font_montserrat_14, LV_PART_MAIN);
-            lv_obj_align(s_pre[idx].lbl, LV_ALIGN_CENTER, 0, 0);
-        }
-    }
-    cy += PRE_ROWS * (PRE_BTN_H + EFF_GAP) + PAD * 2;
-
     lv_obj_set_height(parent, LV_SIZE_CONTENT);
 
     s_created = true;
@@ -734,15 +584,36 @@ void screen_party_create(lv_obj_t* parent) {
 // ============================================================
 
 void screen_party_apply_updates() {
-    // Trenutno ni pending sistema ker party zaslon ne prejema
-    // zunanjih posodobitev (samo oddaja evente).
-    // Ko bo web_ui.cpp implementiran in bo znal prebrati WLED stanje
-    // (GET /json/state), bo ta funkcija posodobila UI iz WLED odziva.
-    //
-    // TODO: web_ui.cpp implementira polling GET /json/state vsakih ~5s
-    // in pokliče screen_party_set_state() ki postavi dirty flag.
-    // screen_party_apply_updates() nato poberemo dirty snapshot in
-    // osvežimo vse vizuale (toggle, efekt, barva, bri, spd).
+    if (!s_created) return;
+
+    // Posodobi slot labele če je web UI spremenil slot podatke
+    if (s_reload_slots) {
+        s_reload_slots = false;
+        screen_party_reload_slots();
+    }
+
+    // Posodobi vizuale iz dirty stanja (set iz web_ui WLED polling-a)
+    if (!s_dirty) return;
+
+    PartyState snap;
+    if (s_mutex && xSemaphoreTake(s_mutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+        snap = s_state;
+        s_dirty = false;
+        xSemaphoreGive(s_mutex);
+    } else {
+        return;
+    }
+
+    toggle_update_visual();
+    slot_update_visual(snap.active_slot);
+    color_update_visual(snap.color_rgb);
+
+    if (s_slider_bri) lv_slider_set_value(s_slider_bri, snap.brightness, LV_ANIM_OFF);
+    if (s_slider_spd) lv_slider_set_value(s_slider_spd, snap.speed,      LV_ANIM_OFF);
+
+    char buf[8];
+    if (s_lbl_bri_val) { snprintf(buf, sizeof(buf), "%d", snap.brightness); lv_label_set_text(s_lbl_bri_val, buf); }
+    if (s_lbl_spd_val) { snprintf(buf, sizeof(buf), "%d", snap.speed);      lv_label_set_text(s_lbl_spd_val, buf); }
 }
 
 // ============================================================
@@ -753,11 +624,26 @@ void screen_party_set_state(const PartyState& state) {
     if (!s_mutex) return;
     if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
         s_state = state;
+        s_dirty = true;
         xSemaphoreGive(s_mutex);
     }
-    // Vizualna posodobitev mora iti v lvglTask — implementiraj dirty flag
-    // ko bo web_ui.cpp klical to funkcijo iz drugega taska.
-    // Za zdaj: toggle_update_visual() itd. so varni samo iz lvglTask.
+}
+
+void screen_party_reload_slots() {
+    for (int i = 0; i < 9; i++) {
+        if (!s_slot[i].btn || !s_slot[i].lbl) continue;
+        PartySlot sl = config_get_party_slot((uint8_t)i);
+        lv_label_set_text(s_slot[i].lbl, sl.name);
+        if (sl.enabled) {
+            lv_obj_clear_state(s_slot[i].btn, LV_STATE_DISABLED);
+        } else {
+            lv_obj_add_state(s_slot[i].btn, LV_STATE_DISABLED);
+        }
+    }
+}
+
+void screen_party_request_slot_reload() {
+    s_reload_slots = true;
 }
 
 PartyState screen_party_get_state() {

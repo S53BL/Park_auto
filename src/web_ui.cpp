@@ -52,6 +52,7 @@
 
 #include "led_manager.h"
 #include "screen_party.h"
+#include "screen_main.h"    // screen_main_set_ssr_label — live update po spremembi
 
 #include <LittleFS.h>
 #include <ESPAsyncWebServer.h>
@@ -101,7 +102,9 @@ enum class WledCmdType : uint8_t {
     COLOR,       // payload: (R<<16)|(G<<8)|B
     BRIGHTNESS,  // payload: 0-255
     SPEED,       // payload: 0-255
-    PRESET,      // payload: preset_idx 0-3; reads full state from screen_party
+    SLOT,        // payload: slot_idx 0-8; bere PartySlot iz config_mgr
+    SUSPEND,     // party prekinjen — pošlje {"on":false} in vrne MUX
+    RESUME,      // party nadaljuje — MUX že HIGH; pošlje samo {"on":true}
 };
 
 struct WledCmd {
@@ -111,7 +114,8 @@ struct WledCmd {
 
 static QueueHandle_t s_wled_q    = nullptr;
 static TaskHandle_t  s_wled_task = nullptr;
-static bool          s_wled_on   = false;   // mirror: je WLED prižgan
+static bool          s_wled_on   = false;    // mirror: je WLED prižgan
+static uint8_t       s_active_slot = 0xFF;   // kateri slot je aktiven (0xFF = custom)
 
 // ============================================================
 // SECTION 2 — POMOŽNE FUNKCIJE
@@ -286,8 +290,8 @@ static void _handleStatusSystem(AsyncWebServerRequest* req) {
 
     JsonDocument doc(&s_psram_alloc);
 
-    doc["free_heap"]       = (uint32_t)esp_get_free_heap_size();
-    doc["min_free_heap"]   = (uint32_t)esp_get_minimum_free_heap_size();
+    doc["free_sram"]       = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    doc["min_free_sram"]   = (uint32_t)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     doc["free_psram"]      = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
     doc["min_free_psram"]  = (uint32_t)heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM);
     doc["config_ok"]       = config_mgr_ok();
@@ -408,9 +412,14 @@ static void _handleConfigGet(AsyncWebServerRequest* req) {
     light["antiforgot_ssr2_min"] = cfg.antiforgot_ssr2_min;
     light["antiforgot_ssr3_min"] = cfg.antiforgot_ssr3_min;
     light["ssr2_auto_night"]     = cfg.ssr2_auto_night;
+    light["dnd_start_h"]        = cfg.dnd_start_h;
+    light["dnd_end_h"]          = cfg.dnd_end_h;
+    light["ssr2_dnd_disable"]   = cfg.ssr2_dnd_disable;
+    light["brightness_night"]   = cfg.brightness_night;
     light["lux_threshold"]       = cfg.lux_night;
     light["lux_day"]             = cfg.lux_day;
-    light["brightness_night"]    = cfg.brightness_night;
+    JsonArray ssr_lbl = light["ssr_labels"].to<JsonArray>();
+    for (int i = 0; i < 4; i++) ssr_lbl.add(cfg.ssr_label[i]);
 
     JsonObject led = doc["led"].to<JsonObject>();
     led["fill_speed_ms"]       = cfg.fill_speed_ms;
@@ -464,9 +473,24 @@ static void _handleConfigPost(AsyncWebServerRequest* req, uint8_t* data,
         if (l["antiforgot_ssr2_min"].is<uint32_t>())  cfg.antiforgot_ssr2_min = l["antiforgot_ssr2_min"];
         if (l["antiforgot_ssr3_min"].is<uint32_t>())  cfg.antiforgot_ssr3_min = l["antiforgot_ssr3_min"];
         if (l["ssr2_auto_night"].is<bool>())           cfg.ssr2_auto_night     = l["ssr2_auto_night"];
+        if (l["dnd_start_h"].is<uint8_t>())            cfg.dnd_start_h         = l["dnd_start_h"];
+        if (l["dnd_end_h"].is<uint8_t>())              cfg.dnd_end_h           = l["dnd_end_h"];
+        if (l["ssr2_dnd_disable"].is<bool>())          cfg.ssr2_dnd_disable    = l["ssr2_dnd_disable"];
+        if (l["brightness_night"].is<uint8_t>())       cfg.brightness_night    = l["brightness_night"];
         if (l["lux_threshold"].is<uint32_t>())         cfg.lux_night           = l["lux_threshold"];
         if (l["lux_day"].is<uint32_t>())               cfg.lux_day             = l["lux_day"];
-        if (l["brightness_night"].is<uint8_t>())       cfg.brightness_night    = l["brightness_night"];
+        // SSR labeli — validacija: string, dolžina 1–23 znakov
+        if (l["ssr_labels"].is<JsonArray>()) {
+            JsonArray arr = l["ssr_labels"].as<JsonArray>();
+            for (int i = 0; i < 4 && i < (int)arr.size(); i++) {
+                if (!arr[i].is<const char*>()) continue;
+                const char* lbl = arr[i].as<const char*>();
+                size_t llen = lbl ? strlen(lbl) : 0;
+                if (llen == 0 || llen >= 24) continue;
+                strncpy(cfg.ssr_label[i], lbl, 23);
+                cfg.ssr_label[i][23] = '\0';
+            }
+        }
     }
     if (doc["led"].is<JsonObject>()) {
         JsonObject a = doc["led"];
@@ -499,6 +523,8 @@ static void _handleConfigPost(AsyncWebServerRequest* req, uint8_t* data,
     config_set(cfg);
     bool saved = config_save();
     vehicle_recog_on_config_changed();
+    // SSR labeli se posodobijo avtomatično v ui_refresh_cb (LVGL task, ~1s)
+    // prek screen_main_set_ssr() ki primerja config label z dejanskim.
     LOG_INFO(TAG, "Config posodobljen in shranjen (ok=%d)", (int)saved);
 
     JsonDocument resp(&s_psram_alloc);
@@ -752,6 +778,28 @@ static void _handleVehiclesRename(AsyncWebServerRequest* req, uint8_t* data,
     resp["name"]  = new_name;
     if (!ok) resp["error"] = "model not found or rename failed";
     _sendJson(req, ok ? 200 : 404, resp);
+}
+
+static void _handleVehiclesCalibrate(AsyncWebServerRequest* req, uint8_t* data,
+                                     size_t len, size_t index, size_t total) {
+    _stats.req_total++;
+    _stats.req_api++;
+    if (index + len < total) return;
+
+    JsonDocument doc(&s_psram_alloc);
+    if (deserializeJson(doc, data, len)) { _sendError(req, 400, "invalid JSON"); return; }
+    const char* place_s = doc["place"].as<const char*>();
+    if (!place_s || (place_s[0] != 'A' && place_s[0] != 'B')) {
+        _sendError(req, 400, "place must be A or B"); return;
+    }
+    bool ok = vehicle_recog_calibrate_empty(place_s[0]);
+    LOG_INFO(TAG, "vehicles/calibrate %c ok=%d", place_s[0], (int)ok);
+
+    JsonDocument resp(&s_psram_alloc);
+    resp["ok"]    = ok;
+    resp["place"] = place_s;
+    if (!ok) resp["error"] = "calibration failed";
+    _sendJson(req, ok ? 200 : 500, resp);
 }
 
 static void _handleVehiclesDelete(AsyncWebServerRequest* req) {
@@ -1189,18 +1237,41 @@ static void wledTask(void* pv) {
                              "{\"seg\":[{\"sx\":%lu}]}", (unsigned long)cmd.payload);
                     _wled_post(ip, body);
                     break;
-                case WledCmdType::PRESET: {
-                    PartyState ps = screen_party_get_state();
-                    uint8_t r = (ps.color_rgb >> 16) & 0xFF;
-                    uint8_t g = (ps.color_rgb >> 8)  & 0xFF;
-                    uint8_t b =  ps.color_rgb        & 0xFF;
-                    snprintf(body, sizeof(body),
-                             "{\"on\":true,\"bri\":%u,"
-                             "\"seg\":[{\"fx\":%u,\"sx\":%u,\"col\":[[%u,%u,%u]]}]}",
-                             ps.brightness, ps.fx_id, ps.speed, r, g, b);
+                case WledCmdType::SLOT: {
+                    PartySlot sl = config_get_party_slot((uint8_t)cmd.payload);
+                    if (sl.color_rgb != 0x000000) {
+                        uint8_t r = (sl.color_rgb >> 16) & 0xFF;
+                        uint8_t g = (sl.color_rgb >> 8)  & 0xFF;
+                        uint8_t b =  sl.color_rgb        & 0xFF;
+                        snprintf(body, sizeof(body),
+                                 "{\"on\":true,\"bri\":%u,"
+                                 "\"seg\":[{\"fx\":%u,\"sx\":%u,\"col\":[[%u,%u,%u]]}]}",
+                                 sl.brightness, sl.fx_id, sl.speed, r, g, b);
+                    } else {
+                        snprintf(body, sizeof(body),
+                                 "{\"on\":true,\"bri\":%u,"
+                                 "\"seg\":[{\"fx\":%u,\"sx\":%u}]}",
+                                 sl.brightness, sl.fx_id, sl.speed);
+                    }
                     _wled_post(ip, body);
+                    s_wled_on    = true;
+                    s_active_slot = (uint8_t)cmd.payload;
+                    LOG_INFO(TAG, "WLED SLOT %u (%s) → %s", (unsigned)cmd.payload, sl.name, ip);
                     break;
                 }
+                case WledCmdType::SUSPEND:
+                    _wled_post(ip, "{\"on\":false}");
+                    vTaskDelay(pdMS_TO_TICKS(MUX_SWITCH_DELAY_MS));
+                    led_mgr_set_party_mode(false);
+                    s_wled_on = false;
+                    LOG_INFO(TAG, "WLED SUSPEND — MUX → PRIMARY");
+                    break;
+                case WledCmdType::RESUME:
+                    vTaskDelay(pdMS_TO_TICKS(MUX_SWITCH_DELAY_MS));
+                    _wled_post(ip, "{\"on\":true}");
+                    s_wled_on = true;
+                    LOG_INFO(TAG, "WLED RESUME — WLED ON");
+                    break;
                 default: break;
             }
         }
@@ -1258,6 +1329,179 @@ static void _handlePartyConfigPost(AsyncWebServerRequest* req, uint8_t* data,
     resp["ok"]      = true;
     resp["wled_ip"] = cfg.wled_ip;
     _sendJson(req, 200, resp);
+}
+
+// ============================================================
+// SECTION 3e — HANDLER-JI: /api/party/* (party slots, schedules, status)
+// ============================================================
+
+static void _handlePartySlotsGet(AsyncWebServerRequest* req) {
+    _stats.req_total++; _stats.req_api++;
+    LOG_DEBUG(TAG, "GET /api/party/slots");
+    JsonDocument doc(&s_psram_alloc);
+    JsonArray arr = doc["slots"].to<JsonArray>();
+    for (int i = 0; i < 9; i++) {
+        PartySlot sl = config_get_party_slot((uint8_t)i);
+        JsonObject o = arr.add<JsonObject>();
+        o["idx"]        = i;
+        o["name"]       = sl.name;
+        o["fx_id"]      = sl.fx_id;
+        o["color_rgb"]  = sl.color_rgb;
+        o["brightness"] = sl.brightness;
+        o["speed"]      = sl.speed;
+        o["enabled"]    = (sl.enabled != 0);
+    }
+    _sendJson(req, 200, doc);
+}
+
+static void _handlePartySlotsPost(AsyncWebServerRequest* req, uint8_t* data,
+                                   size_t len, size_t index, size_t total) {
+    _stats.req_total++; _stats.req_api++;
+    if (index + len < total) return;
+    LOG_INFO(TAG, "POST /api/party/slots [%u B]", (unsigned)len);
+
+    JsonDocument doc(&s_psram_alloc);
+    if (deserializeJson(doc, data, len)) { _sendError(req, 400, "invalid JSON"); return; }
+
+    if (!doc["idx"].is<int>()) { _sendError(req, 400, "missing idx"); return; }
+    int idx = doc["idx"].as<int>();
+    if (idx < 0 || idx > 8)  { _sendError(req, 400, "idx out of range (0-8)"); return; }
+
+    PartySlot sl = config_get_party_slot((uint8_t)idx);
+    if (doc["name"].is<const char*>()) {
+        strncpy(sl.name, doc["name"].as<const char*>(), sizeof(sl.name) - 1);
+        sl.name[sizeof(sl.name) - 1] = '\0';
+    }
+    if (doc["fx_id"].is<int>())      sl.fx_id      = (uint8_t)doc["fx_id"].as<int>();
+    if (doc["color_rgb"].is<long>()) sl.color_rgb  = (uint32_t)doc["color_rgb"].as<long>();
+    if (doc["brightness"].is<int>()) sl.brightness = (uint8_t)doc["brightness"].as<int>();
+    if (doc["speed"].is<int>())      sl.speed      = (uint8_t)doc["speed"].as<int>();
+    if (doc["enabled"].is<bool>())   sl.enabled    = doc["enabled"].as<bool>() ? 1 : 0;
+
+    config_set_party_slot((uint8_t)idx, sl);
+    config_save_party_slots();
+    screen_party_request_slot_reload();
+
+    JsonDocument resp(&s_psram_alloc);
+    resp["ok"] = true; resp["idx"] = idx;
+    _sendJson(req, 200, resp);
+}
+
+static void _handlePartyActivatePost(AsyncWebServerRequest* req, uint8_t* data,
+                                      size_t len, size_t index, size_t total) {
+    _stats.req_total++; _stats.req_api++;
+    if (index + len < total) return;
+
+    JsonDocument doc(&s_psram_alloc);
+    if (deserializeJson(doc, data, len)) { _sendError(req, 400, "invalid JSON"); return; }
+    if (!doc["slot_idx"].is<int>()) { _sendError(req, 400, "missing slot_idx"); return; }
+    int si = doc["slot_idx"].as<int>();
+    if (si < 0 || si > 8) { _sendError(req, 400, "slot_idx out of range"); return; }
+
+    EventBus::publish(EventType::BUTTON_PARTY_SLOT, (uint32_t)si);
+    LOG_INFO(TAG, "PARTY activate slot %d (prek web)", si);
+
+    JsonDocument resp(&s_psram_alloc);
+    resp["ok"] = true; resp["slot_idx"] = si;
+    _sendJson(req, 200, resp);
+}
+
+static void _handlePartySchedulesGet(AsyncWebServerRequest* req) {
+    _stats.req_total++; _stats.req_api++;
+    LOG_DEBUG(TAG, "GET /api/party/schedules");
+    JsonDocument doc(&s_psram_alloc);
+    JsonArray arr = doc["schedules"].to<JsonArray>();
+    for (int i = 0; i < 10; i++) {
+        PartySchedule sc = config_get_party_schedule((uint8_t)i);
+        JsonObject o = arr.add<JsonObject>();
+        o["idx"]         = i;
+        o["name"]        = sc.name;
+        o["slot_idx"]    = sc.slot_idx;
+        o["enabled"]     = (sc.enabled != 0);
+        o["from_month"]  = sc.from_month;
+        o["from_day"]    = sc.from_day;
+        o["to_month"]    = sc.to_month;
+        o["to_day"]      = sc.to_day;
+        o["use_lux_on"]  = (sc.use_lux_on != 0);
+        o["lux_on"]      = sc.lux_on;
+        o["time_on_h"]   = sc.time_on_h;
+        o["time_on_m"]   = sc.time_on_m;
+        o["use_lux_off"] = (sc.use_lux_off != 0);
+        o["lux_off"]     = sc.lux_off;
+        o["time_off_h"]  = sc.time_off_h;
+        o["time_off_m"]  = sc.time_off_m;
+    }
+    _sendJson(req, 200, doc);
+}
+
+static void _handlePartySchedulesPost(AsyncWebServerRequest* req, uint8_t* data,
+                                       size_t len, size_t index, size_t total) {
+    _stats.req_total++; _stats.req_api++;
+    if (index + len < total) return;
+
+    JsonDocument doc(&s_psram_alloc);
+    if (deserializeJson(doc, data, len)) { _sendError(req, 400, "invalid JSON"); return; }
+    if (!doc["idx"].is<int>()) { _sendError(req, 400, "missing idx"); return; }
+    int idx = doc["idx"].as<int>();
+    if (idx < 0 || idx > 9) { _sendError(req, 400, "idx out of range (0-9)"); return; }
+
+    PartySchedule sc = config_get_party_schedule((uint8_t)idx);
+    if (doc["name"].is<const char*>()) {
+        strncpy(sc.name, doc["name"].as<const char*>(), sizeof(sc.name) - 1);
+        sc.name[sizeof(sc.name) - 1] = '\0';
+    }
+    if (doc["slot_idx"].is<int>())    sc.slot_idx    = (uint8_t)doc["slot_idx"].as<int>();
+    if (doc["enabled"].is<bool>())    sc.enabled     = doc["enabled"].as<bool>() ? 1 : 0;
+    if (doc["from_month"].is<int>())  sc.from_month  = (uint8_t)doc["from_month"].as<int>();
+    if (doc["from_day"].is<int>())    sc.from_day    = (uint8_t)doc["from_day"].as<int>();
+    if (doc["to_month"].is<int>())    sc.to_month    = (uint8_t)doc["to_month"].as<int>();
+    if (doc["to_day"].is<int>())      sc.to_day      = (uint8_t)doc["to_day"].as<int>();
+    if (doc["use_lux_on"].is<bool>()) sc.use_lux_on  = doc["use_lux_on"].as<bool>() ? 1 : 0;
+    if (doc["lux_on"].is<long>())     sc.lux_on      = (uint32_t)doc["lux_on"].as<long>();
+    if (doc["time_on_h"].is<int>())   sc.time_on_h   = (uint8_t)doc["time_on_h"].as<int>();
+    if (doc["time_on_m"].is<int>())   sc.time_on_m   = (uint8_t)doc["time_on_m"].as<int>();
+    if (doc["use_lux_off"].is<bool>())sc.use_lux_off = doc["use_lux_off"].as<bool>() ? 1 : 0;
+    if (doc["lux_off"].is<long>())    sc.lux_off     = (uint32_t)doc["lux_off"].as<long>();
+    if (doc["time_off_h"].is<int>())  sc.time_off_h  = (uint8_t)doc["time_off_h"].as<int>();
+    if (doc["time_off_m"].is<int>())  sc.time_off_m  = (uint8_t)doc["time_off_m"].as<int>();
+
+    config_set_party_schedule((uint8_t)idx, sc);
+    config_save_party_schedules();
+
+    JsonDocument resp(&s_psram_alloc);
+    resp["ok"] = true; resp["idx"] = idx;
+    _sendJson(req, 200, resp);
+}
+
+static void _handlePartySchedulesDelete(AsyncWebServerRequest* req) {
+    _stats.req_total++; _stats.req_api++;
+    if (!req->hasParam("idx")) { _sendError(req, 400, "missing idx"); return; }
+    int idx = req->getParam("idx")->value().toInt();
+    if (idx < 0 || idx > 9) { _sendError(req, 400, "idx out of range"); return; }
+
+    PartySchedule sc = config_get_party_schedule((uint8_t)idx);
+    sc.enabled = 0;
+    config_set_party_schedule((uint8_t)idx, sc);
+    config_save_party_schedules();
+    LOG_INFO(TAG, "Party urnik %d onemogočen", idx);
+
+    JsonDocument resp(&s_psram_alloc);
+    resp["ok"] = true; resp["idx"] = idx;
+    _sendJson(req, 200, resp);
+}
+
+static void _handlePartyStatusGet(AsyncWebServerRequest* req) {
+    _stats.req_total++; _stats.req_api++;
+    LOG_DEBUG(TAG, "GET /api/party/status");
+    const Config cfg = config_get();
+    JsonDocument doc(&s_psram_alloc);
+    doc["party_on"]       = s_wled_on;
+    doc["suspended"]      = light_logic_is_party_suspended();
+    doc["active_slot"]    = s_active_slot;
+    doc["wled_on"]        = s_wled_on;
+    doc["resume_delay_s"] = cfg.party_resume_delay_s;
+    doc["wled_ip"]        = cfg.wled_ip;
+    _sendJson(req, 200, doc);
 }
 
 // ============================================================
@@ -1438,6 +1682,11 @@ static void _registerHandlers() {
         nullptr,
         _handleVehiclesRename
     );
+    _server->on("/api/vehicles/calibrate", HTTP_POST,
+        [](AsyncWebServerRequest* req) {},
+        nullptr,
+        _handleVehiclesCalibrate
+    );
     _server->on("/api/vehicles", HTTP_DELETE, _handleVehiclesDelete);
 
     // SSR — POST ima body callback
@@ -1486,6 +1735,29 @@ static void _registerHandlers() {
         nullptr,
         _handlePartyConfigPost
     );
+    // Party slots
+    _server->on("/api/party/slots", HTTP_GET, _handlePartySlotsGet);
+    _server->on("/api/party/slots", HTTP_POST,
+        [](AsyncWebServerRequest* req) {},
+        nullptr,
+        _handlePartySlotsPost
+    );
+    // Party activate
+    _server->on("/api/party/activate", HTTP_POST,
+        [](AsyncWebServerRequest* req) {},
+        nullptr,
+        _handlePartyActivatePost
+    );
+    // Party schedules
+    _server->on("/api/party/schedules", HTTP_GET,    _handlePartySchedulesGet);
+    _server->on("/api/party/schedules", HTTP_POST,
+        [](AsyncWebServerRequest* req) {},
+        nullptr,
+        _handlePartySchedulesPost
+    );
+    _server->on("/api/party/schedules", HTTP_DELETE, _handlePartySchedulesDelete);
+    // Party status
+    _server->on("/api/party/status", HTTP_GET, _handlePartyStatusGet);
 
     // Restart
     _server->on("/api/restart", HTTP_POST, _handleRestart);
@@ -1552,9 +1824,20 @@ bool web_ui_init() {
             WledCmd c = { WledCmdType::SPEED, ev.payload };
             xQueueSend(s_wled_q, &c, 0);
         });
-        EventBus::subscribe(EventType::BUTTON_PARTY_PRESET, [](const Event& ev) {
+        EventBus::subscribe(EventType::BUTTON_PARTY_SLOT, [](const Event& ev) {
             if (!s_wled_q) return;
-            WledCmd c = { WledCmdType::PRESET, ev.payload };
+            WledCmd c = { WledCmdType::SLOT, ev.payload };
+            xQueueSend(s_wled_q, &c, 0);
+        });
+        EventBus::subscribe(EventType::PARTY_SUSPENDED, [](const Event&) {
+            if (!s_wled_q) return;
+            WledCmd c = { WledCmdType::SUSPEND, 0 };
+            xQueueSend(s_wled_q, &c, 0);
+        });
+        EventBus::subscribe(EventType::PARTY_RESUMED, [](const Event& ev) {
+            if (!s_wled_q) return;
+            s_active_slot = (uint8_t)ev.payload;
+            WledCmd c = { WledCmdType::RESUME, 0 };
             xQueueSend(s_wled_q, &c, 0);
         });
         LOG_INFO(TAG, "WLED EventBus subscribers registrirani");
@@ -1686,4 +1969,8 @@ WebUiStats web_ui_get_stats() {
     _stats.littlefs_ok    = _littlefs_ok;
     _stats.assets_ok      = _assets_ok;
     return _stats;
+}
+
+QueueHandle_t web_ui_get_wled_queue() {
+    return s_wled_q;
 }

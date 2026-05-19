@@ -67,6 +67,9 @@
 #define NVS_K_AF_SSR2       "af_ssr2"       // antiforgot_ssr2_min
 #define NVS_K_AF_SSR3       "af_ssr3"       // antiforgot_ssr3_min
 #define NVS_K_SSR2_NIGHT    "ssr2_night"    // ssr2_auto_night
+#define NVS_K_DND_START     "dnd_start"     // dnd_start_h
+#define NVS_K_DND_END       "dnd_end"       // dnd_end_h
+#define NVS_K_SSR2_DND_DIS  "ssr2_dnd_dis"  // ssr2_dnd_disable
 #define NVS_K_LUX_NIGHT     "lux_night"     // lux_night
 #define NVS_K_LUX_DAY       "lux_day"       // lux_day
 #define NVS_K_BRIGHT_NIGHT  "br_night"      // brightness_night
@@ -109,6 +112,22 @@ static const char* NVS_RADAR_US[] = {"r_us_0","r_us_1","r_us_2","r_us_3"};
 
 // Party / WLED
 #define NVS_K_WLED_IP        "wled_ip"      // wled_ip (string)
+#define NVS_K_PARTY_RESUME   "party_resume_s" // party_resume_delay_s
+
+// Party slots — "pslot_0".."pslot_8" (7 znakov < 15 NVS limit), blob
+static const char* NVS_PSLOT[] = {
+    "pslot_0","pslot_1","pslot_2","pslot_3","pslot_4",
+    "pslot_5","pslot_6","pslot_7","pslot_8"
+};
+
+// Party schedules — "psched_0".."psched_9" (8 znakov < 15 NVS limit), blob
+static const char* NVS_PSCHED[] = {
+    "psched_0","psched_1","psched_2","psched_3","psched_4",
+    "psched_5","psched_6","psched_7","psched_8","psched_9"
+};
+
+// SSR labeli — "ssr_lbl_0".."ssr_lbl_3" (9 znakov < 15 NVS limit)
+static const char* NVS_SSR_LBL[] = {"ssr_lbl_0","ssr_lbl_1","ssr_lbl_2","ssr_lbl_3"};
 
 // ============================================================
 // MEJNE VREDNOSTI ZA VALIDACIJO
@@ -117,8 +136,8 @@ static const char* NVS_RADAR_US[] = {"r_us_0","r_us_1","r_us_2","r_us_3"};
 // Osvetlitev
 #define CFG_MIN_TIMEOUT_SSR1    30u
 #define CFG_MAX_TIMEOUT_SSR1    3600u
-#define CFG_MIN_MAN_EXT         1u
-#define CFG_MAX_MAN_EXT         120u
+#define CFG_MIN_MAN_EXT         5u
+#define CFG_MAX_MAN_EXT         60u
 #define CFG_MIN_AF_SSR          1u
 #define CFG_MAX_AF_SSR          60u
 #define CFG_MIN_LUX_NIGHT       1u
@@ -179,6 +198,10 @@ static const char* NVS_RADAR_US[] = {"r_us_0","r_us_1","r_us_2","r_us_3"};
 #define CFG_MAX_RADAR_POLL_IV   100u
 #define CFG_MIN_RADAR_MAX_OVF    1u
 #define CFG_MAX_RADAR_MAX_OVF  100u
+
+// Party
+#define CFG_MIN_PARTY_RESUME     5u
+#define CFG_MAX_PARTY_RESUME   300u
 
 // ============================================================
 // INTERNO STANJE
@@ -315,6 +338,9 @@ static void load_and_validate(Preferences& prefs) {
     VALIDATE_U32 (prefs, NVS_K_AF_SSR2,      antiforgot_ssr2_min, CFG_MIN_AF_SSR,       CFG_MAX_AF_SSR,       def.antiforgot_ssr2_min);
     VALIDATE_U32 (prefs, NVS_K_AF_SSR3,      antiforgot_ssr3_min, CFG_MIN_AF_SSR,       CFG_MAX_AF_SSR,       def.antiforgot_ssr3_min);
     VALIDATE_BOOL(prefs, NVS_K_SSR2_NIGHT,   ssr2_auto_night,                                                 def.ssr2_auto_night);
+    VALIDATE_U8  (prefs, NVS_K_DND_START,    dnd_start_h,         0u,                   23u,                  def.dnd_start_h);
+    VALIDATE_U8  (prefs, NVS_K_DND_END,      dnd_end_h,           0u,                   23u,                  def.dnd_end_h);
+    VALIDATE_BOOL(prefs, NVS_K_SSR2_DND_DIS, ssr2_dnd_disable,                                                def.ssr2_dnd_disable);
     VALIDATE_U32 (prefs, NVS_K_LUX_NIGHT,    lux_night,           CFG_MIN_LUX_NIGHT,    CFG_MAX_LUX_NIGHT,    def.lux_night);
     VALIDATE_U32 (prefs, NVS_K_LUX_DAY,      lux_day,             CFG_MIN_LUX_DAY,      CFG_MAX_LUX_DAY,      def.lux_day);
     VALIDATE_U8  (prefs, NVS_K_BRIGHT_NIGHT, brightness_night,    CFG_MIN_BRIGHT_NIGHT, CFG_MAX_BRIGHT_NIGHT, def.brightness_night);
@@ -414,7 +440,55 @@ static void load_and_validate(Preferences& prefs) {
         }
     }
 
-    CFGI("NVS vrednosti naložene (49 parametrov)");
+    // --- Party / WLED ---
+    VALIDATE_U32(prefs, NVS_K_PARTY_RESUME, party_resume_delay_s,
+                 CFG_MIN_PARTY_RESUME, CFG_MAX_PARTY_RESUME, def.party_resume_delay_s);
+
+    // --- Party slots (blobs) ---
+    for (int i = 0; i < 9; i++) {
+        size_t got = prefs.getBytes(NVS_PSLOT[i], &s_config.party_slots[i], sizeof(PartySlot));
+        if (got != sizeof(PartySlot)) {
+            s_config.party_slots[i] = def.party_slots[i];
+            prefs.putBytes(NVS_PSLOT[i], &def.party_slots[i], sizeof(PartySlot));
+            if (got != 0) {
+                CFGW("  %s: neveljavna velikost bloba (%u B) → default", NVS_PSLOT[i], (unsigned)got);
+                s_replaced_count++;
+            }
+        }
+    }
+
+    // --- Party schedules (blobs) ---
+    for (int i = 0; i < 10; i++) {
+        size_t got = prefs.getBytes(NVS_PSCHED[i], &s_config.party_schedules[i], sizeof(PartySchedule));
+        if (got != sizeof(PartySchedule)) {
+            s_config.party_schedules[i] = def.party_schedules[i];
+            prefs.putBytes(NVS_PSCHED[i], &def.party_schedules[i], sizeof(PartySchedule));
+            if (got != 0) {
+                CFGW("  %s: neveljavna velikost bloba (%u B) → default", NVS_PSCHED[i], (unsigned)got);
+                s_replaced_count++;
+            }
+        }
+    }
+
+    // --- SSR labeli ---
+    for (int i = 0; i < 4; i++) {
+        String val = prefs.getString(NVS_SSR_LBL[i], "");
+        size_t vlen = val.length();
+        if (vlen > 0 && vlen < 24) {
+            strncpy(s_config.ssr_label[i], val.c_str(), 23);
+            s_config.ssr_label[i][23] = '\0';
+        } else {
+            if (vlen >= 24) {
+                CFGW("  %s predolg (%d znakov) → default", NVS_SSR_LBL[i], (int)vlen);
+                s_replaced_count++;
+            }
+            strncpy(s_config.ssr_label[i], def.ssr_label[i], 23);
+            s_config.ssr_label[i][23] = '\0';
+            prefs.putString(NVS_SSR_LBL[i], def.ssr_label[i]);
+        }
+    }
+
+    CFGI("NVS vrednosti naložene (53+ parametrov + party blobs)");
 }
 
 // ============================================================
@@ -430,6 +504,9 @@ static void write_all_to_nvs(Preferences& prefs) {
     prefs.putUInt (NVS_K_AF_SSR2,      s_config.antiforgot_ssr2_min);
     prefs.putUInt (NVS_K_AF_SSR3,      s_config.antiforgot_ssr3_min);
     prefs.putUChar(NVS_K_SSR2_NIGHT,   s_config.ssr2_auto_night ? 1u : 0u);
+    prefs.putUChar(NVS_K_DND_START,    s_config.dnd_start_h);
+    prefs.putUChar(NVS_K_DND_END,      s_config.dnd_end_h);
+    prefs.putUChar(NVS_K_SSR2_DND_DIS, s_config.ssr2_dnd_disable ? 1u : 0u);
     prefs.putUInt (NVS_K_LUX_NIGHT,    s_config.lux_night);
     prefs.putUInt (NVS_K_LUX_DAY,      s_config.lux_day);
     prefs.putUChar(NVS_K_BRIGHT_NIGHT, s_config.brightness_night);
@@ -468,6 +545,16 @@ static void write_all_to_nvs(Preferences& prefs) {
     prefs.putUInt(NVS_K_RADAR_MAX_OVF,  s_config.radar_max_consec_overflows);
     // Party / WLED
     prefs.putString(NVS_K_WLED_IP, s_config.wled_ip);
+    prefs.putUInt(NVS_K_PARTY_RESUME, s_config.party_resume_delay_s);
+    // Party slots
+    for (int i = 0; i < 9; i++)
+        prefs.putBytes(NVS_PSLOT[i], &s_config.party_slots[i], sizeof(PartySlot));
+    // Party schedules
+    for (int i = 0; i < 10; i++)
+        prefs.putBytes(NVS_PSCHED[i], &s_config.party_schedules[i], sizeof(PartySchedule));
+    // SSR labeli
+    for (int i = 0; i < 4; i++)
+        prefs.putString(NVS_SSR_LBL[i], s_config.ssr_label[i]);
 }
 
 // ============================================================
@@ -621,4 +708,72 @@ uint8_t config_mgr_replaced_count() {
 
 bool config_mgr_ok() {
     return s_initialized;
+}
+
+// ============================================================
+// PARTY SLOT API
+// ============================================================
+
+PartySlot config_get_party_slot(uint8_t idx) {
+    if (idx >= 9) { PartySlot empty{}; return empty; }
+    if (!s_mutex) return s_config.party_slots[idx];
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    PartySlot sl = s_config.party_slots[idx];
+    xSemaphoreGive(s_mutex);
+    return sl;
+}
+
+void config_set_party_slot(uint8_t idx, const PartySlot& slot) {
+    if (idx >= 9) return;
+    if (!s_mutex) { s_config.party_slots[idx] = slot; return; }
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    s_config.party_slots[idx] = slot;
+    xSemaphoreGive(s_mutex);
+}
+
+bool config_save_party_slots() {
+    if (!s_mutex || !s_nvs_ok) return false;
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    bool opened = s_prefs.begin(NVS_NS, false);
+    if (!opened) { xSemaphoreGive(s_mutex); return false; }
+    for (int i = 0; i < 9; i++)
+        s_prefs.putBytes(NVS_PSLOT[i], &s_config.party_slots[i], sizeof(PartySlot));
+    s_prefs.end();
+    xSemaphoreGive(s_mutex);
+    CFGD("config_save_party_slots OK");
+    return true;
+}
+
+// ============================================================
+// PARTY SCHEDULE API
+// ============================================================
+
+PartySchedule config_get_party_schedule(uint8_t idx) {
+    if (idx >= 10) { PartySchedule empty{}; return empty; }
+    if (!s_mutex) return s_config.party_schedules[idx];
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    PartySchedule sc = s_config.party_schedules[idx];
+    xSemaphoreGive(s_mutex);
+    return sc;
+}
+
+void config_set_party_schedule(uint8_t idx, const PartySchedule& sched) {
+    if (idx >= 10) return;
+    if (!s_mutex) { s_config.party_schedules[idx] = sched; return; }
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    s_config.party_schedules[idx] = sched;
+    xSemaphoreGive(s_mutex);
+}
+
+bool config_save_party_schedules() {
+    if (!s_mutex || !s_nvs_ok) return false;
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    bool opened = s_prefs.begin(NVS_NS, false);
+    if (!opened) { xSemaphoreGive(s_mutex); return false; }
+    for (int i = 0; i < 10; i++)
+        s_prefs.putBytes(NVS_PSCHED[i], &s_config.party_schedules[i], sizeof(PartySchedule));
+    s_prefs.end();
+    xSemaphoreGive(s_mutex);
+    CFGD("config_save_party_schedules OK");
+    return true;
 }

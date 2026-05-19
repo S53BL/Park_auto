@@ -166,6 +166,12 @@ SsrState light_logic_get_ssr(uint8_t idx);
 // Vrne true če je light_logic_init() uspešno zaključil.
 bool light_logic_ok();
 
+// Vrne true če je party začasno prekinjen (gibanje/rampa) in čaka na nadaljevanje.
+bool light_logic_is_party_suspended();
+
+// Vrne true če sistem miruje (ni gibanja, ni rampe, noben SSR ni ON).
+bool light_logic_is_system_idle();
+
 // ============================================================
 // FreeRTOS TASK
 // ============================================================

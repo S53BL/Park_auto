@@ -982,7 +982,7 @@ bool hal_tof_startup_scan() {
         } else {
             TOFI("  %s: %d mm (izven dosega [%d-%d])",
                  ch_name(ch),
-                 (int)s_tof[ch].ranging_data.range_mm_final,
+                 (int)s_tof[ch].ranging_data.range_mm,
                  TOF_MIN_RANGE_MM, TOF_MAX_RANGE_MM);
         }
     }

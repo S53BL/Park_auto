@@ -28,6 +28,9 @@ void screen_main_set_radar(uint8_t idx, const RadarDisplayData& data);
 // E3.3 — noč/dan topbar indikator
 void screen_main_set_daynight(bool is_night, float lux);
 
+// Posodobi SSR label po spremembi config (web UI)
+void screen_main_set_ssr_label(uint8_t idx, const char* label);
+
 // ============================================================
 // Radar arc vizualizacija — ARC4x spec
 // ============================================================

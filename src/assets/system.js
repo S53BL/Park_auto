@@ -1,17 +1,17 @@
 // ============================================================
-// system.js — Stran: Sistem  (v2)
-// Diagnostika (RAM/PSRAM, WiFi, Firmware), OTA upload, reset/restart
+// system.js — Stran: Sistem  (v3)
+// Diagnostika (RAM/SDRAM, WiFi, SD, Firmware), OTA, reset/restart
 //
-// SPREMEMBE glede na v1:
-//   - CPU/RAM sekcija: prikazuje SRAM, PSRAM, min-ever SRAM
-//     iz d.system{} ki ga doda razširjen /api/status
-//   - Uptime: prikaže dni če >= 24h (dd:hh:mm:ss format)
-//   - Config mgr status dodan (d.system.config_ok, replaced_count)
-//   - Manjši popravki: web UI stats dodan LittleFS/assets badge
+// v3: - SRAM: esp_get_free_heap_size() → heap_caps_get_free_size(INTERNAL)
+//            (prejšnja vrednost je vključevala PSRAM → previsoka)
+//     - PSRAM preimenovan v SDRAM (OPI PSRAM je SDRAM tehnologija)
+//     - SD kartica sekcija dodana
+//     - Auto-refresh stikalo (3s, default OFF)
 // ============================================================
 
 (function () {
   const DIV = 'page-system';
+  let _autoOn = false;
 
   // ── Skeleton ─────────────────────────────────────────────
   function _render() {
@@ -20,17 +20,22 @@
   <h1>Sistem</h1>
   <div style="display:flex;align-items:center;gap:10px">
     <span class="subtitle" id="sys-ts">–</span>
-    <button class="btn" onclick="sysRefresh()">↻ Osveži</button>
+    <span class="text-dim text-tiny">Auto</span>
+    <label class="form-toggle">
+      <input type="checkbox" id="sys-auto-chk" onchange="_sysAutoToggle(this.checked)">
+      <span class="form-toggle-track"></span>
+    </label>
+    <button class="btn" id="sys-refresh-btn" onclick="sysRefresh()">↻ Osveži</button>
   </div>
 </div>
 
-<!-- RAM & PSRAM ─────────────────────────────── -->
+<!-- RAM & SDRAM ─────────────────────────────── -->
 <div class="section-label">Pomnilnik</div>
 <div class="grid-4">
   <div class="card">
     <div class="card-title">Free SRAM</div>
     <div class="metric loading" id="sys-sram">–</div>
-    <div class="text-dim text-tiny mt8" id="sys-sram-hint"></div>
+    <div class="text-dim text-tiny mt8">interni heap</div>
   </div>
   <div class="card">
     <div class="card-title">Min-ever SRAM</div>
@@ -38,12 +43,12 @@
     <div class="text-dim text-tiny mt8">od zagona</div>
   </div>
   <div class="card">
-    <div class="card-title">Free PSRAM</div>
+    <div class="card-title">Free SDRAM</div>
     <div class="metric loading" id="sys-psram">–</div>
-    <div class="text-dim text-tiny mt8" id="sys-psram-hint"></div>
+    <div class="text-dim text-tiny mt8">OPI PSRAM</div>
   </div>
   <div class="card">
-    <div class="card-title">Min-ever PSRAM</div>
+    <div class="card-title">Min-ever SDRAM</div>
     <div class="metric loading" id="sys-psram-min">–</div>
     <div class="text-dim text-tiny mt8">od zagona</div>
   </div>
@@ -68,6 +73,20 @@
       <div class="kv-row"><span class="kv-key">RSSI</span>     <span class="kv-val" id="sys-rssi">–</span></div>
       <div class="kv-row"><span class="kv-key">Reconn.</span>  <span class="kv-val text-mono" id="sys-reconn">–</span></div>
     </div>
+  </div>
+</div>
+
+<!-- SD kartica ──────────────────────────────── -->
+<div class="section-label mt20">SD kartica</div>
+<div class="card">
+  <div class="kv-list">
+    <div class="kv-row"><span class="kv-key">Status</span>  <span class="kv-val" id="sys-sd-status">–</span></div>
+    <div class="kv-row"><span class="kv-key">Skupaj</span>  <span class="kv-val text-mono" id="sys-sd-total">–</span></div>
+    <div class="kv-row"><span class="kv-key">Prosto</span>  <span class="kv-val text-mono" id="sys-sd-free">–</span></div>
+    <div class="kv-row"><span class="kv-key">Log flushi</span> <span class="kv-val text-mono" id="sys-log-flush">–</span></div>
+  </div>
+  <div class="progress-bar mt8">
+    <div class="progress-fill" id="sys-sd-bar" style="width:0%"></div>
   </div>
 </div>
 
@@ -169,32 +188,30 @@
 
     set('sys-ts', new Date().toLocaleTimeString('sl-SI'));
 
-    // ── RAM / PSRAM — /api/status/system vrača polja direktno v korenski objekt ──
-    const sys = d;  // ne d.system{} — novi endpoint nima pod-objekta
+    // ── SRAM / SDRAM ──
+    const freeSram   = d.free_sram;
+    const minSram    = d.min_free_sram;
+    const freePsram  = d.free_psram;
+    const minPsram   = d.min_free_psram;
 
-    const freeHeap  = sys.free_heap;
-    const minHeap   = sys.min_free_heap;
-    const freePsram = sys.free_psram;
-    const minPsram  = sys.min_free_psram;
+    set('sys-sram',      freeSram  !== undefined ? _kb(freeSram)  : '–');
+    set('sys-sram-min',  minSram   !== undefined ? _kb(minSram)   : '–');
+    set('sys-psram',     freePsram !== undefined ? _kb(freePsram) : '–');
+    set('sys-psram-min', minPsram  !== undefined ? _kb(minPsram)  : '–');
 
-    set('sys-sram',     freeHeap  !== undefined ? _kb(freeHeap)  : '–');
-    set('sys-sram-min', minHeap   !== undefined ? _kb(minHeap)   : '–');
-    set('sys-psram',    freePsram !== undefined ? _kb(freePsram) : '–');
-    set('sys-psram-min',minPsram  !== undefined ? _kb(minPsram)  : '–');
-
-    // Barvanje SRAM — pod 10 KB je kritično, pod 20 KB je opozorilo
-    if (freeHeap !== undefined) {
-      const kb = freeHeap / 1024;
+    // Barvanje SRAM — pod 10 KB kritično, pod 20 KB opozorilo
+    if (freeSram !== undefined) {
+      const kb = freeSram / 1024;
       cls('sys-sram', kb < 10 ? 'err' : kb < 20 ? 'warn' : 'ok');
     }
-    if (minHeap !== undefined) {
-      const kb = minHeap / 1024;
+    if (minSram !== undefined) {
+      const kb = minSram / 1024;
       cls('sys-sram-min', kb < 10 ? 'err' : kb < 20 ? 'warn' : '');
     }
 
     // Config mgr status
-    const cfgOk = sys.config_ok;
-    const cfgReplaced = sys.config_replaced;
+    const cfgOk      = d.config_ok;
+    const cfgReplaced = d.config_replaced;
     let cfgStr = '–';
     if (cfgOk !== undefined) {
       cfgStr = cfgOk
@@ -212,11 +229,25 @@
     set('sys-ntp-ok',  w.ntp_ok !== undefined ? (w.ntp_ok ? '✓ sync' : '✗ ni sync') : '–');
     const ntpEl = document.getElementById('sys-ntp-ok');
     if (ntpEl) ntpEl.style.color = w.ntp_ok ? 'var(--green)' : 'var(--red)';
-
     set('sys-ip',     w.ip   || '–');
     set('sys-ssid',   w.ssid || '–');
     set('sys-rssi',   w.rssi     !== undefined ? w.rssi + ' dBm' : '–');
     set('sys-reconn', w.reconnects !== undefined ? w.reconnects  : '–');
+
+    // ── SD kartica ──
+    const sd = d.sd || {};
+    const sdReady = sd.ready;
+    set('sys-sd-status', sdReady !== undefined ? (sdReady ? 'READY' : (sd.status || 'napaka')) : '–');
+    set('sys-sd-total',  sd.total_mb !== undefined ? sd.total_mb + ' MB' : '–');
+    set('sys-sd-free',   sd.free_mb  !== undefined ? sd.free_mb  + ' MB' : '–');
+    const lg = d.logger || {};
+    set('sys-log-flush', lg.sd_flushes !== undefined ? lg.sd_flushes : '–');
+    const sdBar = document.getElementById('sys-sd-bar');
+    if (sdBar && sd.total_mb > 0) {
+      const pct = Math.round(100 - (sd.free_mb / sd.total_mb) * 100);
+      sdBar.style.width = pct + '%';
+      sdBar.className = 'progress-fill' + (pct > 90 ? ' err' : pct > 75 ? ' warn' : '');
+    }
 
     // ── Firmware ──
     const fw = d.firmware || {};
@@ -234,7 +265,6 @@
     set('sys-ota-att',   wu.ota_attempts !== undefined
                            ? wu.ota_attempts + (wu.ota_success ? ' (' + wu.ota_success + ' OK)' : '')
                            : '–');
-
     const lfsEl = document.getElementById('sys-lfs');
     if (lfsEl) {
       lfsEl.textContent = wu.littlefs_ok !== undefined ? (wu.littlefs_ok ? 'OK' : 'NAPAKA') : '–';
@@ -256,6 +286,15 @@
       if (ts) ts.textContent = '⚠ ' + e.message;
     }
   }
+
+  // ── Auto-refresh stikalo ──────────────────────────────────
+  window._sysAutoToggle = function(on) {
+    _autoOn = on;
+    const btn = document.getElementById('sys-refresh-btn');
+    if (btn) btn.style.display = on ? 'none' : '';
+    if (on) { _poll(); registerPoller('system', _poll, 3000); }
+    else    { clearPoller('system'); }
+  };
 
   // ── OTA ──────────────────────────────────────────────────
   window.otaDrop = function(ev) {
@@ -337,8 +376,13 @@
   // ── Init ─────────────────────────────────────────────────
   window.page_system = function () {
     if (!document.getElementById('sys-ts')) _render();
-    // Enkratna osvežitev ob odprtju, nato ročno prek gumba
-    _poll();
+    // Obnovi checkbox stanje ob povratku
+    const chk = document.getElementById('sys-auto-chk');
+    if (chk) chk.checked = _autoOn;
+    const btn = document.getElementById('sys-refresh-btn');
+    if (btn) btn.style.display = _autoOn ? 'none' : '';
+    if (_autoOn) { _poll(); registerPoller('system', _poll, 3000); }
+    else         { _poll(); }
   };
 
   window.sysRefresh = function() { _poll(); };

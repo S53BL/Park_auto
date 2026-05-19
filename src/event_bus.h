@@ -46,7 +46,7 @@ enum class EventType : uint16_t {
     BUTTON_PARTY_COLOR      = 0x004A,
     BUTTON_PARTY_BRIGHTNESS = 0x004B,
     BUTTON_PARTY_SPEED      = 0x004C,
-    BUTTON_PARTY_PRESET     = 0x004D,
+    BUTTON_PARTY_SLOT       = 0x004D,   // payload = slot_idx (0-8); nadomesti PRESET
     BUTTON_EDIT_VEHICLE_A     = 0x0046,  // 2s dolg pritisk, mesto A
     BUTTON_EDIT_VEHICLE_B     = 0x0047,  // 2s dolg pritisk, mesto B
     BUTTON_SSR                = 0x0048,  // kratek dotik, payload=ssr_idx
@@ -54,6 +54,9 @@ enum class EventType : uint16_t {
     BUTTON_CALIBRATE_EMPTY_B  = 0x004F,  // 10s dolg pritisk + DA, mesto B
     // SSR stanje (za LCD posodobitev)
     SSR_STATE_CHANGED   = 0x0050,
+    // Party stanje
+    PARTY_SUSPENDED     = 0x0051,   // payload = 0; light_logic → web_ui SUSPEND
+    PARTY_RESUMED       = 0x0052,   // payload = slot_idx ki se nadaljuje
     // Alarm
     ALARM_TRIGGERED     = 0x0060,
     ALARM_STATE_CHANGED = 0x0061,
