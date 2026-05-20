@@ -13,7 +13,7 @@
   let _wledEffects = [];   // [{id, name}]
   let _slots       = [];   // 9 slotov
   let _schedules   = [];   // 10 urnikov
-  let _status      = { party_on: false, active_slot: 0xFF, suspended: false, wled_on: false, resume_delay_s: 30 };
+  let _status      = { party_on: false, active_slot: 0xFF, suspended: false, wled_on: false, resume_delay_s: 30, priority: false };
 
   const CLR_PALETTE = [
     { rgb: '#ffffff', val: 0xFFFFFF, lbl: 'Bela'      },
@@ -59,6 +59,13 @@
     <div class="kv-list mt12">
       <div class="kv-row"><span class="kv-key">Aktiven slot</span><span class="kv-val text-mono" id="party-active-slot">–</span></div>
       <div class="kv-row"><span class="kv-key">WLED stanje</span><span class="kv-val" id="party-wled-state">–</span></div>
+      <div class="kv-row" style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border)">
+        <div>
+          <div style="color:var(--text1);font-size:13px;font-weight:500">Party prioriteta</div>
+          <div style="color:var(--text2);font-size:12px;margin-top:2px">Ko ON: gibanje ne prekinja party — SSR luči delujejo neodvisno</div>
+        </div>
+        <button class="btn" id="party-prio-btn" onclick="partyTogglePrio()">–</button>
+      </div>
     </div>
   </div>
 
@@ -219,7 +226,24 @@
       : '–';
 
     _applySlotVisual(s.active_slot, on);
+    _applyPrioVisual(s.priority);
   }
+
+  function _applyPrioVisual(prio) {
+    const btn = document.getElementById('party-prio-btn');
+    if (!btn) return;
+    btn.textContent = prio ? 'PRIO ON' : 'PRIO OFF';
+    btn.className = 'btn ' + (prio ? 'btn-warning' : '');
+  }
+
+  window.partyTogglePrio = async function() {
+    const newPrio = !_status.priority;
+    try {
+      await api.post('/api/party/priority', { on: newPrio ? 1 : 0 });
+      _status.priority = newPrio;
+      _applyPrioVisual(newPrio);
+    } catch(e) { alert('Napaka: ' + e.message); }
+  };
 
   function _applySlotVisual(activeIdx, partyOn) {
     for (let i = 0; i < 9; i++) {
@@ -286,6 +310,8 @@
     } catch(e) { alert('Napaka: ' + e.message); }
   };
 
+  // Direkten HTTP klic na WLED — brskalnik in WLED sta v istem omrežju (192.168.2.x).
+  // Gre mimo Primary ESP (wledTask) za nižjo latenco. Namerno.
   window.partySetColor = async function(rgb, dotIdx) {
     if (!_status.party_on || !_wledIp) return;
     document.querySelectorAll('.party-color-dot').forEach((d,i) => d.classList.toggle('sel', i === dotIdx));
@@ -296,9 +322,11 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ seg: [{ col: [[r, g, b]] }] })
       });
-    } catch(e) { /* WLED nedosegljiv */ }
+    } catch(e) { console.warn('WLED direkten klic neuspel:', e.message); }
   };
 
+  // Direkten HTTP klic na WLED — brskalnik in WLED sta v istem omrežju (192.168.2.x).
+  // Gre mimo Primary ESP (wledTask) za nižjo latenco. Namerno.
   window.partySetBri = async function(val) {
     document.getElementById('party-bri-val').textContent = val;
     if (!_status.party_on || !_wledIp) return;
@@ -308,9 +336,11 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ bri: parseInt(val) })
       });
-    } catch(e) { /* WLED nedosegljiv */ }
+    } catch(e) { console.warn('WLED direkten klic neuspel:', e.message); }
   };
 
+  // Direkten HTTP klic na WLED — brskalnik in WLED sta v istem omrežju (192.168.2.x).
+  // Gre mimo Primary ESP (wledTask) za nižjo latenco. Namerno.
   window.partySetSpd = async function(val) {
     document.getElementById('party-spd-val').textContent = val;
     if (!_status.party_on || !_wledIp) return;
@@ -320,7 +350,7 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ seg: [{ sx: parseInt(val) }] })
       });
-    } catch(e) { /* WLED nedosegljiv */ }
+    } catch(e) { console.warn('WLED direkten klic neuspel:', e.message); }
   };
 
   // ── Panel B — Konfiguracija slotov ───────────────────────

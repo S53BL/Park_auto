@@ -179,13 +179,13 @@ static void swipe_cb(lv_event_t* e) {
                           (dir == LV_DIR_TOP)   ? "UP"    :
                           (dir == LV_DIR_BOTTOM)? "DOWN"  : "NONE";
     DISPI("swipe: %s  screen=%d", dir_str, (int)s_current_screen);
-    if (dir == LV_DIR_LEFT && s_current_screen == DisplayScreen::MAIN) {
-        hal_display_showScreen(DisplayScreen::SERVICE);
-    } else if (dir == LV_DIR_RIGHT) {
-        if (s_current_screen == DisplayScreen::MAIN)
-            hal_display_showScreen(DisplayScreen::PARTY);
-        else
-            hal_display_showScreen(DisplayScreen::MAIN);
+    if (s_current_screen == DisplayScreen::MAIN) {
+        if (dir == LV_DIR_LEFT)  hal_display_showScreen(DisplayScreen::SERVICE);
+        if (dir == LV_DIR_RIGHT) hal_display_showScreen(DisplayScreen::PARTY);
+    } else if (s_current_screen == DisplayScreen::PARTY) {
+        if (dir == LV_DIR_LEFT)  hal_display_showScreen(DisplayScreen::MAIN);
+    } else if (s_current_screen == DisplayScreen::SERVICE) {
+        if (dir == LV_DIR_RIGHT) hal_display_showScreen(DisplayScreen::MAIN);
     }
 }
 
@@ -211,7 +211,13 @@ static void apply_pending() {
                         (t == DisplayScreen::SERVICE) ? s_screen_service
                                                       : s_screen_party;
         if (scr) {
-            lv_scr_load_anim(scr, LV_SCR_LOAD_ANIM_MOVE_LEFT, 200, 0, false);
+            lv_scr_load_anim_t anim;
+            if      (t == DisplayScreen::PARTY)                        anim = LV_SCR_LOAD_ANIM_MOVE_LEFT;
+            else if (t == DisplayScreen::SERVICE)                      anim = LV_SCR_LOAD_ANIM_MOVE_RIGHT;
+            else if (s_current_screen == DisplayScreen::PARTY)         anim = LV_SCR_LOAD_ANIM_MOVE_RIGHT;
+            else if (s_current_screen == DisplayScreen::SERVICE)       anim = LV_SCR_LOAD_ANIM_MOVE_LEFT;
+            else                                                       anim = LV_SCR_LOAD_ANIM_MOVE_LEFT;
+            lv_scr_load_anim(scr, anim, 200, 0, false);
             s_current_screen = t;
         }
         return;
@@ -525,6 +531,9 @@ static void ui_refresh_cb(lv_timer_t*) {
             screen_service_apply_updates();
         }
     }
+
+    // ── Party zaslon — dirty flag guard je notranji, takoj vrne če ni sprememb
+    screen_party_apply_updates();
 }
 
 // ============================================================

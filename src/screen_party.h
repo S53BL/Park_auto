@@ -19,12 +19,13 @@
 //     BUTTON_PARTY_COLOR       payload=packed RGB: (R<<16)|(G<<8)|B
 //     BUTTON_PARTY_BRIGHTNESS  payload=0-255
 //     BUTTON_PARTY_SPEED       payload=0-255
-//     BUTTON_PARTY_PRESET      payload=preset_id (0-3)
+//     BUTTON_PARTY_SLOT        payload=slot_idx (0-8)
+//     BUTTON_PARTY_PRIORITY    payload=1 (on) ali 0 (off)
 //
 //   MUX IO45 preklop:
 //     Party ON  → digitalWrite(PIN_MUX_SELECT, HIGH) → Party ESP aktiven
 //     Party OFF → digitalWrite(PIN_MUX_SELECT, LOW)  → Primary ESP aktiven
-//     Preklop naredi screen_party.cpp direktno (BSP pin, ne zahteva hw).
+//     Preklop izvede wledTask ob obdelavi TOGGLE/RESUME ukaza.
 //     200ms zamik med MUX in WLED klicem (prepreči signal collision).
 //
 // WLED API referenca (za web_ui.cpp implementacijo):

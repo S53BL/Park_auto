@@ -970,19 +970,39 @@ bool hal_tof_startup_scan() {
         TOFW("startup_scan: Wire1 mutex timeout 5s — preskočeno");
         return false;
     }
+
+    // PRE-WARM: en discard read na kanal — VHV kalibracija se stabilizira pri cold-startu
+    // (~50-55ms). Dejanska meritev je po tem hitra (~33ms, brez VHV ponavljanja).
+    TOFI("startup_scan: VHV pre-warm...");
+    for (uint8_t ch = 0; ch < 6; ch++) {
+        if (!s_sensor_ok[ch]) continue;
+        if (tca_open(ch)) {
+            s_tof[ch].startContinuous(TOF_TIMING_BUDGET_US / 1000 + 5);
+            s_tof[ch].read(true);
+            s_tof[ch].stopContinuous();
+        }
+        tca_close_all();
+    }
+
+    // DEJANSKE MERITVE z enkratnim retry ob napaki
     for (uint8_t ch = 0; ch < 6; ch++) {
         uint16_t mm = read_channel(ch);
         if (mm != TOF_ERR) {
             TOFI("  %s: %d mm", ch_name(ch), mm);
+            continue;
+        }
+        // Retry — enkrat takoj (VHV je po pre-warmu že stabilen)
+        mm = read_channel(ch);
+        if (mm != TOF_ERR) {
+            TOFI("  %s: %d mm (retry OK)", ch_name(ch), mm);
         } else if (s_tof[ch].last_status != 0) {
             TOFW("  %s: I2C napaka (status=%d)", ch_name(ch), s_tof[ch].last_status);
         } else if (s_tof[ch].ranging_data.range_status != VL53L1X::RangeValid) {
-            TOFI("  %s: brez cilja (RangeStatus=%d)",
+            TOFW("  %s: brez cilja (RangeStatus=%d)",
                  ch_name(ch), (int)s_tof[ch].ranging_data.range_status);
         } else {
-            TOFI("  %s: %d mm (izven dosega [%d-%d])",
-                 ch_name(ch),
-                 (int)s_tof[ch].ranging_data.range_mm,
+            TOFW("  %s: %d mm (izven dosega [%d-%d])",
+                 ch_name(ch), (int)s_tof[ch].ranging_data.range_mm,
                  TOF_MIN_RANGE_MM, TOF_MAX_RANGE_MM);
         }
     }
