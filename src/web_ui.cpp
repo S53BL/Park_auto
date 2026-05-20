@@ -92,6 +92,28 @@ static uint8_t*        _index_html_buf   = nullptr;  // PSRAM cache za SPA fallb
 static size_t          _index_html_sz    = 0;
 static SemaphoreHandle_t _json_buf_mutex = nullptr;  // serializa sočasne _sendJson klice
 
+// PSRAM cache za statične assete — brez LittleFS fopen() per-request.
+// Brez tega: 6 vzporednih HTTP konekcij brskalnika × ~3 KB AsyncFileResponse =
+// ~18 KB SRAM → OOM → konekcije se resetirajo, JS datoteke ne naložijo.
+struct AssetEntry {
+    const char* url;
+    const char* mime;
+    uint8_t*    buf;
+    size_t      sz;
+};
+static AssetEntry s_assets[] = {
+    { "/settings.js",    "application/javascript", nullptr, 0 },
+    { "/alarm.js",       "application/javascript", nullptr, 0 },
+    { "/party.js",       "application/javascript", nullptr, 0 },
+    { "/alpine.min.js",  "application/javascript", nullptr, 0 },
+    { "/style.css",      "text/css",               nullptr, 0 },
+    { "/diagnostika.js", "application/javascript", nullptr, 0 },
+    { "/logs.js",        "application/javascript", nullptr, 0 },
+    { "/system.js",      "application/javascript", nullptr, 0 },
+    { "/vehicles.js",    "application/javascript", nullptr, 0 },
+};
+static constexpr int ASSET_COUNT = (int)(sizeof(s_assets) / sizeof(s_assets[0]));
+
 // ============================================================
 // WLED COMMAND QUEUE (A2/A4)
 // ============================================================
@@ -404,7 +426,7 @@ static void _handleConfigGet(AsyncWebServerRequest* req) {
     LOG_INFO(TAG, "HTTP → %s", req->url().c_str());
 
     JsonDocument doc(&s_psram_alloc);
-    const Config cfg = config_get();
+    const Config& cfg = config_get();
 
     JsonObject light = doc["light"].to<JsonObject>();
     light["timeout_ssr1_s"]      = cfg.timeout_ssr1_s;
@@ -556,7 +578,7 @@ static void _handleRadarGet(AsyncWebServerRequest* req) {
     JsonArray sensors = doc["sensors"].to<JsonArray>();
 
     const char* names[4] = {"Vhod","Cesta_L","Cesta_D","Garaza"};
-    const Config cfg = config_get();
+    const Config& cfg = config_get();
 
     for (uint8_t i = 0; i < 4; i++) {
         const RadarSensorStatus& rs = hal_radar_get_status((RadarSensorId)i);
@@ -1171,6 +1193,8 @@ static void _wled_poll(const char* ip) {
                 ps.fx_id = doc["seg"][0]["fx"] | ps.fx_id;
                 ps.speed = doc["seg"][0]["sx"] | ps.speed;
             }
+            // active_slot ne more biti določen samo iz fx_id (več slotov ima isti fx)
+            ps.active_slot = s_active_slot;
             screen_party_set_state(ps);
         }
     } else if (code > 0) {
@@ -1191,7 +1215,7 @@ static void wledTask(void* pv) {
 
         bool got = (xQueueReceive(s_wled_q, &cmd, pdMS_TO_TICKS(wait)) == pdTRUE);
 
-        const Config cfg = config_get();
+        const Config& cfg = config_get();
         const char* ip   = cfg.wled_ip;
         char body[160];
 
@@ -1199,7 +1223,8 @@ static void wledTask(void* pv) {
             switch (cmd.type) {
                 case WledCmdType::TOGGLE:
                     if (cmd.payload) {
-                        // ON: MUX HIGH je že nastavljen v screen_party.cpp
+                        // ON: MUX HIGH tukaj — zagotovljeno pred delay (LCD in web pot)
+                        digitalWrite(PIN_MUX_SELECT, HIGH);
                         vTaskDelay(pdMS_TO_TICKS(MUX_SWITCH_DELAY_MS));
                         _wled_post(ip, "{\"on\":true}");
                         s_wled_on = true;
@@ -1267,10 +1292,11 @@ static void wledTask(void* pv) {
                     LOG_INFO(TAG, "WLED SUSPEND — MUX → PRIMARY");
                     break;
                 case WledCmdType::RESUME:
+                    digitalWrite(PIN_MUX_SELECT, HIGH);
                     vTaskDelay(pdMS_TO_TICKS(MUX_SWITCH_DELAY_MS));
                     _wled_post(ip, "{\"on\":true}");
                     s_wled_on = true;
-                    LOG_INFO(TAG, "WLED RESUME — WLED ON");
+                    LOG_INFO(TAG, "WLED RESUME — MUX HIGH + WLED ON");
                     break;
                 default: break;
             }
@@ -1292,7 +1318,7 @@ static void _handlePartyConfigGet(AsyncWebServerRequest* req) {
     _stats.req_total++;
     _stats.req_api++;
     LOG_DEBUG(TAG, "GET /api/party/config");
-    const Config cfg = config_get();
+    const Config& cfg = config_get();
     JsonDocument doc(&s_psram_alloc);
     doc["wled_ip"] = cfg.wled_ip;
     _sendJson(req, 200, doc);
@@ -1397,6 +1423,25 @@ static void _handlePartySlotsPost(AsyncWebServerRequest* req, uint8_t* data,
     _sendJson(req, 200, resp);
 }
 
+static void _handlePartyTogglePost(AsyncWebServerRequest* req, uint8_t* data,
+                                   size_t len, size_t index, size_t total) {
+    _stats.req_total++; _stats.req_api++;
+    if (index + len < total) return;
+
+    JsonDocument doc(&s_psram_alloc);
+    if (deserializeJson(doc, data, len)) { _sendError(req, 400, "invalid JSON"); return; }
+    if (!doc["on"].is<bool>()) { _sendError(req, 400, "missing 'on' bool"); return; }
+    bool on = doc["on"].as<bool>();
+
+    if (!s_wled_q) { _sendError(req, 503, "wled queue nedostopna"); return; }
+    EventBus::publish(EventType::BUTTON_PARTY_TOGGLE, on ? 1u : 0u);
+    LOG_INFO(TAG, "PARTY toggle → %s (prek web)", on ? "ON" : "OFF");
+
+    JsonDocument resp(&s_psram_alloc);
+    resp["ok"] = true; resp["on"] = on;
+    _sendJson(req, 200, resp);
+}
+
 static void _handlePartyActivatePost(AsyncWebServerRequest* req, uint8_t* data,
                                       size_t len, size_t index, size_t total) {
     _stats.req_total++; _stats.req_api++;
@@ -1407,6 +1452,7 @@ static void _handlePartyActivatePost(AsyncWebServerRequest* req, uint8_t* data,
     if (!doc["slot_idx"].is<int>()) { _sendError(req, 400, "missing slot_idx"); return; }
     int si = doc["slot_idx"].as<int>();
     if (si < 0 || si > 8) { _sendError(req, 400, "slot_idx out of range"); return; }
+    if (!s_wled_on) { _sendError(req, 400, "party ni vklopljen"); return; }
 
     EventBus::publish(EventType::BUTTON_PARTY_SLOT, (uint32_t)si);
     LOG_INFO(TAG, "PARTY activate slot %d (prek web)", si);
@@ -1460,7 +1506,11 @@ static void _handlePartySchedulesPost(AsyncWebServerRequest* req, uint8_t* data,
         strncpy(sc.name, doc["name"].as<const char*>(), sizeof(sc.name) - 1);
         sc.name[sizeof(sc.name) - 1] = '\0';
     }
-    if (doc["slot_idx"].is<int>())    sc.slot_idx    = (uint8_t)doc["slot_idx"].as<int>();
+    if (doc["slot_idx"].is<int>()) {
+        int sli = doc["slot_idx"].as<int>();
+        if (sli < 0 || sli > 8) { _sendError(req, 400, "slot_idx mora biti 0-8"); return; }
+        sc.slot_idx = (uint8_t)sli;
+    }
     if (doc["enabled"].is<bool>())    sc.enabled     = doc["enabled"].as<bool>() ? 1 : 0;
     if (doc["from_month"].is<int>())  sc.from_month  = (uint8_t)doc["from_month"].as<int>();
     if (doc["from_day"].is<int>())    sc.from_day    = (uint8_t)doc["from_day"].as<int>();
@@ -1520,7 +1570,7 @@ static void _handlePartyPriorityPost(AsyncWebServerRequest* req, uint8_t* data,
 static void _handlePartyStatusGet(AsyncWebServerRequest* req) {
     _stats.req_total++; _stats.req_api++;
     LOG_DEBUG(TAG, "GET /api/party/status");
-    const Config cfg = config_get();
+    const Config& cfg = config_get();
     JsonDocument doc(&s_psram_alloc);
     doc["party_on"]       = s_wled_on;
     doc["suspended"]      = light_logic_is_party_suspended();
@@ -1763,6 +1813,12 @@ static void _registerHandlers() {
         nullptr,
         _handlePartyConfigPost
     );
+    // Party toggle
+    _server->on("/api/party/toggle", HTTP_POST,
+        [](AsyncWebServerRequest* req) {},
+        nullptr,
+        _handlePartyTogglePost
+    );
     // Party slots
     _server->on("/api/party/slots", HTTP_GET, _handlePartySlotsGet);
     _server->on("/api/party/slots", HTTP_POST,
@@ -1805,7 +1861,24 @@ static void _registerHandlers() {
     _server->on("/files", HTTP_GET,    _handleFilesGet);
     _server->on("/files", HTTP_DELETE, _handleFilesDelete);
 
-    // Statične datoteke iz LittleFS
+    // Statične datoteke iz PSRAM — brez LittleFS fopen() per-request.
+    // Preprečuje SRAM OOM: brskalnik odpre 6 vzporednih konekcij, vsaka AsyncFileResponse
+    // zasede ~3 KB SRAM → skupaj >18 KB → konekcije se resetirajo, JS ne naloži.
+    // beginResponse_P streama direktno iz PSRAM → 0 SRAM alokacij za vsebino datoteke.
+    for (int i = 0; i < ASSET_COUNT; i++) {
+        AssetEntry* a = &s_assets[i];
+        if (!a->buf) continue;
+        _server->on(a->url, HTTP_GET, [a](AsyncWebServerRequest* req) {
+            _stats.req_total++;
+            _stats.req_files++;
+            AsyncWebServerResponse* resp = req->beginResponse_P(200, a->mime, a->buf, a->sz);
+            resp->addHeader("Content-Encoding", "gzip");
+            resp->addHeader("Cache-Control", "no-cache");
+            req->send(resp);
+        });
+    }
+
+    // Statične datoteke iz LittleFS (fallback za morebitne datoteke ki niso v PSRAM cachi)
     _server->serveStatic("/", LittleFS, WEB_ASSETS_PATH "/")
            .setDefaultFile("index.html")
            .setCacheControl("no-cache");
@@ -1908,6 +1981,34 @@ bool web_ui_init() {
         _assets_ok = false;
         LOG_WARN(TAG, "LittleFS assets: index.html NI najden v %s/", WEB_ASSETS_PATH);
         LOG_WARN(TAG, "Zaženi: pio run --target uploadfs za upload assets");
+    }
+
+    // Pre-load JS/CSS assetov v PSRAM — preprečuje SRAM OOM ob 6 vzporednih konekcijah
+    {
+        size_t total = 0;
+        int loaded = 0;
+        for (int i = 0; i < ASSET_COUNT; i++) {
+            char fs_path[64];
+            snprintf(fs_path, sizeof(fs_path), "%s%s.gz", WEB_ASSETS_PATH, s_assets[i].url);
+            File f = LittleFS.open(fs_path, "r");
+            if (!f) {
+                LOG_WARN(TAG, "asset skip (ni v LFS): %s", fs_path);
+                continue;
+            }
+            size_t sz = f.size();
+            uint8_t* buf = (uint8_t*)heap_caps_malloc(sz, MALLOC_CAP_SPIRAM);
+            if (buf) {
+                f.readBytes((char*)buf, sz);
+                s_assets[i].buf = buf;
+                s_assets[i].sz  = sz;
+                total += sz;
+                loaded++;
+            } else {
+                LOG_WARN(TAG, "asset PSRAM alloc fail: %s (%u B)", fs_path, (unsigned)sz);
+            }
+            f.close();
+        }
+        LOG_INFO(TAG, "Assets v PSRAM: %d/%d naloženih (%u B skupaj)", loaded, ASSET_COUNT, (unsigned)total);
     }
 
     return true;

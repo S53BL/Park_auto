@@ -20,6 +20,7 @@
     <button class="nav-tab"        onclick="nav('system')">Sistem</button>
     <button class="nav-tab"        onclick="nav('vehicles')">Vozila</button>
     <button class="nav-tab"        onclick="nav('alarm')">Alarm</button>
+    <button class="nav-tab"        onclick="nav('party')">Party</button>
   </nav>
 </div>
 
@@ -43,6 +44,9 @@
 
   <!-- ALARM (polling 3s) -->
   <div id="page-alarm" class="page"></div>
+
+  <!-- PARTY (polling 3s) -->
+  <div id="page-party" class="page"></div>
 
 </div>
 
@@ -75,6 +79,7 @@ const PAGES = {
   system:     '/system.js',
   vehicles:   '/vehicles.js',
   alarm:      '/alarm.js',
+  party:      '/party.js',
 };
 
 // ── Navigacija ───────────────────────────────────────────

@@ -83,6 +83,11 @@ static bool              s_ntp_synced     = false;
 static char              s_ts_cache[16]   = "[M000000000]";
 static TimerHandle_t     s_ts_timer       = nullptr;
 
+// Shared log-line buffers in PSRAM — eliminates ~580B of stack per logger_log call.
+// Protected by s_mutex (taken before use in logger_log). Allocated in logger_init().
+static char*             s_log_msg_buf    = nullptr;   // 256 B
+static char*             s_log_line_buf   = nullptr;   // MAX_LINE_LEN B
+
 static uint32_t          s_total_lines    = 0;
 static uint32_t          s_dropped_lines  = 0;
 static uint32_t          s_flush_count    = 0;
@@ -262,6 +267,12 @@ bool logger_init() {
         memset(s_sd_buf, 0, SD_FLUSH_BUF_SIZE);
     }
 
+    // Log-line shared buffers — PSRAM to reduce async_tcp stack usage
+    s_log_msg_buf  = (char*)ps_malloc(256);
+    s_log_line_buf = (char*)ps_malloc(MAX_LINE_LEN);
+    if (!s_log_msg_buf)  s_log_msg_buf  = (char*)malloc(256);
+    if (!s_log_line_buf) s_log_line_buf = (char*)malloc(MAX_LINE_LEN);
+
     s_ram_write_pos = 0;
     s_ram_wrapped   = false;
     s_sd_buf_pos    = 0;
@@ -366,89 +377,73 @@ void logger_log(LogLevel level, const char* tag,
         default:              level_char = '?'; break;
     }
 
-    // Format sporočila
-    char message[256];
-    va_list args;
-    va_start(args, format);
-    vsnprintf(message, sizeof(message), format, args);
-    va_end(args);
-
-    // Timestamp
-    char timestamp[24];
-    build_timestamp(timestamp, sizeof(timestamp));
-
-    // Tag — obreži na TAG_MAX_LEN
-    char safe_tag[TAG_MAX_LEN + 1];
-    if (tag) {
-        strncpy(safe_tag, tag, TAG_MAX_LEN);
-        safe_tag[TAG_MAX_LEN] = '\0';
-    } else {
-        strcpy(safe_tag, "?");
-    }
-
-    // Assemble log line
-    // Format: "[HH:MM:SS][TAG:L] message\n"  (with NTP)
-    //         "[M000123456][TAG:L] message\n" (without NTP)
-    char line[MAX_LINE_LEN];
-    int len = snprintf(line, sizeof(line),
-                       "%s[%s:%c] %s\n",
-                       timestamp, safe_tag, level_char, message);
-
-    if (len <= 0) return;
-    if (len >= (int)sizeof(line)) {
-        // Truncated — dodaj marker
-        line[sizeof(line) - 5] = '.';
-        line[sizeof(line) - 4] = '.';
-        line[sizeof(line) - 3] = '.';
-        line[sizeof(line) - 2] = '\n';
-        line[sizeof(line) - 1] = '\0';
-        len = sizeof(line) - 1;
-    }
-
-    // 1. Vedno na Serial — en sam write() da ne pride do prepletanja med taski
-#if LOG_ANSI_COLORS
-    {
-        const char* ansi_prefix;
-        switch (level) {
-            case LOG_LEVEL_ERROR: ansi_prefix = "\033[31m"; break;  // rdeča
-            case LOG_LEVEL_WARN:  ansi_prefix = "\033[33m"; break;  // rumena
-            case LOG_LEVEL_DEBUG: ansi_prefix = "\033[90m"; break;  // temno siva
-            default:              ansi_prefix = "\033[0m";  break;  // bela/default (INFO)
-        }
-        // Sestavi: prefix + line + reset — v en buffer, en atomarni write
-        char serial_buf[MAX_LINE_LEN + 16];
-        int serial_len = snprintf(serial_buf, sizeof(serial_buf),
-                                  "%s%s\033[0m", ansi_prefix, line);
-        if (serial_len > 0) {
-            Serial.write((const uint8_t*)serial_buf, (size_t)serial_len);
-        }
-    }
-#else
-    Serial.write((const uint8_t*)line, (size_t)len);
-#endif
-
-    // 2. V RAM buffer + SD buffer (thread-safe)
+    // Mutex najprej — ščiti deljene PSRAM bufferje s_log_msg_buf / s_log_line_buf.
+    // Serial write je znotraj mutexa (USB CDC je hiter, hold je <1ms).
+    // Na mutex timeout: log gre samo na Serial z minimalnim stack bufferjem.
     bool got_mutex = take_mutex();
 
-    if (got_mutex) {
-        // RAM buffer
-        if (s_ram_buf) {
-            if (!s_ram_wrapped || len < (int)s_ram_size) {
-                ram_write(line, (size_t)len);
-            } else {
-                s_dropped_lines++;
-            }
+    if (got_mutex && s_log_msg_buf && s_log_line_buf) {
+        // === Pot 1: PSRAM buferji — brez velikih stack alokacij ===
+        char timestamp[24];
+        char safe_tag[TAG_MAX_LEN + 1];
+
+        va_list args;
+        va_start(args, format);
+        vsnprintf(s_log_msg_buf, 256, format, args);
+        va_end(args);
+
+        build_timestamp(timestamp, sizeof(timestamp));
+        if (tag) { strncpy(safe_tag, tag, TAG_MAX_LEN); safe_tag[TAG_MAX_LEN] = '\0'; }
+        else      { safe_tag[0] = '?'; safe_tag[1] = '\0'; }
+
+        int len = snprintf(s_log_line_buf, MAX_LINE_LEN,
+                           "%s[%s:%c] %s\n",
+                           timestamp, safe_tag, level_char, s_log_msg_buf);
+        if (len <= 0) { give_mutex(); return; }
+        if (len >= MAX_LINE_LEN) {
+            s_log_line_buf[MAX_LINE_LEN - 5] = '.';
+            s_log_line_buf[MAX_LINE_LEN - 4] = '.';
+            s_log_line_buf[MAX_LINE_LEN - 3] = '.';
+            s_log_line_buf[MAX_LINE_LEN - 2] = '\n';
+            s_log_line_buf[MAX_LINE_LEN - 1] = '\0';
+            len = MAX_LINE_LEN - 1;
         }
 
-        // SD pisanje med normalnim delovanjem ODSTRANJENO (2026-05, Ideja 1).
-        // Logi gredo SAMO v PSRAM RAM buffer (s_ram_buf) in Serial.
-        // SD flush enkrat na dan ob 00:01 prek sd_midnight_flush_task.
-        // logger_flush() ostane za eksplicitne klice (restart, OTA, /api/logs/flush).
+#if LOG_ANSI_COLORS
+        {
+            const char* p;
+            switch (level) {
+                case LOG_LEVEL_ERROR: p = "\033[31m"; break;
+                case LOG_LEVEL_WARN:  p = "\033[33m"; break;
+                case LOG_LEVEL_DEBUG: p = "\033[90m"; break;
+                default:              p = "\033[0m";  break;
+            }
+            Serial.print(p);
+            Serial.write((const uint8_t*)s_log_line_buf, (size_t)len);
+            Serial.print("\033[0m");
+        }
+#else
+        Serial.write((const uint8_t*)s_log_line_buf, (size_t)len);
+#endif
 
+        if (s_ram_buf && (!s_ram_wrapped || len < (int)s_ram_size)) {
+            ram_write(s_log_line_buf, (size_t)len);
+        } else if (s_ram_buf) {
+            s_dropped_lines++;
+        }
         s_total_lines++;
         give_mutex();
+
     } else {
-        // Mutex timeout — vsaj Serial je že šel, štej dropped
+        // === Pot 2: fallback — mutex timeout ali PSRAM buferji niso alocirani ===
+        // Majhen stack buffer (ne more povzročiti stack overflow v tej poti).
+        if (got_mutex) give_mutex();
+        char fb[128];
+        va_list args;
+        va_start(args, format);
+        vsnprintf(fb, sizeof(fb), format, args);
+        va_end(args);
+        Serial.printf("[%s:%c] %s\n", tag ? tag : "?", level_char, fb);
         s_dropped_lines++;
     }
 }

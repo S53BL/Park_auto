@@ -479,6 +479,12 @@ static void party_schedule_tick(TimerHandle_t) {
 
     float lux = hal_light_get_lux();
 
+    // Cooldown: prepreči dvojni vklop/izklop ob istem minutnem ticku (timer ni sinhroniziran z uro)
+    static uint32_t s_last_sched_on_ms  = 0;
+    static uint32_t s_last_sched_off_ms = 0;
+    static const uint32_t SCHED_COOLDOWN_MS = 300000UL;  // 5 minut
+    uint32_t now_ms = millis();
+
     for (int i = 0; i < 10; i++) {
         PartySchedule sc = config_get_party_schedule((uint8_t)i);
         if (!sc.enabled) continue;
@@ -497,21 +503,34 @@ static void party_schedule_tick(TimerHandle_t) {
         if (sc.use_lux_off) {
             time_off = (lux > 0.0f) && ((uint32_t)lux > sc.lux_off);
         } else {
-            time_off = (t.tm_hour == sc.time_off_h && t.tm_min == sc.time_off_m);
-            // Čez-polnoč: izklop je naslednji dan ko je time_off_h < time_on_h
-            if (!time_off && sc.time_off_h < sc.time_on_h) {
-                time_off = (t.tm_hour == sc.time_off_h && t.tm_min == sc.time_off_m);
+            bool cross_midnight = (sc.time_off_h < sc.time_on_h);
+            if (!cross_midnight) {
+                // Normalen primer: vklop in izklop isti dan (npr. 17:00–23:00)
+                time_off = (t.tm_hour == (int)sc.time_off_h && t.tm_min == (int)sc.time_off_m);
+            } else {
+                // Čez polnoč: izklop naslednji dan (npr. vklop 20:00, izklop 02:00)
+                if (t.tm_hour < (int)sc.time_off_h) {
+                    time_off = true;  // ure 00:00 do (time_off_h - 1):59
+                } else if (t.tm_hour == (int)sc.time_off_h) {
+                    time_off = (t.tm_min == (int)sc.time_off_m);
+                }
             }
         }
 
         if (time_on && !s_party_active && !s_party_suspended) {
-            LLI("Party urnik %d: vklop slot %d", i, sc.slot_idx);
-            EventBus::publish(EventType::BUTTON_PARTY_TOGGLE, 1);
-            EventBus::publish(EventType::BUTTON_PARTY_SLOT, sc.slot_idx);
+            if ((now_ms - s_last_sched_on_ms) > SCHED_COOLDOWN_MS) {
+                s_last_sched_on_ms = now_ms;
+                LLI("Party urnik %d: vklop slot %d", i, sc.slot_idx);
+                EventBus::publish(EventType::BUTTON_PARTY_TOGGLE, 1);
+                EventBus::publish(EventType::BUTTON_PARTY_SLOT, sc.slot_idx);
+            }
         }
         if (time_off && s_party_active) {
-            LLI("Party urnik %d: izklop", i);
-            EventBus::publish(EventType::BUTTON_PARTY_TOGGLE, 0);
+            if ((now_ms - s_last_sched_off_ms) > SCHED_COOLDOWN_MS) {
+                s_last_sched_off_ms = now_ms;
+                LLI("Party urnik %d: izklop", i);
+                EventBus::publish(EventType::BUTTON_PARTY_TOGGLE, 0);
+            }
         }
     }
 }
@@ -1095,8 +1114,7 @@ void light_logic_tick() {
                 LLI("Party RESUME: sistem miren, deadline potekel → slot=%d", s_party_slot);
                 s_party_suspended = false;
                 s_party_active    = true;
-                // MUX HIGH — light_logic nastavi direktno, preden RESUME pošlje web_ui
-                digitalWrite(PIN_MUX_SELECT, HIGH);
+                // MUX HIGH nastavi wledTask ob prejemu RESUME — zagotovljen timing pred HTTP
                 EventBus::publish(EventType::PARTY_RESUMED, s_party_slot);
             }
         } else {

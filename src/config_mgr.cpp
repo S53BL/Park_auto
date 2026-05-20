@@ -430,6 +430,12 @@ static void load_and_validate(Preferences& prefs) {
         if (ip.length() > 0 && ip.length() < (int)sizeof(s_config.wled_ip)) {
             strncpy(s_config.wled_ip, ip.c_str(), sizeof(s_config.wled_ip));
             s_config.wled_ip[sizeof(s_config.wled_ip) - 1] = '\0';
+            // Migracija starega defaulta — zamenjamo z novim
+            if (strcmp(s_config.wled_ip, "192.168.4.1") == 0) {
+                strncpy(s_config.wled_ip, def.wled_ip, sizeof(s_config.wled_ip));
+                prefs.putString(NVS_K_WLED_IP, def.wled_ip);
+                CFGI("  wled_ip migriran: 192.168.4.1 → %s", def.wled_ip);
+            }
         } else {
             if (ip.length() >= sizeof(s_config.wled_ip)) {
                 CFGW("  " NVS_K_WLED_IP " predolg (%d znakov) → default", (int)ip.length());

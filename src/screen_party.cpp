@@ -246,15 +246,7 @@ static void toggle_event_cb(lv_event_t* e) {
     //   ON:  delay(200) → HTTP POST {"on":true} na WLED
     //   OFF: HTTP POST {"on":false} → delay(200) → IO45=LOW
     //   Zamik 200ms (MUX_SWITCH_DELAY_MS) prepreči signal collision na 74HC257N.
-    if (s_state.party_on) {
-        // MUX HIGH takoj — neblokirajoče; web_ui wledTask počaka
-        // MUX_SWITCH_DELAY_MS in nato pošlje HTTP {"on":true} na WLED
-        digitalWrite(PIN_MUX_SELECT, HIGH);
-        PARTY_I("MUX → PARTY ESP (IO%d HIGH)", PIN_MUX_SELECT);
-    } else {
-        // MUX LOW NE postavljamo tukaj — wledTask pošlje HTTP {"on":false}
-        // in šele nato (po MUX_SWITCH_DELAY_MS) vrne MUX na PRIMARY
-    }
+    // MUX preklop izvede wledTask ob obdelavi TOGGLE ukaza — velja za LCD in web pot
 
     uint32_t payload = s_state.party_on ? 1 : 0;
     EventBus::publish(EventType::BUTTON_PARTY_TOGGLE, payload);
@@ -646,8 +638,13 @@ void screen_party_apply_updates() {
     if (!s_created) return;
 
     // Posodobi slot labele če je web UI spremenil slot podatke
-    if (s_reload_slots) {
+    bool do_reload = false;
+    if (s_mutex && xSemaphoreTake(s_mutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+        do_reload      = s_reload_slots;
         s_reload_slots = false;
+        xSemaphoreGive(s_mutex);
+    }
+    if (do_reload) {
         screen_party_reload_slots();
     }
 
@@ -709,7 +706,10 @@ void screen_party_reload_slots() {
 }
 
 void screen_party_request_slot_reload() {
-    s_reload_slots = true;
+    if (s_mutex && xSemaphoreTake(s_mutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+        s_reload_slots = true;
+        xSemaphoreGive(s_mutex);
+    }
 }
 
 PartyState screen_party_get_state() {
