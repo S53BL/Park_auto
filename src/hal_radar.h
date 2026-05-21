@@ -77,6 +77,9 @@ typedef struct {
     uint8_t  configured_move_sens;
     uint8_t  configured_static_sens;
     uint16_t configured_unmanned_s;
+    // Recovery statistika (posodobita recover_stuck_channel)
+    uint32_t recovery_count;
+    uint8_t  stuck_level;
 } RadarSensorStatus;
 
 typedef void (*RadarFrameCallback)(const RadarFrame& frame);

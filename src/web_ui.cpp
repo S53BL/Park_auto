@@ -486,21 +486,24 @@ static void _handleConfigPost(AsyncWebServerRequest* req, uint8_t* data,
         return;
     }
 
-    Config cfg = config_get();
+    // Config (~910B) alociramo na PSRAM — async_tcp stack je samo 4096B
+    Config* cfg = (Config*)heap_caps_malloc(sizeof(Config), MALLOC_CAP_SPIRAM);
+    if (!cfg) { _sendError(req, 500, "OOM"); return; }
+    *cfg = config_get();
 
     if (doc["light"].is<JsonObject>()) {
         JsonObject l = doc["light"];
-        if (l["timeout_ssr1_s"].is<uint32_t>())      cfg.timeout_ssr1_s      = l["timeout_ssr1_s"];
-        if (l["manual_extend_min"].is<uint32_t>())    cfg.manual_extend_min   = l["manual_extend_min"];
-        if (l["antiforgot_ssr2_min"].is<uint32_t>())  cfg.antiforgot_ssr2_min = l["antiforgot_ssr2_min"];
-        if (l["antiforgot_ssr3_min"].is<uint32_t>())  cfg.antiforgot_ssr3_min = l["antiforgot_ssr3_min"];
-        if (l["ssr2_auto_night"].is<bool>())           cfg.ssr2_auto_night     = l["ssr2_auto_night"];
-        if (l["dnd_start_h"].is<uint8_t>())            cfg.dnd_start_h         = l["dnd_start_h"];
-        if (l["dnd_end_h"].is<uint8_t>())              cfg.dnd_end_h           = l["dnd_end_h"];
-        if (l["ssr2_dnd_disable"].is<bool>())          cfg.ssr2_dnd_disable    = l["ssr2_dnd_disable"];
-        if (l["brightness_night"].is<uint8_t>())       cfg.brightness_night    = l["brightness_night"];
-        if (l["lux_threshold"].is<uint32_t>())         cfg.lux_night           = l["lux_threshold"];
-        if (l["lux_day"].is<uint32_t>())               cfg.lux_day             = l["lux_day"];
+        if (l["timeout_ssr1_s"].is<uint32_t>())      cfg->timeout_ssr1_s      = l["timeout_ssr1_s"];
+        if (l["manual_extend_min"].is<uint32_t>())    cfg->manual_extend_min   = l["manual_extend_min"];
+        if (l["antiforgot_ssr2_min"].is<uint32_t>())  cfg->antiforgot_ssr2_min = l["antiforgot_ssr2_min"];
+        if (l["antiforgot_ssr3_min"].is<uint32_t>())  cfg->antiforgot_ssr3_min = l["antiforgot_ssr3_min"];
+        if (l["ssr2_auto_night"].is<bool>())           cfg->ssr2_auto_night     = l["ssr2_auto_night"];
+        if (l["dnd_start_h"].is<uint8_t>())            cfg->dnd_start_h         = l["dnd_start_h"];
+        if (l["dnd_end_h"].is<uint8_t>())              cfg->dnd_end_h           = l["dnd_end_h"];
+        if (l["ssr2_dnd_disable"].is<bool>())          cfg->ssr2_dnd_disable    = l["ssr2_dnd_disable"];
+        if (l["brightness_night"].is<uint8_t>())       cfg->brightness_night    = l["brightness_night"];
+        if (l["lux_threshold"].is<uint32_t>())         cfg->lux_night           = l["lux_threshold"];
+        if (l["lux_day"].is<uint32_t>())               cfg->lux_day             = l["lux_day"];
         // SSR labeli — validacija: string, dolžina 1–23 znakov
         if (l["ssr_labels"].is<JsonArray>()) {
             JsonArray arr = l["ssr_labels"].as<JsonArray>();
@@ -509,40 +512,41 @@ static void _handleConfigPost(AsyncWebServerRequest* req, uint8_t* data,
                 const char* lbl = arr[i].as<const char*>();
                 size_t llen = lbl ? strlen(lbl) : 0;
                 if (llen == 0 || llen >= 24) continue;
-                strncpy(cfg.ssr_label[i], lbl, 23);
-                cfg.ssr_label[i][23] = '\0';
+                strncpy(cfg->ssr_label[i], lbl, 23);
+                cfg->ssr_label[i][23] = '\0';
             }
         }
     }
     if (doc["led"].is<JsonObject>()) {
         JsonObject a = doc["led"];
-        if (a["fill_speed_ms"].is<uint32_t>())        cfg.fill_speed_ms        = a["fill_speed_ms"];
-        if (a["unfill_speed_ms"].is<uint32_t>())      cfg.unfill_speed_ms      = a["unfill_speed_ms"];
-        if (a["fade_duration_ms"].is<uint32_t>())     cfg.fade_duration_ms     = a["fade_duration_ms"];
-        if (a["target_brightness"].is<uint8_t>())     cfg.target_brightness    = a["target_brightness"];
-        if (a["ssr2_delay_ms"].is<uint32_t>())        cfg.ssr2_delay_ms        = a["ssr2_delay_ms"];
-        if (a["pa_thresh1_mm"].is<uint32_t>())        cfg.pa_thresh_green_mm   = a["pa_thresh1_mm"];
-        if (a["pa_thresh2_mm"].is<uint32_t>())        cfg.pa_thresh_orange_mm  = a["pa_thresh2_mm"];
-        if (a["pa_thresh3_mm"].is<uint32_t>())        cfg.pa_thresh_red_mm     = a["pa_thresh3_mm"];
-        if (a["pa_stability_s"].is<uint32_t>())       cfg.pa_stability_s       = a["pa_stability_s"];
-        if (a["photocell_timer_min"].is<uint32_t>())  cfg.photocell_timer_min  = a["photocell_timer_min"];
-        if (a["clock_duration_s"].is<uint32_t>())     cfg.clock_duration_s     = a["clock_duration_s"];
+        if (a["fill_speed_ms"].is<uint32_t>())        cfg->fill_speed_ms        = a["fill_speed_ms"];
+        if (a["unfill_speed_ms"].is<uint32_t>())      cfg->unfill_speed_ms      = a["unfill_speed_ms"];
+        if (a["fade_duration_ms"].is<uint32_t>())     cfg->fade_duration_ms     = a["fade_duration_ms"];
+        if (a["target_brightness"].is<uint8_t>())     cfg->target_brightness    = a["target_brightness"];
+        if (a["ssr2_delay_ms"].is<uint32_t>())        cfg->ssr2_delay_ms        = a["ssr2_delay_ms"];
+        if (a["pa_thresh1_mm"].is<uint32_t>())        cfg->pa_thresh_green_mm   = a["pa_thresh1_mm"];
+        if (a["pa_thresh2_mm"].is<uint32_t>())        cfg->pa_thresh_orange_mm  = a["pa_thresh2_mm"];
+        if (a["pa_thresh3_mm"].is<uint32_t>())        cfg->pa_thresh_red_mm     = a["pa_thresh3_mm"];
+        if (a["pa_stability_s"].is<uint32_t>())       cfg->pa_stability_s       = a["pa_stability_s"];
+        if (a["photocell_timer_min"].is<uint32_t>())  cfg->photocell_timer_min  = a["photocell_timer_min"];
+        if (a["clock_duration_s"].is<uint32_t>())     cfg->clock_duration_s     = a["clock_duration_s"];
     }
     if (doc["ident"].is<JsonObject>()) {
         JsonObject i = doc["ident"];
-        if (i["dtw_threshold"].is<float>())            cfg.dtw_threshold           = i["dtw_threshold"];
-        if (i["sakoe_radius"].is<uint8_t>())           cfg.sakoe_radius            = i["sakoe_radius"];
-        if (i["min_profile_points"].is<uint8_t>())     cfg.min_profile_points      = i["min_profile_points"];
-        if (i["normalize_points"].is<uint8_t>())       cfg.normalize_points        = i["normalize_points"];
-        if (i["delta_filter_mm"].is<uint32_t>())       cfg.delta_filter_mm         = i["delta_filter_mm"];
-        if (i["phase_confirm_cm"].is<uint32_t>())      cfg.phase_confirm_cm        = i["phase_confirm_cm"];
-        if (i["stability_s"].is<float>())              cfg.stability_s             = i["stability_s"];
-        if (i["raw_profiles_per_model"].is<uint8_t>()) cfg.raw_profiles_per_model  = i["raw_profiles_per_model"];
-        if (i["presence_check_min"].is<uint8_t>())     cfg.presence_check_min      = i["presence_check_min"];
-        if (i["empty_tolerance_mm"].is<uint32_t>())    cfg.empty_tolerance_mm      = i["empty_tolerance_mm"];
+        if (i["dtw_threshold"].is<float>())            cfg->dtw_threshold           = i["dtw_threshold"];
+        if (i["sakoe_radius"].is<uint8_t>())           cfg->sakoe_radius            = i["sakoe_radius"];
+        if (i["min_profile_points"].is<uint8_t>())     cfg->min_profile_points      = i["min_profile_points"];
+        if (i["normalize_points"].is<uint8_t>())       cfg->normalize_points        = i["normalize_points"];
+        if (i["delta_filter_mm"].is<uint32_t>())       cfg->delta_filter_mm         = i["delta_filter_mm"];
+        if (i["phase_confirm_cm"].is<uint32_t>())      cfg->phase_confirm_cm        = i["phase_confirm_cm"];
+        if (i["stability_s"].is<float>())              cfg->stability_s             = i["stability_s"];
+        if (i["raw_profiles_per_model"].is<uint8_t>()) cfg->raw_profiles_per_model  = i["raw_profiles_per_model"];
+        if (i["presence_check_min"].is<uint8_t>())     cfg->presence_check_min      = i["presence_check_min"];
+        if (i["empty_tolerance_mm"].is<uint32_t>())    cfg->empty_tolerance_mm      = i["empty_tolerance_mm"];
     }
 
-    config_set(cfg);
+    config_set(*cfg);
+    heap_caps_free(cfg);
     bool saved = config_save();
     vehicle_recog_on_config_changed();
     // SSR labeli se posodobijo avtomatično v ui_refresh_cb (LVGL task, ~1s)
@@ -623,71 +627,74 @@ static void _handleRadarConfigBody(AsyncWebServerRequest* req, uint8_t* data,
         return;
     }
 
+    // Config (~910B) alociramo na PSRAM — async_tcp stack je samo 4096B
+    Config* cfg = (Config*)heap_caps_malloc(sizeof(Config), MALLOC_CAP_SPIRAM);
+    if (!cfg) { _sendError(req, 500, "OOM"); return; }
+    *cfg = config_get();
+
     bool global_changed = false;
-    Config cfg_global = config_get();
 
     if (doc["persistence_n"].is<int>()) {
         uint8_t pn = (uint8_t)doc["persistence_n"].as<int>();
-        if (pn > 10) { _sendError(req, 400, "persistence_n izven obsega (0-10)"); return; }
-        cfg_global.radar_persistence_n = pn;
+        if (pn > 10) { heap_caps_free(cfg); _sendError(req, 400, "persistence_n izven obsega (0-10)"); return; }
+        cfg->radar_persistence_n = pn;
         global_changed = true;
     }
     if (doc["poll_interval_ms"].is<int>()) {
         uint32_t piv = (uint32_t)doc["poll_interval_ms"].as<int>();
         if (piv < RADAR_POLL_INTERVAL_MIN_MS || piv > RADAR_POLL_INTERVAL_MAX_MS) {
-            _sendError(req, 400, "poll_interval_ms izven obsega (10-100)"); return;
+            heap_caps_free(cfg); _sendError(req, 400, "poll_interval_ms izven obsega (10-100)"); return;
         }
-        cfg_global.radar_poll_interval_ms = piv;
+        cfg->radar_poll_interval_ms = piv;
         global_changed = true;
     }
     if (doc["max_consec_overflows"].is<int>()) {
         uint32_t mcov = (uint32_t)doc["max_consec_overflows"].as<int>();
         if (mcov < 1 || mcov > 100) {
-            _sendError(req, 400, "max_consec_overflows izven obsega (1-100)"); return;
+            heap_caps_free(cfg); _sendError(req, 400, "max_consec_overflows izven obsega (1-100)"); return;
         }
-        cfg_global.radar_max_consec_overflows = mcov;
+        cfg->radar_max_consec_overflows = mcov;
         global_changed = true;
     }
 
     if (global_changed) {
-        config_set(cfg_global);
+        config_set(*cfg);
         config_save();
         JsonDocument resp(&s_psram_alloc);
         resp["ok"]                   = true;
-        resp["persistence_n"]        = cfg_global.radar_persistence_n;
-        resp["poll_interval_ms"]     = cfg_global.radar_poll_interval_ms;
-        resp["max_consec_overflows"] = cfg_global.radar_max_consec_overflows;
+        resp["persistence_n"]        = cfg->radar_persistence_n;
+        resp["poll_interval_ms"]     = cfg->radar_poll_interval_ms;
+        resp["max_consec_overflows"] = cfg->radar_max_consec_overflows;
+        heap_caps_free(cfg);
         _sendJson(req, 200, resp);
         return;
     }
 
     if (!doc["sensor"].is<int>()) {
-        _sendError(req, 400, "sensor manjka");
-        return;
+        heap_caps_free(cfg); _sendError(req, 400, "sensor manjka"); return;
     }
     uint8_t sid = (uint8_t)doc["sensor"].as<int>();
-    if (sid >= 4) { _sendError(req, 400, "sensor izven obsega"); return; }
+    if (sid >= 4) { heap_caps_free(cfg); _sendError(req, 400, "sensor izven obsega"); return; }
 
-    Config cfg = config_get();
-    if (doc["max_dist"].is<int>())    cfg.radar_max_dist[sid]    = (uint8_t)doc["max_dist"].as<int>();
-    if (doc["move_sens"].is<int>())   cfg.radar_move_sens[sid]   = (uint8_t)doc["move_sens"].as<int>();
-    if (doc["static_sens"].is<int>()) cfg.radar_static_sens[sid] = (uint8_t)doc["static_sens"].as<int>();
-    if (doc["unmanned_s"].is<int>())  cfg.radar_unmanned_s[sid]  = (uint16_t)doc["unmanned_s"].as<int>();
+    if (doc["max_dist"].is<int>())    cfg->radar_max_dist[sid]    = (uint8_t)doc["max_dist"].as<int>();
+    if (doc["move_sens"].is<int>())   cfg->radar_move_sens[sid]   = (uint8_t)doc["move_sens"].as<int>();
+    if (doc["static_sens"].is<int>()) cfg->radar_static_sens[sid] = (uint8_t)doc["static_sens"].as<int>();
+    if (doc["unmanned_s"].is<int>())  cfg->radar_unmanned_s[sid]  = (uint16_t)doc["unmanned_s"].as<int>();
 
-    if (cfg.radar_max_dist[sid] > 8 || cfg.radar_move_sens[sid] > 100 ||
-        cfg.radar_static_sens[sid] > 100) {
-        _sendError(req, 400, "vrednost izven obsega"); return;
+    if (cfg->radar_max_dist[sid] > 8 || cfg->radar_move_sens[sid] > 100 ||
+        cfg->radar_static_sens[sid] > 100) {
+        heap_caps_free(cfg); _sendError(req, 400, "vrednost izven obsega"); return;
     }
 
-    config_set(cfg);
+    config_set(*cfg);
     config_save();
 
     bool reconfig_ok = hal_radar_reconfigure(
         (RadarSensorId)sid,
-        cfg.radar_max_dist[sid],
-        cfg.radar_move_sens[sid],
-        cfg.radar_static_sens[sid],
-        cfg.radar_unmanned_s[sid]
+        cfg->radar_max_dist[sid],
+        cfg->radar_move_sens[sid],
+        cfg->radar_static_sens[sid],
+        cfg->radar_unmanned_s[sid]
     );
 
     const RadarSensorStatus& rs = hal_radar_get_status((RadarSensorId)sid);
@@ -697,6 +704,7 @@ static void _handleRadarConfigBody(AsyncWebServerRequest* req, uint8_t* data,
     resp["config_ok"]       = rs.config_ok;
     resp["config_verified"] = rs.config_verified;
     if (!reconfig_ok) resp["warn"] = "konfiguracija na radar ni uspela — bo poskusil ob restartu";
+    heap_caps_free(cfg);
     _sendJson(req, 200, resp);
 }
 
@@ -1335,35 +1343,39 @@ static void _handlePartyConfigPost(AsyncWebServerRequest* req, uint8_t* data,
     if (deserializeJson(doc, data, len)) {
         _sendError(req, 400, "invalid JSON"); return;
     }
-    Config cfg = config_get();
+    // Config (~910B) alociramo na PSRAM — async_tcp stack je samo 4096B
+    Config* cfg = (Config*)heap_caps_malloc(sizeof(Config), MALLOC_CAP_SPIRAM);
+    if (!cfg) { _sendError(req, 500, "OOM"); return; }
+    *cfg = config_get();
     bool changed = false;
 
     if (doc["wled_ip"].is<const char*>()) {
         const char* ip = doc["wled_ip"].as<const char*>();
         size_t iplen = ip ? strlen(ip) : 0;
         if (iplen > 0 && iplen < 32) {
-            strncpy(cfg.wled_ip, ip, sizeof(cfg.wled_ip));
-            cfg.wled_ip[sizeof(cfg.wled_ip) - 1] = '\0';
+            strncpy(cfg->wled_ip, ip, sizeof(cfg->wled_ip));
+            cfg->wled_ip[sizeof(cfg->wled_ip) - 1] = '\0';
             changed = true;
-            LOG_INFO(TAG, "WLED IP nastavljen: %s", cfg.wled_ip);
+            LOG_INFO(TAG, "WLED IP nastavljen: %s", cfg->wled_ip);
         }
     }
     if (doc["resume_delay_s"].is<uint32_t>()) {
         uint32_t rd = doc["resume_delay_s"].as<uint32_t>();
         if (rd >= 5 && rd <= 300) {
-            cfg.party_resume_delay_s = rd;
+            cfg->party_resume_delay_s = rd;
             changed = true;
         }
     }
-    if (!changed) { _sendError(req, 400, "no valid fields"); return; }
+    if (!changed) { heap_caps_free(cfg); _sendError(req, 400, "no valid fields"); return; }
 
-    config_set(cfg);
+    config_set(*cfg);
     config_save();
 
     JsonDocument resp(&s_psram_alloc);
     resp["ok"]            = true;
-    resp["wled_ip"]       = cfg.wled_ip;
-    resp["resume_delay_s"]= cfg.party_resume_delay_s;
+    resp["wled_ip"]       = cfg->wled_ip;
+    resp["resume_delay_s"]= cfg->party_resume_delay_s;
+    heap_caps_free(cfg);
     _sendJson(req, 200, resp);
 }
 

@@ -189,6 +189,12 @@ static const uint8_t LD2410_FOOTER[4] = {0xF8, 0xF7, 0xF6, 0xF5};
 #define RADAR_POLL_INTERVAL_MIN_MS   10u
 #define RADAR_POLL_INTERVAL_MAX_MS  100u
 
+// Stuck sensor detekcija in recovery
+#define RADAR_STUCK_TIMEOUT_MS     30000u   // brez framov → recovery
+#define RADAR_REINIT_COOLDOWN_MS   15000u   // min čas med recovery poskusi
+#define RADAR_STARTUP_GRACE_MS     20000u   // ignoriraj pred 20s (config traja ~10s)
+#define RADAR_STUCK_CHECK_MS       10000u   // interval preverjanja stuck kanalov
+
 // ============================================================
 // INTERNI TIPI
 // ============================================================
@@ -215,6 +221,10 @@ typedef struct {
     uint32_t poll_overflows;        // skupaj OE! overflow v tej periodi
     uint32_t frames_ok_last;        // frames_ok ob začetku trenutne minute (za delta)
     uint32_t consec_overflows;      // zaporedni overflowi — za WARN log
+    // Stuck recovery stanje
+    uint8_t  stuck_level;           // 0=ok, 1=uart_reinit opravljen, čaka potrditev
+    uint32_t last_recovery_ms;      // čas zadnjega recovery poskusa
+    uint32_t recovery_count;        // skupaj recovery poskusov (za statistiko)
 } RadarChannel;
 
 typedef struct {
@@ -658,6 +668,113 @@ static void poll_one_channel(RadarChannel& rc) {
 }
 
 // ============================================================
+// recover_stuck_channel — dvonivojski escalating recovery
+//
+// Level 1 (stuck_level == 0 → 1):
+//   flush RX + sc16_init_channel + parser reset
+//   Odpravi: zamrzel UART kanal, parser v napačnem stanju
+//
+// Level 2 (stuck_level == 1, Level 1 ni pomagal):
+//   SC16 SW reset → reinit obeh kanalov → LD2410C reconfigure
+//   Odpravi: LD2410C v config mode, korupcija FIFO, I2C desync
+//
+// Kliče se iz radarTask vsakih RADAR_STUCK_CHECK_MS, mutex pridobi sam.
+// ============================================================
+
+static const char* s_ch_names[4] = {"Vhod", "Cesta_L", "Cesta_D", "Garaza"};
+
+static void recover_stuck_channel(uint8_t idx) {
+    RadarChannel& rc = s_radar.ch[idx];
+    rc.last_recovery_ms = millis();
+    rc.recovery_count++;
+
+    if (rc.stuck_level == 0) {
+        // Level 1: UART channel reinit + parser reset
+        RADW("[%s] STUCK >%us — Level 1: UART reinit (poskus #%lu)",
+             s_ch_names[idx],
+             (unsigned)(RADAR_STUCK_TIMEOUT_MS / 1000),
+             (unsigned long)rc.recovery_count);
+
+        SemaphoreHandle_t mtx = bsp_get_wire1_mutex();
+        if (xSemaphoreTake(mtx, pdMS_TO_TICKS(500)) == pdTRUE) {
+            ld2410_flush_rx(rc.chip_addr, rc.uart_ch);
+            bool ok = sc16_init_channel(rc.chip_addr, rc.uart_ch);
+            xSemaphoreGive(mtx);
+            if (!ok) RADW("[%s] Level 1: sc16_init_channel NAPAKA", s_ch_names[idx]);
+        } else {
+            RADW("[%s] Level 1: Wire1 mutex timeout", s_ch_names[idx]);
+        }
+        memset(&rc.parser, 0, sizeof(rc.parser));
+        rc.stuck_level = 1;
+        rc.status.stuck_level = 1;
+
+    } else {
+        // Level 2: SW chip reset + reinit obeh kanalov + LD2410C reconfigure
+        RADW("[%s] STUCK Level 2: SC16 SW reset + LD2410C reconfigure (skupaj %lu recovery)",
+             s_ch_names[idx], (unsigned long)rc.recovery_count);
+
+        uint8_t chip_addr = rc.chip_addr;
+        uint8_t base = (chip_addr == SC16_ADDR_1) ? 0 : 2;
+
+        // SW reset čipa in reinit obeh UART kanalov
+        SemaphoreHandle_t mtx = bsp_get_wire1_mutex();
+        if (xSemaphoreTake(mtx, pdMS_TO_TICKS(500)) == pdTRUE) {
+            sc16_write(chip_addr, SC16_REG_GLOBAL(REG_IOCONTROL), IOCONTROL_SW_RESET);
+            vTaskDelay(pdMS_TO_TICKS(10));
+            for (uint8_t j = base; j < base + 2; j++) {
+                bool ok = sc16_init_channel(chip_addr, s_radar.ch[j].uart_ch);
+                s_radar.ch[j].status.active = ok;
+                memset(&s_radar.ch[j].parser, 0, sizeof(s_radar.ch[j].parser));
+                RADI("[%s] Level 2: sc16_init_channel %s", s_ch_names[j], ok ? "OK" : "NAPAKA");
+            }
+            xSemaphoreGive(mtx);
+        } else {
+            RADW("[%s] Level 2: Wire1 mutex timeout pri SW reset", s_ch_names[idx]);
+            return;
+        }
+        vTaskDelay(pdMS_TO_TICKS(100));
+
+        // LD2410C reconfigure za oba kanala na tem čipu
+        const Config cfg = config_get();
+        for (uint8_t j = base; j < base + 2; j++) {
+            RadarChannel& rj = s_radar.ch[j];
+            if (!rj.status.active) continue;
+
+            SemaphoreHandle_t mtx2 = bsp_get_wire1_mutex();
+            if (xSemaphoreTake(mtx2, pdMS_TO_TICKS(500)) != pdTRUE) {
+                RADW("[%s] Level 2: Wire1 mutex timeout pri reconfigure", s_ch_names[j]);
+                continue;
+            }
+            bool ok = false;
+            do {
+                if (!ld2410_open_config(rj.chip_addr, rj.uart_ch)) break;
+                vTaskDelay(pdMS_TO_TICKS(50));
+                if (!ld2410_set_params(rj.chip_addr, rj.uart_ch,
+                                       cfg.radar_max_dist[j],
+                                       cfg.radar_unmanned_s[j])) break;
+                vTaskDelay(pdMS_TO_TICKS(50));
+                if (!ld2410_set_sensitivity(rj.chip_addr, rj.uart_ch,
+                                            cfg.radar_move_sens[j],
+                                            cfg.radar_static_sens[j])) break;
+                ok = true;
+            } while (false);
+            ld2410_close_config(rj.chip_addr, rj.uart_ch);
+            vTaskDelay(pdMS_TO_TICKS(500));
+            xSemaphoreGive(mtx2);
+
+            rj.status.config_ok = ok;
+            RADI("[%s] Level 2 reconfigure: %s", s_ch_names[j], ok ? "OK" : "NAPAKA");
+        }
+
+        // Po Level 2 reset stuck_level → naslednji stuck bo znova od Level 1
+        rc.stuck_level = 0;
+        rc.status.stuck_level = 0;
+    }
+
+    rc.status.recovery_count = rc.recovery_count;
+}
+
+// ============================================================
 // RADAR TASK — nova polling arhitektura v2.0
 // ============================================================
 
@@ -812,6 +929,39 @@ static void radarTask(void* pvParams) {
             // Inkrementiraj i2c_errors samo če se dogaja pretirano pogosto.
             // Za zdaj tiho preskočimo — naslednji tick bo verjetno uspešen.
             RADD("radarTask: Wire1 mutex timeout (TOF/drug modul aktiven) — preskočena iteracija");
+        }
+
+        // --- Stuck sensor detekcija in recovery (vsake RADAR_STUCK_CHECK_MS) ---
+        {
+            static uint32_t last_stuck_check_ms = 0;
+            uint32_t now_sc = millis();
+            if (now_sc > RADAR_STARTUP_GRACE_MS &&
+                (now_sc - last_stuck_check_ms) >= RADAR_STUCK_CHECK_MS) {
+                last_stuck_check_ms = now_sc;
+
+                for (uint8_t i = 0; i < RADAR_SENSOR_COUNT; i++) {
+                    RadarChannel& rc = s_radar.ch[i];
+                    if (!rc.status.active) continue;
+
+                    uint32_t since_frame = (rc.status.last_frame_ms > 0)
+                        ? (now_sc - rc.status.last_frame_ms)
+                        : now_sc;   // nikoli ni prejemal → merimo od zagona
+
+                    bool is_stuck = (since_frame >= RADAR_STUCK_TIMEOUT_MS);
+                    bool cooldown_ok = (now_sc - rc.last_recovery_ms) >= RADAR_REINIT_COOLDOWN_MS;
+
+                    if (is_stuck && cooldown_ok) {
+                        recover_stuck_channel(i);
+                    } else if (!is_stuck && rc.stuck_level > 0) {
+                        RADI("[%s] Recovery uspešen po %lu poskusih (level bil %d)",
+                             s_ch_names[i],
+                             (unsigned long)rc.recovery_count,
+                             (int)rc.stuck_level);
+                        rc.stuck_level = 0;
+                        rc.status.stuck_level = 0;
+                    }
+                }
+            }
         }
 
         // --- Interval timing ---
@@ -1041,11 +1191,27 @@ void hal_radar_log_stats() {
 }
 
 void hal_radar_recovery_check() {
-    // Ohranjena iz v1.x — kliči iz sensorTask vsakih 10 minut.
-    // V polling načinu je manj kritična (ni IRQ pin stuck LOW problema)
-    // ampak ohranimo za konsistentnost z v1.x API.
+    // Health status log — kliči iz sensorTask vsakih 10 minut za nadzor.
+    // Dejansko okrevanje se izvaja samodejno v radarTask vsakih 10s.
     if (!s_radar.initialized) return;
-    RADD("hal_radar_recovery_check: polling arhitektura, ni IRQ pin za preverjanje");
+
+    uint32_t now = millis();
+    RADI("=== Radar health (recovery avtomatski v radarTask) ===");
+    for (uint8_t i = 0; i < RADAR_SENSOR_COUNT; i++) {
+        const RadarChannel& rc = s_radar.ch[i];
+        if (!rc.status.active) {
+            RADI("  [%-8s]: NEAKTIVEN", s_ch_names[i]);
+            continue;
+        }
+        uint32_t since_s = (rc.status.last_frame_ms > 0)
+            ? (now - rc.status.last_frame_ms) / 1000 : 9999;
+        RADI("  [%-8s]: frames=%lu zadnji=%lus recovery=%lu%s",
+             s_ch_names[i],
+             (unsigned long)rc.status.frames_ok,
+             (unsigned long)since_s,
+             (unsigned long)rc.recovery_count,
+             rc.stuck_level ? " [RECOVERY V TEKU]" : "");
+    }
 }
 
 bool hal_radar_reconfigure(RadarSensorId id,
