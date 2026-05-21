@@ -193,7 +193,7 @@ static const char* NVS_SSR_LBL[] = {"ssr_lbl_0","ssr_lbl_1","ssr_lbl_2","ssr_lbl
 #define CFG_MIN_EMPTY_TOL       50u
 #define CFG_MAX_EMPTY_TOL       500u
 
-// Radar polling (v2.0)
+// Radar polling
 #define CFG_MIN_RADAR_POLL_IV    10u
 #define CFG_MAX_RADAR_POLL_IV   100u
 #define CFG_MIN_RADAR_MAX_OVF    1u

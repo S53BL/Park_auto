@@ -4,34 +4,16 @@
 // Verzija : 3.4.0  |  Datum: 2026-05
 // ============================================================
 //
-// v3.4.0: alarm sistem — GET/POST /api/alarm, /api/alarm/test, /api/alarm/pin;
-//         alarm stanje v /api/status/light; decisions.md ADR-012, ADR-013
-// v3.3.0: _sendJson PSRAM fix — JsonDocument & _json_buf v PSRAM, brez cbuf leak
-//         ob TCP RST. AsyncBasicResponse namesto AsyncResponseStream.
-// v3.2.0: AsyncWebServer dinamična kreacija pred begin() — fiksira tcp_accept
-//         bug pri statičnem globalnem objektu (ram_problem4.md Patch 5)
-// v3.1.0: zamenjava ESP32Async → me-no-dev (ram_problem4.md)
-// SPREMEMBA v3.0: VRNJENO na ESPAsyncWebServer (ESP32Async/ESPAsyncWebServer)
-//
-// ZAKAJ JE BIL SINHRONI WebServer NAPAKA (v2.0):
-//   Sinhroni WebServer zahteva periodični handleClient() klic.
+// ⚠ Ne zamenjuj z sinhronim WebServer. Razlog:
 //   Moderni brskalnik odpre 6 vzporednih HTTP/1.1 konekcij ob nalaganju.
-//   LwIP sprejme vse 6 in jih drži dokler handleClient() ne pride do njih.
-//   6 konekcij × ~3 KB = ~18 KB > 13 KB prostega SRAM-a → ECONNRESET.
-//   To ni bug — je strukturna inkompatibilnost. Nobena koda je ne reši.
-//   Skupaj ~15 iteracij in tedni dela brez uspeha.
+//   Sinhroni handleClient() ne more servirati 6 konekcij hkrati →
+//   LwIP jih drži v SRAM → 6 × ~3 KB > 13 KB prostega SRAM → ECONNRESET.
+//   To je strukturna inkompatibilnost, ne bug. Ref: ram_problem3.md.
 //
-// ZAKAJ DELUJE ZDAJ:
-//   SD midnight flush (sd_midnight_flush.cpp) odpravlja originalni vzrok:
-//   SD_MMC.open() se kliče samo enkrat na dan ob 00:01 — ni DMA spike.
-//   AsyncTCP procesira vsako konekcijo takoj kot callback — brez kopičenja.
-//   SRAM ~13 KB je mejno ampak zadostuje brez SD DMA konkurence.
+// AsyncTCP procesira vsako konekcijo takoj kot callback — brez kopičenja.
+// SD midnight flush (sd_midnight_flush.cpp) preprečuje DMA spike ob polnoči.
 //
-// ⚠ OPOZORILO: Ne vračaj sinhroni WebServer. Razlog je dokumentiran zgoraj.
-//   Datoteka: ram_problem3.md, Sekcija 3 (Faza 2) in Sekcija 9 (L3).
-//
-// HANDLER LOGIKA: nespremenjena iz v2.0 — samo adapter layer obrnjen nazaj.
-//   _server.arg() / _server.send() → AsyncWebServerRequest* req
+// HANDLER LOGIKA: _server.arg() / _server.send() → AsyncWebServerRequest* req
 // ============================================================
 
 #include "web_ui.h"

@@ -41,25 +41,18 @@
 // LVGL
 #define LVGL_BUF_LINES      40
 #define LVGL_TICK_MS        5
-// LVGL_HANDLER_MS: povečano 5→10ms (2026-05, CPU razbremenitev)
-// Razlog: 5ms = 200Hz lvglTask tick — preveč za ta projekt.
-//   10ms = 100Hz → polovica CPU obremenitve lvglTask.
-//   Vizualni efekt: animacije ostanejo gladke (100fps > 60fps zaslona).
+// LVGL_HANDLER_MS: 10ms = 100Hz lvglTask tick.
+//   Animacije ostanejo gladke (100fps > 60fps zaslona).
 //   Touch odzivnost: 10ms zamuda je neopazna (prag zaznavanja ~50ms).
-#define LVGL_HANDLER_MS     10    // SPREMENJEN iz 5ms (2026-05)
+#define LVGL_HANDLER_MS     10
 // UI_REFRESH_TIMER_MS: interval LVGL timer za Opcija B display polling.
-// 1000ms namesto 500ms — countdown bo manj gladek (±1s natančnost)
-//   ampak LVGL timer obremenitev se prepolovi.
-//   Za SSR countdown prikaz je 1s natančnost povsem sprejemljiva.
-// Lokacija: hal_display.cpp ui_refresh_cb timer kreacija.
-#define UI_REFRESH_TIMER_MS 1000  // NOVO (2026-05) — prej hardcoded 500ms
+//   1000ms → SSR countdown natančnost ±1s, kar je dovolj.
+//   Lokacija: hal_display.cpp ui_refresh_cb timer kreacija.
+#define UI_REFRESH_TIMER_MS 1000
 
 // ============================================================
 // 3. I2C BUS KONFIGURACIJA
 // ============================================================
-// FAZA 0: samo interni bus (Wire, IO7/IO8) je aktiven.
-// Wire1 (IO17/IO18) je zakomeniran — nič ni priklopljeno.
-//
 // Interni bus — Wire (Waveshare BSP):
 //   AXS15231B touch + TCA9554 (touch reset @ 0x20)
 //   AXP2101 PMU, QMI8658 IMU, PCF85063 RTC, ES8311 Audio
@@ -68,10 +61,9 @@
 // Senzorski bus — Wire1 (IO17/IO18):
 //   TCA9548A (0x70), SC16IS752 #1 (0x48), SC16IS752 #2 (0x4C)
 //   MCP23017 (0x20), BH1750 (0x23)
-//   ⚠ FAZA 0: ZAKOMENTIRANO
 
-#define I2C_SDA             17      // Wire1 SDA (za kasnejše faze)
-#define I2C_SCL             18      // Wire1 SCL (za kasnejše faze)
+#define I2C_SDA             17      // Wire1 SDA
+#define I2C_SCL             18      // Wire1 SCL
 #define I2C_FREQ_HZ         100000
 
 // ============================================================
@@ -88,7 +80,7 @@
 // ============================================================
 // 5. I2C NASLOVI ČIPOV
 // ============================================================
-// Wire1 (senzorski — FAZA 0 neaktiven):
+// Wire1 (senzorski bus):
 #define I2C_ADDR_TCA9548A   0x70
 #define I2C_ADDR_TOF        0x29
 #define I2C_ADDR_SC16_1     0x48
@@ -97,7 +89,7 @@
 #define I2C_ADDR_BH1750     0x23
 
 // ============================================================
-// 6. MCP23017 PORT ASSIGNMENT (za kasnejše faze)
+// 6. MCP23017 PORT ASSIGNMENT
 // ============================================================
 #define MCP_GPA0_RAMPAGOR   0x01
 #define MCP_GPA1_RAMPALUC   0x02
@@ -115,7 +107,7 @@
 #define MCP_PORTB_PULLUP    0xFE
 
 // ============================================================
-// 7. TCA9548A KANALI (za kasnejše faze)
+// 7. TCA9548A KANALI
 // ============================================================
 #define TCA_CH_TOF_H_A      0
 #define TCA_CH_TOF_P1_A     1
@@ -124,13 +116,11 @@
 #define TCA_CH_TOF_P1_B     4
 #define TCA_CH_TOF_P2_B     5
 
-// TOF_POLL_IDLE_MS: povečano 200→500ms (2026-05, Wire1 razbremenitev)
-// Razlog: TOF v IDLE fazi samo čaka na vstop vozila — 500ms latenca je
-//   neopazna za uporabnika. Wire1 zasedenost: 5ms/500ms = 1% (prej 2.5%).
-// OPOMBA: TOF WATCHDOG (600s) se ne spreminja — ostaja nespremenjen.
-#define TOF_POLL_IDLE_MS    500   // SPREMENJEN iz 200ms (2026-05)
+// TOF_POLL_IDLE_MS: 500ms — TOF v IDLE samo čaka na vstop vozila.
+//   500ms latenca je neopazna za uporabnika; Wire1 zasedenost = 1%.
+#define TOF_POLL_IDLE_MS    500
 #define TOF_POLL_DETECT_MS  50
-// F1: DETECT faza timeout — po 5 min brez detekcije → nazaj v IDLE
+// DETECT faza timeout — po 5 min brez detekcije → nazaj v IDLE
 #define TOF_DETECT_TIMEOUT_MS   (5UL * 60UL * 1000UL)
 // TOF IDLE watchdog interval — health-check meritev H_A + H_B vsakih 10 minut
 #define TOF_WATCHDOG_INTERVAL_MS    600000
@@ -140,7 +130,7 @@
 #define TCA_RECOVERY_WAIT_MS 10
 
 // ============================================================
-// 8. RADAR (za kasnejše faze)
+// 8. RADAR
 // ============================================================
 #define RADAR_COUNT         4
 // XTAL na CJMCU-SC16IS752 modulu je 1.8432 MHz (potrjeno).
@@ -171,23 +161,9 @@
 // Vrednost je nastavljiva — ne hardkodiraj v hal_radar.cpp!
 // Razpon: min 50ms (agresivno), max 1000ms (počasno).
 #define RADAR_PUBLISH_INTERVAL_MS   100
-// RADAR_DRAIN_MAX_LOOPS: max iteracij drain zanke v process_chip_irq()
-// (2026-05, OE! odprava).
-//
-// Zakaj 4 in ne 32:
-//   LD2410C frame = 23 bajtov. SC16IS752 FIFO trigger = 8 bajtov.
-//   Normalno: 2-3 drain iteracije na frame (8 + 8 + 7 bajtov).
-//   max_loops=4 je varen margin brez nepotrebnega Wire1 blokiranje.
-//
-//   Stara vrednost max_loops=32:
-//     Drain čas = 32 × 3 I2C transakcije × ~1ms = do 96ms.
-//     Med tem chip2 FIFO (64B) se zapolni v 5.5ms → OE! neizogibni.
-//
-//   Nova vrednost max_loops=4:
-//     Drain čas = 4 × 3ms = 12ms.
-//     Z round-robin (radarTask zanka): chip1 draina 1 iter. (~3ms),
-//     nato takoj chip2 → chip2 čaka max 3ms << 5.5ms FIFO zapolnitev.
-//
+// RADAR_DRAIN_MAX_LOOPS: max iteracij drain zanke per chip.
+//   LD2410C frame = 23 B, FIFO trigger = 8 B → normalno 2-3 iteracije.
+//   4 = varen margin; več → Wire1 blokada raste, chip2 OE! neizogiben.
 //   Vrednost je nastavljiva — ne hardkodiraj v hal_radar.cpp!
 #define RADAR_DRAIN_MAX_LOOPS   4
 // RADAR_OE_LOG_INTERVAL_MS: minimalni interval med OE! log izpisi per kanal.
@@ -200,7 +176,7 @@
 // Odkomentiraj za debug konfiguracije, zakomentiraj po uspešnem testu.
 // #define RADAR_DEBUG_PROTOCOL
 
-// Radar polling interval (v2.0 arhitektura)
+// Radar polling interval
 #define RADAR_POLL_INTERVAL_MS_DEFAULT   50u
 #define RADAR_POLL_INTERVAL_MIN_MS       10u
 #define RADAR_POLL_INTERVAL_MAX_MS      100u
@@ -242,42 +218,25 @@
 #define CORE_WIFI           0
 #define CORE_APP            1
 
-// wifiTask stack: 4096 B (2026-05: znižano iz 8192)
-// AsyncTCP ne potrebuje handleClient() v wifiTask — handlers tečejo v AsyncTCP tasku.
-// wifiTask po zagonu: samo watchdog zanka + NTP check vsakih 6h.
-// Stack free v originalni 4096 arhitekturi: 956-964 B free → dovolj rezerve.
-// Historični razlog za 8192: sinhroni WebServer iteracije — ZASTARELO z v3.0.
-// ⚠ Stack MORA biti v SRAM (ne PSRAM) — WiFi init kliče flash ops.
+// ⚠ TASK_WIFI_STACK mora biti v SRAM (ne PSRAM) — WiFi init kliče flash ops.
+//   AsyncTCP handlers tečejo v svojem tasku; wifiTask po zagonu = watchdog + NTP.
 #define TASK_WIFI_STACK     5120
-// 2026-05: dvigneno iz 4096. Izmerjeno: 784 B free / 4096 → premalo rezerve
-// ob reconnect + NTP resync + logging kombinaciji.
 #define TASK_WIFI_PRIO      1
-// TASK_EVENTBUS_STACK: zmanjšano 6144→4096 (2026-05, optimizacija RAM)
-// Razlog: eventBusTask handlerji (on_button_ssr, on_radar_motion itd.)
-//   so po SsrCmd queue refaktoringu SAMO enqueue operacije (~50B stack).
-//   Ni več Wire1 klicev v handlerjih → ni več 512B logger stack nevarnosti.
-//   4096B z PSRAM overhead daje faktor varnosti >2×.
+// TASK_EVENTBUS_STACK: handlerji so samo enqueue (~50B stack) — ni Wire1 klicev.
 #define TASK_EVENTBUS_STACK 4096
 #define TASK_EVENTBUS_PRIO  5
 #define TASK_SENSOR_STACK   6144
 #define TASK_SENSOR_PRIO    4
-#define TASK_LED_STACK      6144   // povečano 2026-05: signal_led ExplodeParticles + float aritmetika
+// TASK_LED_STACK: signal_led ExplodeParticles + float aritmetika zahtevata večji stack.
+#define TASK_LED_STACK      6144
 #define TASK_LED_PRIO       3
 #define TASK_LVGL_STACK     8192
 #define TASK_LVGL_PRIO      2
-// TASK_APP_STACK: zmanjšano 8192→6144 (2026-05, optimizacija RAM)
-// Razlog: dejanski stack ob zagonu = 5748B free / 8192B total = samo
-//   2444B porabljenih. Worst-case med SSR sekvenco: ~2000B dodatno =
-//   skupaj ~4500B. 6144B daje faktor varnosti 1.35× — zadostuje.
-//   Ob dvomih: log "appTask stack ob zagonu" bo pokazal dejanski usage.
 #define TASK_APP_STACK      6144
 #define TASK_APP_PRIO       3
-// RADAR_TASK_STACK: povečano iz 4096 na 8192 (2026-05, stabilizacija)
-// Razlog: radarTask teče v PSRAM (MALLOC_CAP_SPIRAM). FreeRTOS PSRAM stack
-// ima ~1.5-2× overhead na frame. IDF 5.3 i2c_master_transmit() porabi ~800B,
-// LOG_WARN format buffer ~512B, process_chip_irq() drain zanka ~300B.
-// Worst-case z PSRAM overhead: ~4140B → preseže 4096 → stack canary crash.
-// 8192B daje faktor varnosti 2× brez opaznega vpliva na PSRAM porabo.
+// RADAR_TASK_STACK: radarTask teče v PSRAM — FreeRTOS PSRAM stack ima ~1.5-2× overhead.
+//   IDF 5.3 i2c_master_transmit() ~800B + LOG_WARN buffer ~512B → worst-case ~4140B.
+//   8192B daje faktor varnosti 2×.
 #define RADAR_TASK_STACK    8192
 
 #define EVENTBUS_QUEUE_SIZE 16
@@ -305,7 +264,7 @@
 #define LED_NIGHT_HOUR_END      6
 
 // ============================================================
-// 13. DTW (za kasnejše faze)
+// 13. DTW
 // ============================================================
 #define VEH_ENTRY_THRESH_MM     3500
 #define VEH_DELTA_FILTER_MM     15
@@ -331,13 +290,10 @@
 // ============================================================
 // 15. LOGGER
 // ============================================================
-// LOG_RAM_BUF_SIZE: povečano 16KB→128KB (2026-05, Ideja 1 — SD kot backup medij)
-// Razlog: SD se ne piše med normalnim delovanjem → logi živijo cel dan v PSRAM.
-// 128 KB pri ~80 B/vrstica = ~1600 vrstic = dovolj za cel dan logov.
-// PSRAM ima ~6.5 MB prostora — 128 KB je zanemarljivo.
+// LOG_RAM_BUF_SIZE: SD se ne piše med normalnim delovanjem → logi živijo v PSRAM.
+//   128 KB / ~80 B/vrstica ≈ 1600 vrstic — dovolj za cel dan logov.
 #define LOG_RAM_BUF_SIZE        (128 * 1024)
-// LOG_FLUSH_THRESHOLD: neuporabljeno (sd_buf_write ni več v logger_log, 2026-05).
-// Vrednost ohranjena za logger_flush() ki ostane za eksplicitne klice.
+// LOG_FLUSH_THRESHOLD: neuporabljeno v rednem toku; logger_flush() ga upošteva pri eksplicitnih klicih.
 #define LOG_FLUSH_THRESHOLD     15
 #define LOG_WEB_LINES           200
 // LOG_ANSI_COLORS: ANSI escape kode v Serial izhodu (ne SD/RAM buffer)

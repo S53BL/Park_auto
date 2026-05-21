@@ -7,80 +7,19 @@
 // ============================================================
 //
 // ============================================================
-// ZAKAJ SMO ZAMENJALI IRQ/PIN-POLLING Z ČISTIM PERIODIČNIM POLLINGOM
+// ZAKAJ PERIODIČNI POLLING (ne ISR / drain zanka)
 // ============================================================
 //
-// PREJŠNJA ARHITEKTURA (v1.x — IRQ-pin polling z drain zanko):
+// LD2410C pošilja @ 115200 baud → SC16IS752 FIFO nikoli ni popolnoma
+// prazen → IRQ pin je praktično stalno LOW → IRQ-pin polling degenerira
+// v busy-loop. gpio_isr_register() na ESP32-S3 / IDF 5.3 povzroča
+// ipc_task stack overflow (1KB) → ISR arhitektura ni izvedljiva.
 //
-//   while(true) {
-//     if (digitalRead(IO41) == LOW) process_chip_irq(0);  // drain zanka
-//     if (digitalRead(IO42) == LOW) process_chip_irq(1);  // drain zanka
-//     vTaskDelay(5ms);
-//   }
-//
-//   process_chip_irq() je implementirala Linux kernel sc16is7xx.c vzorec:
-//   do { keep_polling |= process_one_channel(); } while (keep_polling && --max_loops);
-//
-//   Problemi ki so jih povzročili:
-//
-//   1. IRQ pin ostane LOW ves čas ko je v FIFO kakšen bajt.
-//      LD2410C pošilja @ 115200 baud → FIFO nikoli ni popolnoma prazen
-//      → IRQ pin je praktično STALNO LOW → pseudo-busy-loop.
-//
-//   2. max_loops=4 je arbitrarna omejitev brez semantičnega pomena.
-//      Ko se doseže → log "max_loops=4 dosežen" → videti kot napaka,
-//      čeprav je to normalno delovanje. Napaka ni bila v kodi, ampak v
-//      dizajnu: drain zanka po definiciji ne more "zaključiti" pri
-//      neprekinjeni stream komunikaciji.
-//
-//   3. Wire1 mutex je bil pridobivan znotraj drain zanke (per-chip
-//      acquire/release v vsaki iteraciji). Pri rr_loops = 2×4 = 8
-//      iteracij × ~12ms = do 96ms blokade Wire1 → TOF senzorji čakajo.
-//
-//   4. Zapletena round-robin logika (chip1_pending, chip2_pending,
-//      rr_loops) je povzročala OE! napake ker je bila zakasnitev med
-//      chip1 in chip2 servicing nepredvidljiva.
-//
-// NOVA ARHITEKTURA (v2.0 — čisti periodični polling):
-//
-//   while(true) {
-//     t_start = millis();
-//     xSemaphoreTake(Wire1_mutex, poll_interval/2);
-//     za vsak kanal (0..3):
-//       rxlvl = sc16_read(RXLVL)
-//       if rxlvl > 0: burst_read → parse → callback
-//       lsr = sc16_read(LSR)
-//       if lsr & OE: flush_rx() + increment overflow counter
-//     xSemaphoreGive(Wire1_mutex);
-//     vTaskDelay(poll_interval - elapsed);
-//   }
-//
-//   Prednosti:
-//
-//   1. PREDVIDLJIVO obnašanje: polling vsakih `radar_poll_interval_ms`
-//      (nastavljivo 10–100ms, default 50ms). Ni zanašanja na IRQ pin,
-//      ni drain zank, ni max_loops.
-//
-//   2. Mutex pridobimo ENKRAT za vse 4 kanale → Wire1 blokada je
-//      maksimalno 4×(RXLVL read + burst read + LSR read) = ~8ms worst case.
-//      Prejšnja arhitektura: do 96ms. Znižanje za 12×.
-//
-//   3. OE! overflow je normalen pojav ko je procesor zaseden (TOF,
-//      LVGL, WiFi). Zdaj ga obravnavamo: flush FIFO → discard frame →
-//      nadaljujemo. Overflow counter per-sensor → minutni log z %.
-//
-//   4. TOF senzorji (Wire1 mutex odjemalec) imajo prednost:
-//      mutex timeout v radarTask = poll_interval/2, TOF timeout = 500ms.
-//      Če TOF drži mutex → radarTask preskoci to iteracijo, next tick.
-//
-//   5. Zmanjšana kompleksnost: odstranjeni process_chip_irq(),
-//      process_one_channel(), round-robin blok, rr_loops, keep_polling.
-//      Zamenjano z ~30 vrsticami direktnega RXLVL/LSR branja.
-//
-//   KOMPROMIS: latenca odziva ~poll_interval/2 namesto <1ms z ISR.
-//   Za to aplikacijo (osvetlitev, alarm) je 25ms latenca popolnoma
-//   sprejemljiva. ISR arhitektura ni dosegljiva na ESP32-S3 Arduino
-//   z IDF 5.3 (gpio_isr_register → ipc_task 1KB stack overflow).
+// Periodični polling rešuje oba problema:
+//   - Wire1 mutex ENKRAT za vse 4 kanale → max ~8ms blokada
+//     (IRQ-pin drain zanka z round-robin: do 96ms → TOF zamude)
+//   - OE! overflow = normalen pojav ob zasedenem Wire1 → flush + continue
+//   - Latenca ~poll_interval/2 ≤ 25ms — za prižig luči sprejemljivo
 //
 // ============================================================
 
@@ -102,7 +41,6 @@
 
 // ============================================================
 // SC16IS752 — REGISTER MAPA
-// (identično v1.x — register dostop se ni spremenil)
 // ============================================================
 
 #define REG_RHR      0x00
@@ -128,9 +66,8 @@
 #define SC16_REG(reg, ch)    ((uint8_t)(((reg) << 3) | ((ch) << 1)))
 #define SC16_REG_GLOBAL(reg) ((uint8_t)((reg) << 3))
 
-// IER — samo RX data interrupt (bit 0). V polling načinu line-status
-// interrupt (bit 2) ni potreben — LSR beremo direktno v vsaki iteraciji.
-// V primerjavi z v1.x (IER=0x05) znižamo interrupt load na SC16IS752.
+// IER — samo RX data interrupt (bit 0). Line-status interrupt (bit 2)
+// ni potreben — LSR beremo direktno v vsaki polling iteraciji.
 #define IER_RX_ONLY     0x01    // bit 0: RHR interrupt (RX data available)
 
 // LSR — relevantni biti
@@ -246,7 +183,6 @@ static RadarState s_radar;
 // I2C POMOŽNE FUNKCIJE
 // Vse klicati samo iz task konteksta (ne ISR)!
 // Wire1 mutex mora biti pridobljen pred klicem.
-// (identično v1.x)
 // ============================================================
 
 static bool sc16_write(uint8_t addr, uint8_t subaddr, uint8_t val) {
@@ -301,8 +237,7 @@ static bool sc16_write_uart(uint8_t addr, uint8_t ch,
 }
 
 // ============================================================
-// FLUSH RX — izprazni SC16IS752 RX FIFO
-// Ohranjena iz v1.x — jo kličemo ob overflow za clean state.
+// FLUSH RX — izprazni SC16IS752 RX FIFO ob overflow za clean state.
 // Wire1 mutex mora biti pridobljen pred klicem.
 // ============================================================
 static void ld2410_flush_rx(uint8_t addr, uint8_t ch) {
@@ -332,7 +267,6 @@ static void ld2410_flush_rx(uint8_t addr, uint8_t ch) {
 
 // ============================================================
 // sc16_read_response — preberi config ACK odgovor (za LD2410C konfiguriranje)
-// Ohranjena iz v1.x — nespremenjena.
 // ============================================================
 static uint8_t sc16_read_response(uint8_t addr, uint8_t ch,
                                    uint8_t* buf, uint8_t max_len,
@@ -387,7 +321,7 @@ static uint8_t sc16_read_response(uint8_t addr, uint8_t ch,
 }
 
 // ============================================================
-// LD2410C KONFIGURACIJSKI UKAZI — enako kot v1.x
+// LD2410C KONFIGURACIJSKI UKAZI
 // ============================================================
 
 static const uint8_t LD2410_CFG_HEADER[4] = {0xFD, 0xFC, 0xFB, 0xFA};
@@ -491,7 +425,6 @@ static bool ld2410_verify_params(uint8_t chip_addr, uint8_t uart_ch,
 
 // ============================================================
 // SC16IS752 — inicializacija enega UART kanala
-// (identično v1.x, IER spremenjen na IER_RX_ONLY=0x01)
 // ============================================================
 
 static bool sc16_init_channel(uint8_t addr, uint8_t ch) {
@@ -525,7 +458,6 @@ static bool sc16_init_channel(uint8_t addr, uint8_t ch) {
 
 // ============================================================
 // LD2410C FRAME PARSER — en bajt naenkrat
-// (identično v1.x — parser je neodvisen od I/O arhitekture)
 // ============================================================
 
 static bool parse_byte(FrameParser& p, uint8_t b, RadarFrame& out, RadarSensorId id) {
@@ -574,19 +506,10 @@ static bool parse_byte(FrameParser& p, uint8_t b, RadarFrame& out, RadarSensorId
 // ============================================================
 // poll_one_channel — preberi en UART kanal v eni polling iteraciji
 //
-// ARHITEKTURNA ODLOČITEV: RXLVL-direktni pristop namesto IIR-driven:
-//
-//   Prejšnja verzija (v1.x):
-//     sc16_read(IIR) → preveri tip interrupta → sc16_read(RXLVL) → burst read
-//     = 3 I2C transakcije minimum per kanal, plus IIR silicon bug workaround.
-//
-//   Nova verzija (v2.0):
-//     sc16_read(RXLVL) → če > 0: burst read
-//     sc16_read(LSR)   → preveri overflow
-//     = 2 I2C transakcije normalno, 3 ob overflowu.
-//
-//   Skupni prihranek: 4 kanali × (3→2) = 4 I2C transakcij manj per iteracija.
-//   Pri 50ms intervalu = 80 transakcij/s manj na Wire1 busu.
+// RXLVL-direktni pristop (ne IIR-driven):
+//   sc16_read(RXLVL) → če > 0: burst read; sc16_read(LSR) → preveri overflow.
+//   = 2 I2C transakcije normalno, 3 ob overflowu. IIR silicon bug se izogibamo.
+//   4 kanali × 2 transakciji = 8 I2C klicev per polling iteracija.
 //
 // Kliče se samo iz radarTask, ki drži Wire1 mutex.
 // ============================================================
@@ -617,7 +540,7 @@ static void poll_one_channel(RadarChannel& rc) {
                 rc.status.last_frame_ms = millis();
 
                 // Throttle callback — max 1× per RADAR_PUBLISH_INTERVAL_MS
-                // (definiran v config.h — nespremenjen iz v1.x)
+                // (definiran v config.h)
                 uint32_t now_ms = millis();
                 if (s_radar.callback &&
                     (now_ms - rc.status.last_publish_ms) >= RADAR_PUBLISH_INTERVAL_MS) {
@@ -638,13 +561,12 @@ static void poll_one_channel(RadarChannel& rc) {
     if (!sc16_read(addr, SC16_REG(REG_LSR, ch), lsr)) return;
 
     if (lsr & LSR_OVERRUN_ERR) {
-        rc.status.parse_errors++;   // štejem v parse_errors enako kot v1.x za konsistentnost
+        rc.status.parse_errors++;   // OE štejemo skupaj s parse_errors za konsistentnost statistike
         rc.status.oe_count++;
         rc.poll_overflows++;
         rc.consec_overflows++;
 
-        // Flush FIFO — zavrži vse bajte ki so se nakopičili med zasedenim Wire1.
-        // Obstoječi ld2410_flush_rx() je preizkušen in ohranjen iz v1.x.
+        // Flush FIFO — zavrži bajte ki so se nakopičili med zasedenim Wire1.
         ld2410_flush_rx(addr, ch);
 
         // WARN log — samo ob prekoračitvi praga zaporednih overflowov
@@ -681,7 +603,68 @@ static void poll_one_channel(RadarChannel& rc) {
 // Kliče se iz radarTask vsakih RADAR_STUCK_CHECK_MS, mutex pridobi sam.
 // ============================================================
 
+// Forward declaration — definicija je po hal_radar_init()
+static bool radar_reconfigure_channel(uint8_t idx, const Config& cfg);
+
 static const char* s_ch_names[4] = {"Vhod", "Cesta_L", "Cesta_D", "Garaza"};
+
+// ============================================================
+// radar_reconfigure_channel — (re)konfigurira en LD2410C kanal
+//
+// Pridobi Wire1 mutex sam (timeout 2000ms). Kliče se:
+//   - iz startup retry bloka (za kanale preskočene pri wire1 timeout)
+//   - iz stuck check pri active && !config_ok
+//
+// Vrne true ob uspešni konfiguraciji.
+// ============================================================
+
+static bool radar_reconfigure_channel(uint8_t idx, const Config& cfg) {
+    RadarChannel& rc = s_radar.ch[idx];
+    if (!rc.status.active) return false;
+
+    SemaphoreHandle_t mtx = bsp_get_wire1_mutex();
+    if (xSemaphoreTake(mtx, pdMS_TO_TICKS(2000)) != pdTRUE) {
+        RADW("[%s] reconfigure: Wire1 mutex timeout", s_ch_names[idx]);
+        return false;
+    }
+
+    bool ok = false;
+    do {
+        if (!ld2410_open_config(rc.chip_addr, rc.uart_ch)) break;
+        vTaskDelay(pdMS_TO_TICKS(50));
+        if (!ld2410_set_params(rc.chip_addr, rc.uart_ch,
+                               cfg.radar_max_dist[idx],
+                               cfg.radar_unmanned_s[idx])) break;
+        vTaskDelay(pdMS_TO_TICKS(50));
+        if (!ld2410_set_sensitivity(rc.chip_addr, rc.uart_ch,
+                                    cfg.radar_move_sens[idx],
+                                    cfg.radar_static_sens[idx])) break;
+        vTaskDelay(pdMS_TO_TICKS(50));
+        ok = true;
+    } while (false);
+
+    bool verified = false;
+    if (ok) verified = ld2410_verify_params(rc.chip_addr, rc.uart_ch,
+                                            cfg.radar_max_dist[idx],
+                                            cfg.radar_move_sens[idx],
+                                            cfg.radar_static_sens[idx],
+                                            cfg.radar_unmanned_s[idx]);
+    ld2410_close_config(rc.chip_addr, rc.uart_ch);
+    vTaskDelay(pdMS_TO_TICKS(500));
+    xSemaphoreGive(mtx);
+
+    rc.status.config_ok              = ok;
+    rc.status.config_verified        = verified;
+    rc.status.config_ms              = millis();
+    rc.status.configured_max_dist    = cfg.radar_max_dist[idx];
+    rc.status.configured_move_sens   = cfg.radar_move_sens[idx];
+    rc.status.configured_static_sens = cfg.radar_static_sens[idx];
+    rc.status.configured_unmanned_s  = cfg.radar_unmanned_s[idx];
+
+    RADI("[%s] reconfigure: %s%s", s_ch_names[idx],
+         ok ? "OK" : "NAPAKA", verified ? " (verificirano)" : "");
+    return ok;
+}
 
 static void recover_stuck_channel(uint8_t idx) {
     RadarChannel& rc = s_radar.ch[idx];
@@ -775,7 +758,7 @@ static void recover_stuck_channel(uint8_t idx) {
 }
 
 // ============================================================
-// RADAR TASK — nova polling arhitektura v2.0
+// RADAR TASK
 // ============================================================
 
 static void radarTask(void* pvParams) {
@@ -805,8 +788,7 @@ static void radarTask(void* pvParams) {
          (unsigned long)poll_interval_ms);
 
     // ============================================================
-    // ZAGОНSKA KONFIGURACIJA LD2410C RADARJEV
-    // Identična v1.x — nespremenjena logika konfiguriranja.
+    // ZAGONSKA KONFIGURACIJA LD2410C RADARJEV
     // ============================================================
     {
         RADI("=== Radar konfiguracija ob zagonu ===");
@@ -827,8 +809,8 @@ static void radarTask(void* pvParams) {
                  cfg.radar_static_sens[i], cfg.radar_unmanned_s[i]);
 
             SemaphoreHandle_t mtx = bsp_get_wire1_mutex();
-            if (xSemaphoreTake(mtx, pdMS_TO_TICKS(500)) != pdTRUE) {
-                RADW("  [%s]: Wire1 mutex timeout — preskočen", sensor_names[i]);
+            if (xSemaphoreTake(mtx, pdMS_TO_TICKS(1500)) != pdTRUE) {
+                RADW("  [%s]: Wire1 mutex timeout — preskočen (retry sledi)", sensor_names[i]);
                 rc.status.config_ok = false;
                 continue;
             }
@@ -872,6 +854,18 @@ static void radarTask(void* pvParams) {
                  ok ? "OK" : "NAPAKA", verified ? " (verificirano)" : "");
             vTaskDelay(pdMS_TO_TICKS(100));
         }
+
+        // Retry za kanale preskočene zaradi Wire1 mutex timeout ob zagonu
+        // (npr. vzporedni TOF startup scan drži mutex dlje kot 1500ms)
+        for (uint8_t i = 0; i < RADAR_SENSOR_COUNT; i++) {
+            RadarChannel& rc = s_radar.ch[i];
+            if (!rc.status.active || rc.status.config_ok) continue;
+
+            RADW("  [%s]: startup config retry (Wire1 timeout med prvim poskusom)", s_ch_names[i]);
+            vTaskDelay(pdMS_TO_TICKS(300));
+            radar_reconfigure_channel(i, cfg);
+        }
+
         RADI("=== Radar konfiguracija končana ===");
     }
 
@@ -952,6 +946,15 @@ static void radarTask(void* pvParams) {
 
                     if (is_stuck && cooldown_ok) {
                         recover_stuck_channel(i);
+                    } else if (!rc.status.config_ok && rc.status.frames_ok > 0 && cooldown_ok) {
+                        // Senzor dela (frames OK) a config_ok=false (Wire1 timeout ob zagonu)
+                        RADW("[%s] active+config_napaka → reconfigure (frames=%lu)",
+                             s_ch_names[i], (unsigned long)rc.status.frames_ok);
+                        rc.last_recovery_ms = now_sc;
+                        rc.recovery_count++;
+                        rc.status.recovery_count = rc.recovery_count;
+                        const Config cfg_r = config_get();
+                        radar_reconfigure_channel(i, cfg_r);
                     } else if (!is_stuck && rc.stuck_level > 0) {
                         RADI("[%s] Recovery uspešen po %lu poskusih (level bil %d)",
                              s_ch_names[i],
@@ -1079,7 +1082,7 @@ static void radarTask(void* pvParams) {
 }
 
 // ============================================================
-// JAVNE FUNKCIJE — enake signature kot v1.x
+// JAVNE FUNKCIJE
 // ============================================================
 
 bool hal_radar_init(RadarFrameCallback cb) {

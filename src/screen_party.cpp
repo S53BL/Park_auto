@@ -4,52 +4,13 @@
 // Verzija : 1.0.0-dev  |  Datum: 2026-04
 // ============================================================
 //
-// TRENUTNO STANJE:
-//   UI je popolnoma implementiran. Vsi gumbi, sliderji in toggle
-//   delujejo in publishajo pravilne EventBus evente.
-//   MUX IO45 preklop je implementiran direktno (digitalWrite).
+// UI publishira EventBus evente (BUTTON_PARTY_*); web_ui.cpp (wledTask)
+// jih prestreže in izvede HTTP klice na WLED ESP.
 //
-// KAJ MANJKA ZA PRODUKCIJO:
-//   1. web_ui.cpp — mora se subscribirati na BUTTON_PARTY_* evente
-//      in izvesti dejanske HTTP klice na WLED Party ESP.
-//      Glej komentarje "TODO: web_ui.cpp" spodaj.
-//   2. config_mgr.cpp — IP naslov Party ESP mora biti nastavljiv
-//      prek web vmesnika in shranjen v NVS.
-//   3. WiFi mora biti inicializiran (wifiTask) preden WLED klici delujejo.
-//
-// WLED HTTP IMPLEMENTACIJA (za web_ui.cpp):
-//   Vsak BUTTON_PARTY_* event v web_ui.cpp:
-//
-//   // Primer za BUTTON_PARTY_TOGGLE (payload=1 → on, 0 → off):
-//   HTTPClient http;
-//   http.begin("http://" + wled_ip + "/json/state");
-//   http.addHeader("Content-Type", "application/json");
-//   String body = payload ? "{\"on\":true}" : "{\"on\":false}";
-//   int code = http.POST(body);
-//   http.end();
-//
-//   // Primer za BUTTON_PARTY_EFFECT (payload=fx_id):
-//   String body = "{\"seg\":[{\"fx\":" + String(payload) + "}]}";
-//
-//   // Primer za BUTTON_PARTY_COLOR (payload=(R<<16)|(G<<8)|B):
-//   uint8_t r=(payload>>16)&0xFF, g=(payload>>8)&0xFF, b=payload&0xFF;
-//   String body = "{\"seg\":[{\"col\":[[" + String(r) + ","
-//                 + String(g) + "," + String(b) + "]]}]}";
-//
-//   // Primer za BUTTON_PARTY_BRIGHTNESS (payload=0-255):
-//   String body = "{\"bri\":" + String(payload) + "}";
-//
-//   // Primer za BUTTON_PARTY_SPEED (payload=0-255):
-//   String body = "{\"seg\":[{\"sx\":" + String(payload) + "}]}";
-//
-//   // Primer za BUTTON_PARTY_PRESET (payload=preset_id):
-//   // Pošlji vse parametre naenkrat iz preset tabele v config_mgr.cpp
-//
-// MUX ZAMIK (200ms):
-//   Ob party ON: najprej IO45=HIGH, delay(200), nato WLED {"on":true}
-//   Ob party OFF: najprej WLED {"on":false}, delay(200), nato IO45=LOW
-//   To prepreči signal collision na MUX stikalu (74HC257N).
-//   Zamik je implementiran v web_ui.cpp (ne tukaj, ker HTTP je blokirajoč).
+// MUX zamik (MUX_SWITCH_DELAY_MS = 200ms) prepreči signal collision na 74HC257N:
+//   ON:  IO45=HIGH → delay → WLED {"on":true}
+//   OFF: WLED {"on":false} → delay → IO45=LOW
+//   Implementirano v wledTask (web_ui.cpp) — HTTP zahteva appTask kontekst.
 //
 // ============================================================
 
@@ -241,23 +202,12 @@ static void toggle_event_cb(lv_event_t* e) {
     s_state.party_on = !s_state.party_on;
     toggle_update_visual();
 
-    // MUX preklop — direktno, brez zunanjega HW (BSP pin)
-    // TODO: web_ui.cpp mora ob BUTTON_PARTY_TOGGLE:
-    //   ON:  delay(200) → HTTP POST {"on":true} na WLED
-    //   OFF: HTTP POST {"on":false} → delay(200) → IO45=LOW
-    //   Zamik 200ms (MUX_SWITCH_DELAY_MS) prepreči signal collision na 74HC257N.
-    // MUX preklop izvede wledTask ob obdelavi TOGGLE ukaza — velja za LCD in web pot
+    // MUX preklop in HTTP klice izvede wledTask (web_ui.cpp) — velja za LCD in web pot
 
     uint32_t payload = s_state.party_on ? 1 : 0;
     EventBus::publish(EventType::BUTTON_PARTY_TOGGLE, payload);
     PARTY_D("BUTTON_PARTY_TOGGLE payload=%lu", (unsigned long)payload);
-
-    // TODO: web_ui.cpp subscriber:
-    //   EventBus::subscribe(EventType::BUTTON_PARTY_TOGGLE, [](const Event& ev) {
-    //       bool on = ev.payload == 1;
-    //       if (on) { setMuxParty(); vTaskDelay(200); wledPost("{\"on\":true}"); }
-    //       else    { wledPost("{\"on\":false}"); vTaskDelay(200); setMuxPrimary(); }
-    //   });
+    // wledTask (web_ui.cpp) prestreže event in izvede MUX + HTTP sekvenco
 }
 
 // ============================================================
@@ -354,13 +304,6 @@ static void color_event_cb(lv_event_t* e) {
 
     EventBus::publish(EventType::BUTTON_PARTY_COLOR, s_state.color_rgb);
     PARTY_D("BUTTON_PARTY_COLOR rgb=0x%06lX", (unsigned long)s_state.color_rgb);
-
-    // TODO: web_ui.cpp subscriber:
-    //   EventBus::subscribe(EventType::BUTTON_PARTY_COLOR, [](const Event& ev) {
-    //       uint8_t r=(ev.payload>>16)&0xFF, g=(ev.payload>>8)&0xFF, b=ev.payload&0xFF;
-    //       wledPost("{\"seg\":[{\"col\":[["+String(r)+","+String(g)+","+String(b)+"]]}"
-    //               + "]}");
-    //   });
 }
 
 // ============================================================
@@ -380,13 +323,7 @@ static void slider_bri_event_cb(lv_event_t* e) {
 
     EventBus::publish(EventType::BUTTON_PARTY_BRIGHTNESS, s_state.brightness);
     PARTY_D("BUTTON_PARTY_BRIGHTNESS val=%d", s_state.brightness);
-
-    // TODO: web_ui.cpp subscriber:
-    //   EventBus::subscribe(EventType::BUTTON_PARTY_BRIGHTNESS, [](const Event& ev) {
-    //       wledPost("{\"bri\":" + String(ev.payload) + "}");
-    //   });
-    //   Opomba: slider pošilja samo ob RELEASED (ne med drsenjem) —
-    //   prepreči prekomerne HTTP klice.
+    // slider pošilja samo ob RELEASED — prepreči prekomerne HTTP klice
 }
 
 static void slider_spd_event_cb(lv_event_t* e) {
@@ -402,11 +339,6 @@ static void slider_spd_event_cb(lv_event_t* e) {
 
     EventBus::publish(EventType::BUTTON_PARTY_SPEED, s_state.speed);
     PARTY_D("BUTTON_PARTY_SPEED val=%d", s_state.speed);
-
-    // TODO: web_ui.cpp subscriber:
-    //   EventBus::subscribe(EventType::BUTTON_PARTY_SPEED, [](const Event& ev) {
-    //       wledPost("{\"seg\":[{\"sx\":" + String(ev.payload) + "}]}");
-    //   });
 }
 
 // ============================================================

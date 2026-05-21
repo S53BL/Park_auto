@@ -616,7 +616,7 @@ void hal_tof_tick() {
     case TOF_PHASE_IDLE:
     {
         // ----------------------------------------------------------------
-        // FAZA 0 — MIROVANJE
+        // MIROVANJE
         // V tej fazi TOF ne meri. Wire1 je popolnoma prost za radarTask.
         //
         // Edina aktivnost: watchdog meritev vsakih TOF_WATCHDOG_INTERVAL_MS
@@ -625,10 +625,6 @@ void hal_tof_tick() {
         //   2. Pasivna detekcija anomalij (avto brez rampe, fizična okvara)
         //   3. Periodični health-check log za diagnostiko
         //
-        // TODO (Faza logike): Če watchdog zazna H < VEH_ENTRY_THRESH_MM
-        //   na kateremkoli H senzorju → logirati kot anomalijo (avto morda
-        //   parkiran brez normalnega postopka). Ne sprožati DETECT faze
-        //   avtomatsko — to je naloga rampagor IRQ triggerja.
         // ----------------------------------------------------------------
 
         uint32_t now = millis();
@@ -692,15 +688,6 @@ void hal_tof_tick() {
         //   Eden od H senzorjev < VEH_ENTRY_THRESH_MM (350 cm)
         //   Drugi H senzor tega ne zazna (vozilo gre na eno mesto)
         //
-        // TODO (Faza logike): Dodati timeout — če smo v DETECT fazi dlje
-        //   kot TOF_DETECT_TIMEOUT_MS (npr. 5 min) brez detekcije vozila,
-        //   se vrnemo v IDLE. To reši scenarij ko rampa ostane dvignjena
-        //   dlje časa (ure, dnevi) brez dejanskega parkiranja.
-        //   Vrednost TOF_DETECT_TIMEOUT_MS dodati v config.h.
-        //
-        // TODO (Faza logike): Ob prehodu DETECT → SCANNING obvestiti
-        //   sensor_mgr prek EventBus (EVT_TOF_PLACE_DETECTED) z activeParking
-        //   vrednostjo da se lahko naloži ustrezna baza modelov za DTW.
         // ----------------------------------------------------------------
 
         if (xSemaphoreTake(mtx, pdMS_TO_TICKS(WIRE1_MUTEX_TIMEOUT_MS)) != pdTRUE) {
@@ -753,13 +740,10 @@ void hal_tof_tick() {
         // SMART vzorčenje: točka se doda profilu samo če |ΔH| >= VEH_DELTA_FILTER_MM.
         // Naravni I2C cikel (~120 ms) je throttle — ni potreben dodaten timer.
         //
-        // TODO (Faza logike): Zaključek skeniranja ob celica2 LOW + H stabilen
-        //   > VEH_STABLE_TIME_MS (1.5s). Trenutno zaključi samo ob stabilnosti
-        //   ali max točkah. Celica2 signal bo prišel kot MCP23017 IRQ →
-        //   EventBus EVT_GPIO_CHANGED → hal_tof_stopScan() ali finalize_profile().
+        // ⚠ Zaključek skeniranja ob celica2 LOW + H stabilen še ni implementiran.
+        //   Trenutno zaključi samo ob stabilnosti ali max točkah.
+        //   Celica2 signal: MCP23017 IRQ → EventBus CELL_BROKEN → hal_tof_stopScan().
         //
-        // TODO (Faza logike): Ob finalize_profile() callback → sensor_mgr →
-        //   EventBus EVT_TOF_PROFILE_READY → vehicle_recog DTW burst na Core1.
         // ----------------------------------------------------------------
 
         if (xSemaphoreTake(mtx, pdMS_TO_TICKS(WIRE1_MUTEX_TIMEOUT_MS)) != pdTRUE) {
@@ -783,7 +767,7 @@ void hal_tof_tick() {
         s_cycle_ms_sum  += elapsed;
         s_cycle_ms_count++;
 
-        // Enkrat ob 1. meritvi in potem ob 10. — za TODO #1 kalibriranje
+        // Enkrat ob 1. meritvi in potem ob 10. — referenčne vrednosti za I2C kalibracijo
         if (s_cycle_ms_count == 1) {
             TOFI("I2C cikel (1. meritev, 3 senzorji): %lu ms", (unsigned long)elapsed);
         } else if (s_cycle_ms_count == 10) {

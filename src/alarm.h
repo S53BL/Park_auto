@@ -9,10 +9,10 @@
 //   Zunanji sistemi (Home Assistant, mobilna app ...) kličejo
 //   POST /api/alarm za arm/disarm. Alarm modul subscribira na
 //   RADAR_MOTION in ob zaznavi gibanja (če je ARMED) publishira
-//   ALARM_TRIGGERED event ter pošlje HTTP callback notifikacijo.
+//   ALARM_STATE_CHANGED event ter pošlje HTTP callback notifikacijo.
 //
 // STATE MACHINE:
-//   ALARM_OFF  ──POST on──►  ALARM_ARMED  ──RADAR_MOTION──►  ALARM_TRIGGERED
+//   ALARM_OFF  ──POST on──►  ALARM_ARMED  ──RADAR_MOTION──►  ALARM_TRIGGERED(state)
 //                               ▲                                    │
 //                               └─────────── PIN / POST off ◄────────┘
 //                                            (vrne v OFF)

@@ -26,26 +26,22 @@
 //   SSR4 = GPB0 = LED reflektor pred garažo
 //          → SAMO ročni, anti-forget timer
 //
-// ODLOČITEV — DISPLAY POSODOBITEV (Opcija B, dogovorjeno 2026-05):
+// ODLOČITEV — DISPLAY POSODOBITEV (Opcija B):
 //   light_logic NE kliče screen_main_set_ssr() direktno.
 //   Namesto tega izpostavi light_logic_get_state() getter.
-//   LVGL timer v hal_display.cpp periodično (500ms) prebere
-//   stanje in posodobi zaslon. Razlog: LVGL ni thread-safe,
-//   klici iz appTask konteksta bi povzročili crash. Enoten
-//   polling sistem pokriva vse zaslone in vse vire podatkov.
+//   LVGL timer v hal_display.cpp periodično prebere stanje in posodobi zaslon.
+//   Razlog: LVGL ni thread-safe — klici iz appTask bi povzročili crash.
 //
-// FILL HITROST — dogovorjeno 2026-05:
+// FILL HITROST:
 //   raluc/rampagor trigger → počasna (LIGHT_FADE_SLOW_MS ≈ 7s)
 //   radar gibanje trigger  → hitra  (LIGHT_FADE_FAST_MS  ≈ 2.5s)
-//   Razlog: raluc/rampagor = vozilo prihaja iz daleč, počasen
-//   pristop. Radar = gibanje že v garaži, hiter odziv.
+//   Razlog: raluc/rampagor = vozilo prihaja iz daleč; radar = gibanje že v garaži.
 //
-// FILL SMER — zaenkrat fiksen (0→89):
-//   TODO: različna smer glede na trigger (levo-desno, desno-levo)
-//   Implementirati ko bo fizična postavitev LED matrike potrjena.
-//   Dokumentacija Glavna_LED_Razsvetljava.docx sekcija 5.
+// FILL SMER — fiksen (0→89):
+//   Odvisna od fizične postavitve LED matrike — določiti ob kalibraciji.
+//   Spec: Glavna_LED_Razsvetljava.docx sekcija 5.
 //
-// DISABLE LOGIKA — dogovorjeno 2026-05:
+// DISABLE LOGIKA:
 //   Dolgi pritisk na SSR gumb (BUTTON_SSR_DISABLE) → toggle
 //   disabled stanja. Disabled SSR ne more biti prižgan niti
 //   avtomatsko niti ročno. Re-enable = ponovni dolgi pritisk.

@@ -4,24 +4,14 @@
 // Verzija : 2.0.0  |  Datum: 2026-05
 // ============================================================
 //
-// SPREMEMBA v2.0: IRQ-pin polling → čisti periodični polling
+// Periodični polling (vsakih RADAR_POLL_INTERVAL_MS, default 50ms):
+//   Wire1_mutex enkrat za vse 4 kanale → max ~8ms blokada.
+//   OE! overflow = normalen pojav ob zasedenem Wire1 (TOF, LVGL) →
+//   flush FIFO + discard frame + nadaljuj; overflow counter per senzor.
+//   TOF ima prednost: mutex timeout v radarTask = poll_interval/2.
+//   Latenca odziva ~poll_interval/2 — za prižig luči (<25ms) sprejemljivo.
 //
-//   V v1.x je radarTask izvajal:
-//     while(digitalRead(IO41)==LOW) { process_chip_irq(0); }
-//     while(digitalRead(IO42)==LOW) { process_chip_irq(1); }
-//
-//   V v2.0 radarTask izvaja:
-//     vsakih radar_poll_interval_ms:
-//       Wire1_mutex → poll_one_channel(×4) → Wire1_mutex sprosti
-//
-//   Prednosti:
-//   - Ni drain zanke, ni max_loops, ni round-robin kompleksnosti
-//   - Wire1 mutex enkrat za vse 4 kanale (~8ms max blokada vs ~96ms)
-//   - TOF ima prednost: mutex timeout = poll_interval/2
-//   - Overflow je normalen pojav — flush + continue, ne panika
-//   - Minutni log s % uspešnosti per senzor za diagnostiko
-//
-// FIZIČNE POVEZAVE (nespremenjena):
+// FIZIČNE POVEZAVE:
 //   SC16IS752 #1 @ 0x48: UART-A→LD2410C[Vhod], UART-B→LD2410C[Cesta_L]
 //   SC16IS752 #2 @ 0x4C: UART-A→LD2410C[Cesta_D], UART-B→LD2410C[Garaza]
 //   Wire1: SDA=IO17, SCL=IO18, 100kHz
@@ -35,7 +25,7 @@
 #include <stdbool.h>
 
 // ============================================================
-// PODATKOVNE STRUKTURE — javne (enake v1.x)
+// PODATKOVNE STRUKTURE
 // ============================================================
 
 typedef enum : uint8_t {
@@ -64,7 +54,7 @@ typedef struct {
     uint32_t parse_errors;
     uint32_t boot_parse_errors;
     uint32_t i2c_errors;
-    uint32_t irq_count;         // ohranjen za API kompatibilnost (v polling = 0)
+    uint32_t irq_count;         // vedno 0 v polling arhitekturi (za API kompatibilnost)
     uint32_t last_frame_ms;
     RadarFrame last_frame;
     uint32_t last_publish_ms;
@@ -85,7 +75,7 @@ typedef struct {
 typedef void (*RadarFrameCallback)(const RadarFrame& frame);
 
 // ============================================================
-// JAVNE FUNKCIJE — enake signature kot v1.x (drop-in zamenjava)
+// JAVNE FUNKCIJE
 // ============================================================
 
 bool hal_radar_init(RadarFrameCallback cb);

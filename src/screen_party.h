@@ -8,10 +8,9 @@
 //   Party zaslon za upravljanje WLED efektov na ESP-WLED modulu.
 //   Dostopen s swipe desno z glavnega zaslona.
 //
-// ARHITEKTURA — WLED integracija (TRENUTNO STUB):
+// ARHITEKTURA — WLED integracija:
 //   screen_party.cpp publisha EventBus evente za vse akcije.
-//   web_ui.cpp (še ne implementiran) se subscribeа na te evente
-//   in izvede dejanske WLED HTTP klice na Party ESP.
+//   web_ui.cpp (wledTask) se subscribea na te evente in izvede HTTP klice na WLED ESP.
 //
 //   EventBus dogodki ki jih ta zaslon oddaja:
 //     BUTTON_PARTY_TOGGLE      payload=1 (on) ali 0 (off)

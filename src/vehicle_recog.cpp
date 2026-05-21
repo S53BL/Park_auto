@@ -250,9 +250,6 @@ bool vehicle_recog_init(void) {
     // Gumbi (loceni per mesto — brez payload)
     EventBus::subscribe(EventType::BUTTON_EDIT_VEHICLE_A, on_event);
     EventBus::subscribe(EventType::BUTTON_EDIT_VEHICLE_B, on_event);
-    // Kalibracija — screen_main publishira po 10s + DA
-    EventBus::subscribe(EventType::BUTTON_CALIBRATE_EMPTY_A, on_event);
-    EventBus::subscribe(EventType::BUTTON_CALIBRATE_EMPTY_B, on_event);
 
     LOG_INFO(VR_LOG_TAG, "Init OK. Baseline A=%s B=%s",
              s_place_A.baseline.valid ? "valid" : "missing",
@@ -357,18 +354,6 @@ static void on_event(const Event& evt) {
             LOG_INFO(VR_LOG_TAG, "Edit %c: '%s' (%s)",
                      pid, p->current_name,
                      p->current_model_id[0] ? p->current_model_id : "---");
-            break;
-        }
-
-        // ---------------------------------------------------------------------
-        // BUTTON_CALIBRATE_EMPTY_A/B — po 10s + DA confirm v screen_main.
-        // vehicle_recog_calibrate_empty() je ze klicano direktno iz screen_main
-        // po confirm dialogu. Ta event je signal za logging.
-        // ---------------------------------------------------------------------
-        case EventType::BUTTON_CALIBRATE_EMPTY_A:
-        case EventType::BUTTON_CALIBRATE_EMPTY_B: {
-            char pid = (evt.type == EventType::BUTTON_CALIBRATE_EMPTY_A) ? 'A' : 'B';
-            LOG_INFO(VR_LOG_TAG, "Calibrate event %c — screen_main bo klical calibrate_empty()", pid);
             break;
         }
 

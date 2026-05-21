@@ -35,7 +35,7 @@ bool bsp_mcp_ok();      // MCP23017
 // Wire1 mutex — kreiran v bsp_init, uporablja hal_gpio + hal_light
 SemaphoreHandle_t bsp_get_wire1_mutex();
 
-// TCA9548A hardware reset (IO46) — za kasnejše faze
+// TCA9548A hardware reset (IO46)
 void bsp_tca_reset();
 
 // Boot čas v ms

@@ -71,7 +71,7 @@
 //     1. Klicati hal_gpio_init() po EventBus::init()
 //     2. Klicati EventBus::processGpioQueue() → hal_gpio_process_queue() v zanki
 //   event_bus.h mora imeti EventType: RAMP_UP, RAMP_MOVING, DOOR_OPENED,
-//   CELL_BROKEN — ti že obstajajo v event_bus.h v2.0.0-dev.
+//   CELL_BROKEN — definirani v event_bus.h.
 //
 // LOGGING:
 //   INFO : fazni prehodi vhodov, SSR spremembe, init, health-check

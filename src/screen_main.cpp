@@ -3,37 +3,25 @@
 // Projekt : Avtomatizacija Pokritega Parkirišča
 // Verzija : 2.2.1  |  Datum: 2026-05
 //
-// SPREMEMBE v2.2.0 (ARC4x spec):
+// RAD WIDGET — vizualna logika:
 //
-//   RAD WIDGET — popolna zamenjava rad_apply() in rad_create():
+//   INACTIVE     — siva, fill=10% (fiksno), center="–", brez "m"
+//   MOVING       — zelena (dinamična svetlost po energy), fill=moving_energy,
+//                  center=razdalja (1 decimalna, "0" če =0), "m" vrstico nižje
+//   STATIONARY   — modra (identična dinamika svetlosti kot zelena), fill=static_energy,
+//                  center=razdalja, "m" vrstico nižje
+//   CONFIG_ERROR — rdeča, fill=50% začasna ali 100% trajna, center="–"
 //
-//   Vizualna logika:
-//     INACTIVE     — siva, fill=10% (fiksno), center="–", brez "m"
-//     MOVING       — zelena (dinamična svetlost po energy), fill=moving_energy,
-//                    center=razdalja (1 decimalna, "0" če =0), "m" vrstico nižje
-//     STATIONARY   — modra (identična dinamika svetlosti kot zelena), fill=static_energy,
-//                    center=razdalja, "m" vrstico nižje
-//     CONFIG_ERROR — rdeča, fill=50% začasna ali 100% trajna, center="–"
+// Peak arc (samo pri MOVING ko energy=100%):
+//   Notranji lv_arc, linearno pada 100%→0 v unmanned_s sekund (privzeto 5s).
+//   Timer: PEAK_TICK_MS (100ms). Ob novem 100% se ponastavi.
+//   Ko doseže 0% → arc skrit.
 //
-//   Peak arc (samo pri MOVING, ko energy=100%):
-//     Notranji lv_arc (enaka debelina kot glavni), začne pri 100% fill,
-//     linearno pada na 0 v unmanned_s sekund (privzeto 5s = 5000ms).
-//     Peak timer teče vsak PEAK_TICK_MS (100ms) in osvežuje fill.
-//     Ob novem 100% se peak ponastavi na začetek.
-//     Ko doseže 0% → arc skrit.
+// Bujenje zaslona:
+//   Ko kateri koli senzor doseže 100% energy → hal_display_setBacklight(255)
+//   (klic iz LVGL timer konteksta, kar je thread-safe).
 //
-//   Bujenje zaslona:
-//     Ko kateri koli senzor doseže 100% energy (peak sprožen),
-//     se kliče hal_display_setBacklight(255) prek EventBus
-//     → screen_main_set_radar_arc() kliče hal_display_setBacklight direktno
-//       (je v LVGL timer kontekstu, kar je varno).
-//
-//   Razdalja v sredini:
-//     Prikaz z eno decimalno: "1,6" "0,2" "3,0"
-//     Če =0 → prikaže samo "0"
-//     "m" oznaka samo kadar dist > 0, svetlo siva, vrstico nižje
-//
-//   lbl_pct (stara %-logika) ODSTRANJEN — nadomeščen z lbl_dist + lbl_m
+// Razdalja v sredini: 1 decimalna ("1,6" "0,2"); če =0 → "0"; "m" vrstico nižje.
 //
 // ============================================================
 
@@ -179,16 +167,12 @@ struct PkgWidget {
     ParkingDisplayData data;
 };
 
-// ── ARC4x: RadWidget ──────────────────────────────────────────────────────────
-// lbl_pct (stara %-logika) je ODSTRANJEN.
-// Zamenjava: lbl_dist (razdalja, bela, center) + lbl_m ("m", siva, vrstico nižje)
-//
-// peak_arc: notranji lv_arc, enak polmer in debelina kot glavni.
-//   Zunanji rob notranjega arca se dotika notranjega roba glavnega arca.
+// ── RadWidget ─────────────────────────────────────────────────────────────────
+// lbl_dist: razdalja (bela, center); lbl_m: "m" enota (siva, vrstico nižje).
+// peak_arc: notranji lv_arc, zunanji rob se dotika notranjega roba glavnega arca.
 //   Prikazan samo med aktivnim peak efektom.
-//
-// peak_pct: trenutni fill notranjega arca (0–100), float za tekoče linearno padanje.
-// peak_timer: LVGL timer ki teče med peak efektom (100ms interval).
+// peak_pct: float za tekoče linearno padanje (0–100).
+// peak_timer: LVGL timer (100ms interval) med peak efektom.
 // peak_duration_ms: čas celotnega padanja (iz unmanned_s NVS parametra, privzeto 5000ms).
 // ─────────────────────────────────────────────────────────────────────────────
 struct RadWidget {

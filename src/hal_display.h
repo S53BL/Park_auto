@@ -3,10 +3,8 @@
 // Projekt : Avtomatizacija Pokritega Parkirišča
 // Verzija : 2.0.1-dev  |  Datum: 2026-04
 //
-// POPRAVEK v2.0.1:
-//   - Dodan #include <lvgl.h> — hal_display.h ga potrebuje za lv_obj_t
-//     v forward deklaracijah. Brez tega screen_main.h in drugi moduli
-//     ki vključijo samo hal_display.h dobijo "lv_obj_t undeclared".
+// ⚠ #include <lvgl.h> je OBVEZEN tukaj — hal_display.h ga potrebuje za lv_obj_t.
+//   Moduli ki vključijo samo hal_display.h brez tega dobijo "lv_obj_t undeclared".
 // ============================================================
 #pragma once
 

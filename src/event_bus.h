@@ -18,9 +18,6 @@ enum class EventType : uint16_t {
     CELL_BROKEN         = 0x0004,
     // Radar
     RADAR_MOTION        = 0x0010,
-    RADAR_STILL         = 0x0011,
-    RADAR_CLEAR         = 0x0012,
-    RADAR_ERROR         = 0x0013,
     // TOF / prepoznava vozil
     TOF_PROFILE_READY       = 0x0020,
     VEHICLE_RECOGNIZED      = 0x0021,  // DTW match — VehicleRecognizedEvent_t*
@@ -28,18 +25,14 @@ enum class EventType : uint16_t {
     VEHICLE_DEPARTED        = 0x0023,  // odhod — payload: 0=A, 1=B
     PARKING_SCAN_ABORTED    = 0x0024,  // ParkingScanAbortedEvent_t*
     PARKING_PLACE_CALIBRATED = 0x0025, // ParkingPlaceCalibratedEvent_t*
-    // F3: TOF fazni prehodi za diagnostika.js real-time prikaz
-    // payload: bit 0-1  = TofPhase (0=IDLE,1=DETECT,2=SCANNING,3=DTW_WAIT)
-    //          bit 8    = TofPlace (0=A, 1=B, veljavno samo v SCANNING)
-    //          bit 16   = anomaly flag (1 = IDLE watchdog anomalija zaznana)
+    // TOF fazni prehod — payload:
+    //   bit 0-1: TofPhase (0=IDLE,1=DETECT,2=SCANNING,3=DTW_WAIT)
+    //   bit 8:   TofPlace (0=A, 1=B; veljavno samo v SCANNING)
+    //   bit 16:  anomaly flag (IDLE watchdog je zaznal anomalijo)
     TOF_PHASE_CHANGE        = 0x0026,
     // Svetloba
     NIGHT_THRESHOLD_CHANGED = 0x0030,
     // UI gumbi
-    BUTTON_SSR1         = 0x0040,
-    BUTTON_SSR2         = 0x0041,
-    BUTTON_SSR3         = 0x0042,
-    BUTTON_SSR4         = 0x0043,
     BUTTON_SSR_DISABLE  = 0x0044,
     BUTTON_PARTY_TOGGLE     = 0x0045,
     BUTTON_PARTY_EFFECT     = 0x0049,
@@ -50,19 +43,12 @@ enum class EventType : uint16_t {
     BUTTON_EDIT_VEHICLE_A     = 0x0046,  // 2s dolg pritisk, mesto A
     BUTTON_EDIT_VEHICLE_B     = 0x0047,  // 2s dolg pritisk, mesto B
     BUTTON_SSR                = 0x0048,  // kratek dotik, payload=ssr_idx
-    BUTTON_CALIBRATE_EMPTY_A  = 0x004E,  // 10s dolg pritisk + DA, mesto A
-    BUTTON_CALIBRATE_EMPTY_B  = 0x004F,  // 10s dolg pritisk + DA, mesto B
-    // SSR stanje (za LCD posodobitev)
-    SSR_STATE_CHANGED   = 0x0050,
     // Party stanje
     PARTY_SUSPENDED     = 0x0051,   // payload = 0; light_logic → web_ui SUSPEND
     PARTY_RESUMED       = 0x0052,   // payload = slot_idx ki se nadaljuje
     BUTTON_PARTY_PRIORITY = 0x0053, // payload: 1=priority on, 0=off; party ne prekinja ob gibanju
     // Alarm
-    ALARM_TRIGGERED     = 0x0060,
     ALARM_STATE_CHANGED = 0x0061,
-    // Sistem
-    SYSTEM_READY          = 0x00FF,
 
     // WiFi
     WIFI_CONNECTED        = 0x0100,   // payload = IP naslov kot uint32_t
@@ -89,7 +75,7 @@ public:
     static void unsubscribe(EventType type);
     static void publish(EventType type, uint32_t payload = 0);
 
-    // Procesiranje ISR queue — kliče eventBusTask
+    // Procesiranje GPIO/Radar event queue — kliče eventBusTask
     static void processGpioQueue();
     static void processRadarQueue();
 

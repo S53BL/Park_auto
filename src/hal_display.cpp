@@ -4,15 +4,9 @@
 // Verzija : 2.0.2-dev  |  Datum: 2026-04
 // ============================================================
 //
-// SPREMEMBE v2.0.2 (glede na v2.0.0):
-//   - LVGL buffer: MALLOC_CAP_SPIRAM → MALLOC_CAP_INTERNAL
-//     Skladno z Waveshare demo 10_lvgl_arduino_v9 (partial mode):
-//       disp_draw_buf1 = heap_caps_malloc(bufSize*2, MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT)
-//     Razlog: partial mode buffer je samo 320×40×2 = 25600 B — gre v interni SRAM.
-//     Interni RAM je bistveno hitrejši za DMA transfer pri LVGL flush.
-//     PSRAM je OK za večje alokacije (DTW matrika, logi), ne za LVGL render buffer.
-//   - Dodan fallback: če MALLOC_CAP_INTERNAL spodleti → poskusi MALLOC_CAP_SPIRAM
-//     (varnostna mreža če je interni RAM poln)
+// LVGL render buffer (320×40×2 = 25600 B) je v MALLOC_CAP_INTERNAL.
+//   Interni SRAM je bistveno hitrejši od PSRAM za DMA flush.
+//   Fallback na MALLOC_CAP_SPIRAM če je interni RAM poln.
 //
 // HARDWARE INICIALIZACIJSKA SEKVENCA (potrjeno iz demo 10_lvgl_arduino_v9.ino):
 //   1. Wire.begin(8, 7) — BSP (SDA=IO8, SCL=IO7, potrjeno demo + axp2101 demo)
@@ -281,7 +275,7 @@ static void _calc_core_usage(uint8_t& c0_out, uint8_t& c1_out) {
 }
 
 // ============================================================
-// UI REFRESH TIMER — Opcija B display polling (dogovorjeno 2026-05)
+// UI REFRESH TIMER — Opcija B display polling
 // ============================================================
 // Teče v lvglTask kontekstu (edino varno mesto za LVGL klice).
 // Prebere stanje iz light_logic in posodobi vse zaslone.

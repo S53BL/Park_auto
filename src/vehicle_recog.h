@@ -187,7 +187,7 @@ typedef struct {
 
 // Klicati iz appTask po hal_tof_init() in config_mgr_init().
 // - Subscribe na EventBus (EVT_DOOR_OPENED, EVT_VEHICLE_DEPARTED,
-//   EVT_BUTTON_EDIT_VEHICLE_A/B, EVT_BUTTON_CALIBRATE_EMPTY_A/B)
+//   EVT_BUTTON_EDIT_VEHICLE_A/B)
 // - Alocira modele array in DTW matriko v PSRAM
 // - Nalozi baseline za A in B iz LittleFS
 bool vehicle_recog_init(void);

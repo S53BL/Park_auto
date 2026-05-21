@@ -190,9 +190,9 @@ void sensorTask(void* pvParams) {
             // Recovery check se izvede v obeh primerih — overhead je zanemarljiv
             // ker preverimo samo digitalRead() in samo po potrebi vzamemo mutex.
             //
-            // TODO: ko bo EventBus integriran, preveriti frames_ok counter preden
-            //   kličemo recovery — če radar normalno dobiva frames, pin LOW ni
-            //   napaka in recovery preskoči (glej komentar v hal_radar_recovery_check).
+            // Recovery preveri samo digitalRead() — overhead je zanemarljiv.
+            // frames_ok counter bi zmanjšal false-positive recovery klice,
+            // ampak ni kritično ker hal_radar_recovery_check() sam preveri stanje.
             if (hal_tof_getPhase() == TOF_PHASE_IDLE) {
                 hal_radar_recovery_check();
                 // Periodicno preverjanje prisotnosti (vsake TOF_WATCHDOG_INTERVAL_MS):

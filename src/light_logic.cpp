@@ -4,70 +4,25 @@
 // Verzija : 1.0.0  |  Datum: 2026-05
 // ============================================================
 //
-// IMPLEMENTACIJSKE ODLOČITVE — dokumentirane ker dokumentacija
-// ni bila popolna in so bile sprejete med razvojem:
+// IMPLEMENTACIJSKE ODLOČITVE:
 //
-// [1] SSR2 je del avtomatike (ne samo ročni):
-//     Dokumentacija Osnovna_Osvetlitev.md sekcija 5 pravi
-//     "samo ročni" za SSR2, ampak Glavna_LED_Razsvetljava.docx
-//     sekcija 6.2 jasno definira avtomatski vklop po waveFill.
-//     Odločitev (2026-05): SSR2 je del SSR1 avtomatike.
-//     SSR2 se vklopi po waveFill+SSR2_DELAY_MS, ugasne pred
-//     waveUnfill. Ročni toggle deluje neodvisno.
+// Radar trigger = OR vseh 4 kanalov (Vhod, Cesta_L, Cesta_D, Garaža).
+//   Zanima nas samo sumarno gibanje — posamezni kanali niso ločeni za SSR logiko.
 //
-// [2] SSR1 timer logika:
-//     Vsak avtomatski trigger (radar, rampa, raluc) resetira
-//     timer na polno vrednost (timeout_ssr1_s iz config).
-//     Minimalni čas prižganosti = timeout_ssr1_s (ker timer
-//     se ne more iztečh prej kot po timeout_ssr1_s od
-//     zadnjega triggerja). Ročni toggle takoj ugasne (ne čaka).
+// RADAR_MOTION payload kodiranje:
+//   bit 0-7: channel index (0–3), bit 8: motion detected, bit 9: stationary detected
+//   Za light_logic: OR motion|stationary = nekdo je tam.
 //
-// [3] Ročni gumb SSR1 = stikalo (toggle):
-//     Kratki pritisk ko je OFF → ON + timer na manual_extend_min.
-//     Kratki pritisk ko je ON  → takoj OFF (ne glede na countdown).
-//     Dolgi pritisk → disable/re-enable toggle.
+// Anti-forget (SSR2/3/4) teče 24/7 — neodvisno od dan/noč in BH1750.
 //
-// [4] Radar trigger = OR vseh 4 kanalov:
-//     Dokumentacija na nekaterih mestih omenja samo ch3 (Garaža).
-//     Odločitev (2026-05): vsi 4 radar kanali so relevantni,
-//     OR logika. Zanima nas samo sumarno: gibanje/ni gibanja.
-//     Radarji pokrivajo celotno območje parkirišča.
+// Dan/noč filter velja SAMO za SSR1 TRIGGER_ON_AUTO enqueue:
+//   is_night=false → RAMP_UP, RAMP_MOVING, RADAR_MOTION ne prožijo SSR1.
+//   Ročni gumbi (BUTTON_SSR), anti-forget, parking assist in vehicle_recog
+//   delujejo 24/7.
 //
-// [5] RADAR_MOTION payload kodiranje:
-//     bit 0-7:  channel index (0–3)
-//     bit 8:    motion detected
-//     bit 9:    stationary detected
-//     Za light_logic: OR motion|stationary = nekdo je tam.
-//
-// [6] Anti-forget deluje ne glede na dan/noč:
-//     SSR2/3/4 se ugasnejo po antiforgot timer izteku
-//     ne glede na BH1750 stanje.
-//
-// [7] Podnevi = SSR1 avtomatika izklopljena, ročno vedno deluje:
-//     is_night=false → RAMP_UP, RAMP_MOVING ne prožijo SSR1.
-//     RADAR_MOTION: anti-forget timeri, parking assist in vehicle_recog
-//     delujejo 24/7. Samo SSR1 prižig je filtriran z dan/noč.
-//     Ročni gumbi (BUTTON_SSR) vedno delujejo za vse SSR.
-//     Dan/noč filter = SAMO v on_radar_motion(), on_ramp_up(),
-//     on_ramp_moving() za TRIGGER_ON_AUTO enqueue odločitev.
-//
-// [8] Fill smer — zaenkrat fiksen (0→89):
-//     TODO: implementirati različne smeri glede na trigger vir.
-//     (raluc→levo-desno, radar ch0→levo, radar ch3→desno, itd.)
-//     Odloženo ker fizična postavitev LED matrike ni bila
-//     potrjena med razvojem tega modula.
-//
-// [9] SSR2_auto_night parameter:
-//     Config ima ssr2_auto_night bool. Ker je SSR2 del avtomatike
-//     skupaj s SSR1, ta parameter določa ali SSR2 sledi SSR1
-//     ob avtomatskem prižigu (true) ali samo ročno (false).
-//     Privzeto: true (SSR2 vedno sledi SSR1 avtomatiki).
-//
-// [10] BUTTON_SSR payload indeksiranje:
-//     screen_main.cpp kreira gumbe z idx 0–3 (row*2+col).
-//     BUTTON_SSR payload = 0,1,2,3. light_logic doda +1
-//     → SSR indeks 1–4. Dokumentirano tukaj ker screen_main
-//     tega ne dokumentira eksplicitno.
+// SSR2 sledi SSR1 avtomatiki (config: ssr2_auto_night):
+//   true = SSR2 se vklopi po waveFill+SSR2_DELAY_MS, ugasne pred waveUnfill.
+//   false = SSR2 samo ročno.
 //
 // ============================================================
 
@@ -271,12 +226,9 @@ static void trigger_ssr1_auto(uint32_t fill_payload) {
     //   4. Če vklop NE uspe: počisti meta-podatke (rollback!)
     //      → naslednji TRIGGER_ON_AUTO bo spet poskusil
     //
-    // BUG FIX (2026-05): v prejšnji verziji se je s_ssr[1].on nastavil
-    //   PRED ssr_physical_on() klicem. Če je Wire1 timeout →
-    //   s_ssr[1].on = false ampak deadline_ms je nastavljen →
-    //   naslednji trigger gre v "reset timer" vejo namesto "prižgi" →
-    //   SSR1 nikoli ne gori. Popravek: nastavi deadline ŠELE po uspešnem
-    //   fizičnem vklopu. Ob napaki: rollback is_auto in deadline.
+    // deadline_ms se nastavi ŠELE po uspešnem fizičnem vklopu.
+    //   Če Wire1 timeout → rollback is_auto + deadline, ne ostane napola nastavljeno.
+    //   Brez tega: naslednji trigger gre v "reset timer" vejo namesto "prižgi".
     // ============================================================
 
     const Config cfg = config_get();
@@ -604,20 +556,14 @@ static void on_radar_motion(const Event& e) {
 
     _party_extend_or_suspend();
 
-    // Anti-forget reset — vsako gibanje podaljša SSR2/3/4 timerje.
-    // Deluje 24/7 ker so SSR2/3/4 neodvisni od noč/dan (dogovorjeno 2026-05).
+    // Anti-forget reset — vsako gibanje podaljša SSR2/3/4 timerje (24/7, neodvisno od noč/dan).
     for (uint8_t i = 2; i <= 4; i++) {
         s_ssr[i].last_motion_ms = now;
     }
 
-    // 2026-05-13: Ura na signalni LED verigi naj deluje 24/7 (tudi ponoči)
-    // Odstranjena omejitev "samo podnevi" 
-    // if (!s_is_night) {
-        signal_led_clock_show();     // vedno pokličemo, ne glede na svetlobo / BH1750
-    // }
+        signal_led_clock_show();     // 24/7, ne glede na dan/noč
 
-    // TODO: parking_assist feed — deluje 24/7
-    // TODO: vehicle_recog feed — deluje 24/7
+    // parking_assist in vehicle_recog feed sta klicana 24/7 (F5 v to_do)
 
     // -------------------------------------------------------
     // DAN/NOČ FILTER — samo za SSR1 prižig
@@ -983,7 +929,6 @@ void light_logic_tick() {
                         s_ssr[idx].disabled = true;
                         LLI("SSR%d: DISABLED — ignores all triggers", idx);
                     }
-                    EventBus::publish(EventType::SSR_STATE_CHANGED, idx);
                     break;
                 }
 
@@ -1057,8 +1002,7 @@ void light_logic_tick() {
     // ----------------------------------------------------------
     // 5. SSR3/4 anti-forget timer
     // ----------------------------------------------------------
-    // Deluje ne glede na dan/noč (dogovorjeno 2026-05).
-    // Referenčni čas: zadnje zaznano gibanje NA KATEREMKOLI radarskem kanalu.
+    // Deluje 24/7. Referenčni čas: zadnje zaznano gibanje NA KATEREMKOLI radarskem kanalu.
     // Če ni gibanja v antiforgot_ssr3_min minutah → izklop.
 
     uint32_t af3_ms = (uint32_t)cfg.antiforgot_ssr3_min * 60UL * 1000UL;

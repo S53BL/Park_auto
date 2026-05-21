@@ -731,7 +731,7 @@ void screen_service_set_signal(uint8_t idx, const char* text, bool ok) {
     // Kliče se iz sensorTask prek EventBus callback — NI thread-safe za LVGL!
     // Implementiraj prek pending mutex ko bo hardware priključen.
     // Za zdaj: direkten LVGL klic je varen SAMO če smo v lvglTask.
-    // TODO: dodaj v pending sistem ko pride hardware (enako kot lux/tof).
+    // ⚠ Ni thread-safe — direkten LVGL klic iz eventBusTask. Premakni na pending/mutex (F6 v to_do).
     if (!s_created || idx >= 5) return;
     lv_label_set_text(s_sig[idx].lbl_val, text);
     lv_obj_set_style_text_color(s_sig[idx].lbl_val,

@@ -207,7 +207,7 @@ struct Config {
     // 0=izklopljeno, 1=vsak frame. Default=3 (300ms latenca)
     uint8_t  radar_persistence_n;   // default: 3, min: 0, max: 10
 
-    // Radar polling interval in overflow prag (hal_radar v2.0)
+    // Radar polling interval in overflow prag
     uint32_t radar_poll_interval_ms;      // default: 50, min: 10, max: 100
     uint32_t radar_max_consec_overflows;  // default: 10, min: 1,  max: 100
 
